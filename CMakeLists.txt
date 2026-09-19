@@ -17,6 +17,23 @@ set(CMAKE_AUTOUIC ON)
 # ── 依赖查找 ─────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Charts Sql)
 
+# ── libcurl 解析（应用层与引擎自测共用，解析一次）────────
+# 优先 find_package(CURL)（vcpkg），否则回退 vendored third_party/libcurl。
+# 结果写入 CURL_FOUND / LIBCURL_INC / LIBCURL_LIB，供下方目标复用。
+if(WIN32)
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        message(STATUS "network: 使用 vcpkg 提供的 libcurl")
+    else()
+        set(LIBCURL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libcurl")
+        find_path(LIBCURL_INC NAMES curl/curl.h REQUIRED
+                  PATHS "${LIBCURL_DIR}/include" NO_DEFAULT_PATH)
+        find_library(LIBCURL_LIB NAMES libcurl libcurl.dll.a REQUIRED
+                     PATHS "${LIBCURL_DIR}/lib" NO_DEFAULT_PATH)
+        message(STATUS "network: 使用 vendored libcurl @ ${LIBCURL_DIR}")
+    endif()
+endif()
+
 # NOTE: 网络层已切换到 libcurl（src/core/network_curl.c，API 与 network.h 完全一致，
 #       download_core.c 等调用方无需改动）。libcurl 由项目第三方库 third_party/libcurl
 #       （curl 8.22.0 官方 MinGW-w64 构建）提供，或由 vcpkg 提供（vcpkg.json 已声明依赖）。
@@ -45,14 +62,10 @@ set(STORAGE_SOURCES
 
 set(GUI_SOURCES
     src/gui/main_window.cpp
-    src/gui/task_list_model.cpp
-    src/gui/category_filter_proxy.cpp
     src/gui/progress_delegate.cpp
     src/gui/sidebar_panel.cpp
     src/gui/app_icons.cpp
     src/gui/app_icons.h
-    src/gui/task_group_proxy.cpp
-    src/gui/task_group_proxy.h
     src/gui/new_task_dialog.cpp
     src/gui/settings_dialog.cpp
     src/gui/task_detail_dialog.cpp
@@ -60,12 +73,26 @@ set(GUI_SOURCES
     src/gui/batch_import_dialog.cpp
     src/gui/schedule_dialog.cpp
     src/gui/hash_verify_dialog.cpp
-    src/gui/glass_effect.cpp
     src/gui/queue_manager.cpp
     src/gui/queue_manager_dialog.cpp
     src/gui/site_explorer_dialog.cpp
-    src/gui/web_server.cpp
     src/gui/history_dialog.cpp
+)
+
+# 数据模型层（L1/L2 之间的 Qt 模型与代理）：任务列表模型 + 分类/分组代理
+set(MODEL_SOURCES
+    src/model/task_list_model.cpp
+    src/model/task_list_model.h
+    src/model/category_filter_proxy.cpp
+    src/model/category_filter_proxy.h
+    src/model/task_group_proxy.cpp
+    src/model/task_group_proxy.h
+)
+
+# Web 远程管理层（控制面）：内置 HTTP 服务，供浏览器扩展与远程管理
+set(WEB_SOURCES
+    src/web/web_server.cpp
+    src/web/web_server.h
 )
 
 set(CORE_WRAPPER_SOURCES
@@ -95,38 +122,31 @@ set(UTILS_SOURCES
     src/utils/app_paths.cpp
 )
 
-# ── 可执行目标 ───────────────────────────────────
-# 注意：logger 为 header-only（inline），无需 .cpp；qss 通过 resources.qrc 打包
-# WIN32_EXECUTABLE：GUI 子系统，双击不再闪控制台黑窗（#44 修复）。
-# CLI 模式（--cli）仍可用：main.cpp 在 --cli 下调用 AllocConsole 分配控制台并
-# 重定向标准流；单实例 GUI 已运行时 --cli 命令经 IPC 转发给 GUI。
-qt_add_executable(idm-next WIN32
-    src/main.cpp
+# ── 共享静态库：聚合应用层全部源码，供 idm-next 与 ui_snapshot 复用 ──
+# 消除两个可执行目标之间重复的源列表；仅入口（main.cpp / ui_snapshot.cpp）
+# 与资源 qrc 留在各可执行目标，确保 Qt 资源在静态库外被正确初始化。
+set(IDM_APP_SOURCES
     ${CORE_SOURCES}
     ${STORAGE_SOURCES}
     ${GUI_SOURCES}
+    ${MODEL_SOURCES}
+    ${WEB_SOURCES}
     ${CORE_WRAPPER_SOURCES}
     ${PROTOCOL_SOURCES}
-    ${CLI_SOURCES}
     ${UTILS_SOURCES}
-    resources/resources.qrc
 )
-set_target_properties(idm-next PROPERTIES
-    QT_WINDOWS_VERSION_MAJOR 0
-    QT_WINDOWS_VERSION_MINOR 1
-    QT_WINDOWS_VERSION_PATCH 0
-)
-
-target_include_directories(idm-next PRIVATE
+add_library(idm_app_lib STATIC ${IDM_APP_SOURCES})
+target_include_directories(idm_app_lib PUBLIC
     src/core
     src/storage
     src/gui
+    src/model
+    src/web
     src/protocols
     src/cli
     src/utils
 )
-
-target_link_libraries(idm-next PRIVATE
+target_link_libraries(idm_app_lib PUBLIC
     Qt6::Core
     Qt6::Widgets
     Qt6::Network
@@ -134,36 +154,35 @@ target_link_libraries(idm-next PRIVATE
     Qt6::Sql
 )
 
-# Windows 下网络层链接 libcurl：优先 vcpkg 的 CURL::libcurl，否则 vendored third_party/libcurl
+# Windows 平台专用库（libcurl / DWM / 多媒体）：应用层源码直接使用，链接到
+# idm_app_lib(PUBLIC) 由可执行目标继承；运行期 DLL 拷贝见文件末尾。
 if(WIN32)
-    find_package(CURL QUIET)
     if(CURL_FOUND)
-        target_link_libraries(idm-next PRIVATE CURL::libcurl)
-        message(STATUS "network: 使用 vcpkg 提供的 libcurl")
+        target_link_libraries(idm_app_lib PUBLIC CURL::libcurl)
     else()
-        set(LIBCURL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libcurl")
-        find_path(LIBCURL_INC NAMES curl/curl.h REQUIRED
-                  PATHS "${LIBCURL_DIR}/include" NO_DEFAULT_PATH)
-        find_library(LIBCURL_LIB NAMES libcurl libcurl.dll.a REQUIRED
-                     PATHS "${LIBCURL_DIR}/lib" NO_DEFAULT_PATH)
-        target_include_directories(idm-next PRIVATE ${LIBCURL_INC})
-        target_link_libraries(idm-next PRIVATE ${LIBCURL_LIB})
-        message(STATUS "network: 使用 vendored libcurl @ ${LIBCURL_DIR}")
-        # POST_BUILD：拷贝 libcurl 运行期 DLL 与 CA 证书包到 exe 目录
-        # （curl-for-win 静态链接了 nghttp2/libressl/zlibng/zstd/brotli，libcurl.dll 无独立依赖 DLL；
-        #  curl-ca-bundle.crt 提供 HTTPS 证书校验所需的 CA 库，确保 ssl_verify=1 时校验成功）
-        foreach(_f libcurl-x64.dll curl-ca-bundle.crt)
-            if(EXISTS "${LIBCURL_DIR}/bin/${_f}")
-                add_custom_command(TARGET idm-next POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                            "${LIBCURL_DIR}/bin/${_f}" "$<TARGET_FILE_DIR:idm-next>/"
-                    COMMENT "拷贝 libcurl 运行期文件: ${_f}")
-            endif()
-        endforeach()
+        target_include_directories(idm_app_lib PRIVATE ${LIBCURL_INC})
+        target_link_libraries(idm_app_lib PUBLIC ${LIBCURL_LIB})
     endif()
-    # 玻璃拟态 DWM 模糊需要 dwmapi.lib；完成提示音 PlaySound 需要 winmm.lib
-    target_link_libraries(idm-next PRIVATE dwmapi winmm)
+    target_link_libraries(idm_app_lib PUBLIC dwmapi winmm)
 endif()
+
+# ── 可执行目标 ───────────────────────────────────
+# 注意：logger 为 header-only（inline），无需 .cpp；qss 通过 resources.qrc 打包
+# WIN32_EXECUTABLE：GUI 子系统，双击不再闪控制台黑窗（#44 修复）。
+# CLI 模式（--cli）仍可用：main.cpp 在 --cli 下调用 AllocConsole 分配控制台并
+# 重定向标准流；单实例 GUI 已运行时 --cli 命令经 IPC 转发给 GUI。
+qt_add_executable(idm-next WIN32
+    src/main.cpp
+    ${CLI_SOURCES}
+    resources/resources.qrc
+)
+set_target_properties(idm-next PROPERTIES
+    QT_WINDOWS_VERSION_MAJOR 0
+    QT_WINDOWS_VERSION_MINOR 1
+    QT_WINDOWS_VERSION_PATCH 0
+)
+# include 目录与 Qt 链接由 idm_app_lib(PUBLIC) 继承；平台专用库亦由 idm_app_lib 链接
+target_link_libraries(idm-next PRIVATE idm_app_lib)
 
 # ── 原生 Native Messaging Host（浏览器扩展桥接）──────────────
 # 仅依赖 Qt6::Core；设为 Win32 子系统（无控制台黑窗），
@@ -200,27 +219,9 @@ option(IDM_BUILD_UI_SNAPSHOT "Build offscreen UI snapshot tool" OFF)
 if(IDM_BUILD_UI_SNAPSHOT)
     qt_add_executable(ui_snapshot
         tools/ui_snapshot.cpp
-        ${CORE_SOURCES}
-        ${STORAGE_SOURCES}
-        ${GUI_SOURCES}
-        ${CORE_WRAPPER_SOURCES}
-        ${PROTOCOL_SOURCES}
-        ${UTILS_SOURCES}
         resources/resources.qrc
     )
-    target_include_directories(ui_snapshot PRIVATE
-        src/core src/storage src/gui src/protocols src/utils)
-    target_link_libraries(ui_snapshot PRIVATE
-        Qt6::Core Qt6::Widgets Qt6::Network Qt6::Charts Qt6::Sql)
-    if(WIN32)
-        if(CURL_FOUND)
-            target_link_libraries(ui_snapshot PRIVATE CURL::libcurl)
-        else()
-            target_include_directories(ui_snapshot PRIVATE ${LIBCURL_INC})
-            target_link_libraries(ui_snapshot PRIVATE ${LIBCURL_LIB})
-        endif()
-        target_link_libraries(ui_snapshot PRIVATE dwmapi winmm)
-    endif()
+    target_link_libraries(ui_snapshot PRIVATE idm_app_lib)
 endif()
 
 # ── (可选) 下载引擎自测：验证「设置 → 引擎」链路端到端真的生效（默认不构建） ──
@@ -241,4 +242,19 @@ if(IDM_BUILD_ENGINE_SELFTEST)
         endif()
         target_link_libraries(engine_selftest PRIVATE winmm)
     endif()
+endif()
+
+# ── 运行期 DLL 拷贝（vendored libcurl）──────────────
+# idm_app_lib 已 PUBLIC 链接 libcurl，故运行期 DLL 需落到各可执行目标目录旁。
+if(WIN32 AND NOT CURL_FOUND)
+    foreach(_t idm-next ui_snapshot)
+        foreach(_f libcurl-x64.dll curl-ca-bundle.crt)
+            if(EXISTS "${LIBCURL_DIR}/bin/${_f}")
+                add_custom_command(TARGET ${_t} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${LIBCURL_DIR}/bin/${_f}" "$<TARGET_FILE_DIR:${_t}>/"
+                    COMMENT "拷贝 libcurl 运行期文件: ${_f} -> ${_t}")
+            endif()
+        endforeach()
+    endforeach()
 endif()
