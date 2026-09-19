@@ -95,6 +95,13 @@ set(WEB_SOURCES
     src/web/web_server.h
 )
 
+# L2 应用编排层：跨 UI 与引擎的「行为组件」（自动关机/休眠等），
+# 通过注入回调解耦 MainWindow 内部状态，便于独立测试与复用。
+set(APP_SOURCES
+    src/app/auto_power.cpp
+    src/app/auto_power.h
+)
+
 set(CORE_WRAPPER_SOURCES
     src/core/download_manager.cpp
 )
@@ -131,6 +138,7 @@ set(IDM_APP_SOURCES
     ${GUI_SOURCES}
     ${MODEL_SOURCES}
     ${WEB_SOURCES}
+    ${APP_SOURCES}
     ${CORE_WRAPPER_SOURCES}
     ${PROTOCOL_SOURCES}
     ${UTILS_SOURCES}
@@ -142,6 +150,7 @@ target_include_directories(idm_app_lib PUBLIC
     src/gui
     src/model
     src/web
+    src/app
     src/protocols
     src/cli
     src/utils

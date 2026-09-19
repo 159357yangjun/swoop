@@ -29,6 +29,7 @@
 #include "network.h"   /* network_set_http2_enabled：启动时把持久设置注入 WinHTTP 引擎 */
 #include "history_store.h"
 #include "logger.h"
+#include "auto_power.h"   // L2：下载完成自动关机/休眠（从本文件抽取）
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -99,57 +100,7 @@
 #  include <mmsystem.h>
 #endif
 
-// ── Windows 电源控制（关机 / 休眠）──────────────────────────────
-#ifdef Q_OS_WIN
-namespace {
-// 请求 SE_SHUTDOWN_NAME 特权，否则普通进程调用 ExitWindowsEx 会失败
-bool enableShutdownPrivilege()
-{
-    HANDLE hToken = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(),
-                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
-        return false;
-    TOKEN_PRIVILEGES tkp;
-    tkp.PrivilegeCount = 1;
-    tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    if (!LookupPrivilegeValue(nullptr, SE_SHUTDOWN_NAME, &tkp.Privileges[0].Luid)) {
-        CloseHandle(hToken);
-        return false;
-    }
-    AdjustTokenPrivileges(hToken, FALSE, &tkp, 0, nullptr, nullptr);
-    bool ok = (GetLastError() == ERROR_SUCCESS);
-    CloseHandle(hToken);
-    return ok;
-}
-
-void windowsShutdown()
-{
-    enableShutdownPrivilege();
-    // EWX_SHUTDOWN：执行完整关机流程；EWX_FORCE：强关无响应的应用
-    ExitWindowsEx(EWX_SHUTDOWN | EWX_FORCE, 0);
-}
-
-void windowsHibernate()
-{
-    // SetSuspendState 位于 PowrProf.dll，运行时动态解析以兼容不同工具链
-    // 签名：BOOLEAN SetSuspendState(BOOLEAN Hibernate, BOOLEAN ForceCritical, BOOLEAN DisableWakeEvent)
-    typedef BOOL (WINAPI *PFN_SetSuspendState)(BOOL, BOOL, BOOL);
-    QLibrary powr(QStringLiteral("PowrProf"));
-    if (powr.load()) {
-        auto fn = reinterpret_cast<PFN_SetSuspendState>(powr.resolve("SetSuspendState"));
-        if (fn) {
-            fn(TRUE, TRUE, FALSE);  // Hibernate=true, Force=true
-            return;
-        }
-    }
-    // 回退：调用 rundll32 触发休眠
-    QProcess::execute(QStringLiteral("rundll32.exe"),
-                      QStringList() << QStringLiteral("powrprof.dll,SetSuspendState")
-                                    << QStringLiteral("1") << QStringLiteral("0")
-                                    << QStringLiteral("0"));
-}
-} // namespace
-#endif
+// ── Windows 电源控制（关机 / 休眠）已迁移至 src/app/auto_power.cpp ──
 
 // ── 空状态插画（无任务时覆盖在任务列表视口上的引导层）──────────────
 // 鼠标透明，不拦截拖放/点击；随视口尺寸自适应，由 updateEmptyState 控制显隐。
@@ -212,79 +163,8 @@ private:
     QString m_subtitle;
 };
 
-// ── 下载完成自动关机/休眠：可取消倒计时对话框（非模态）──────────────
-// 倒计时结束触发 onTrigger 回调（执行关机/休眠）；点击“取消”触发 onCancel。
-// 不使用 Q_OBJECT（信号用 std::function 回调替代），避免 AUTOMOC 依赖。
-class AutoPowerDialog : public QDialog {
-public:
-    using Callback = std::function<void()>;
-
-    AutoPowerDialog(const QString& actionText, int seconds,
-                    Callback onTrigger, Callback onCancel, QWidget* parent = nullptr)
-        : QDialog(parent)
-        , m_actionText(actionText)
-        , m_secs(seconds)
-        , m_onTrigger(std::move(onTrigger))
-        , m_onCancel(std::move(onCancel))
-    {
-        setWindowTitle(QStringLiteral("下载完成 - 即将%1").arg(actionText));
-        setFixedSize(360, 150);
-        setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
-
-        auto* v = new QVBoxLayout(this);
-        m_label = new QLabel(this);
-        m_label->setWordWrap(true);
-        m_label->setAlignment(Qt::AlignCenter);
-        v->addWidget(m_label);
-
-        auto* btn = new QPushButton(QStringLiteral("取消"), this);
-        v->addWidget(btn);
-        connect(btn, &QPushButton::clicked, this, &AutoPowerDialog::doCancel);
-
-        updateLabel();
-
-        m_timer = new QTimer(this);
-        m_timer->setInterval(1000);
-        connect(m_timer, &QTimer::timeout, this, [this]() {
-            --m_secs;
-            if (m_secs <= 0) {
-                m_timer->stop();
-                if (m_onTrigger) m_onTrigger();
-                close();
-            } else {
-                updateLabel();
-            }
-        });
-        m_timer->start();
-    }
-
-    ~AutoPowerDialog() override { if (m_timer) m_timer->stop(); }
-
-    void doCancel() {
-        if (m_timer) m_timer->stop();
-        if (m_onCancel) m_onCancel();
-        close();
-    }
-
-protected:
-    void closeEvent(QCloseEvent* e) override {
-        if (m_timer) m_timer->stop();
-        QDialog::closeEvent(e);
-    }
-
-private:
-    void updateLabel() {
-        m_label->setText(QStringLiteral("所有下载已完成，将在 %1 秒后%2。\n点击“取消”可中止。")
-                             .arg(m_secs).arg(m_actionText));
-    }
-
-    QLabel*   m_label = nullptr;
-    QTimer*   m_timer = nullptr;
-    QString   m_actionText;
-    int       m_secs = 0;
-    Callback  m_onTrigger;
-    Callback  m_onCancel;
-};
+// ── 下载完成自动关机/休眠：可取消倒计时对话框（AutoPowerDialog）已迁移至
+//    src/app/auto_power.cpp（随 AutoPowerController 一并抽取）──────────────
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -409,6 +289,25 @@ MainWindow::MainWindow(QWidget* parent)
     m_scheduleTimer = new QTimer(this);
     connect(m_scheduleTimer, &QTimer::timeout, this, &MainWindow::onCheckScheduledTasks);
     m_scheduleTimer->start(5000);
+
+    // L2 组件：下载完成自动关机/休眠（解耦 MainWindow 内部状态，注入查询/保存回调）
+    m_autoPower = new AutoPowerController(&m_settings, this);
+    m_autoPower->setHasActiveOrPendingCallback([this]() {
+        // 还有正在下载（state==1）或排队等待（state==0）的任务
+        for (auto it = m_states.begin(); it != m_states.end(); ++it)
+            if (it.value() == 1 || it.value() == 0) return true;
+        // 还有未到期的定时任务
+        if (!m_scheduledTasks.isEmpty()) return true;
+        return false;
+    });
+    m_autoPower->setHasCompletedOrFailedCallback([this]() {
+        // 至少存在一个已完成（3）或失败（4）的任务，避免空列表误触发
+        for (auto it = m_states.begin(); it != m_states.end(); ++it)
+            if (it.value() == 3 || it.value() == 4) return true;
+        return false;
+    });
+    m_autoPower->setSaveStateCallback([this](const QString& p) { m_manager->saveState(p); });
+    m_autoPower->setStatePathProvider([this]() { return m_statePath; });
 }
 
 MainWindow::~MainWindow()
@@ -2798,86 +2697,14 @@ void MainWindow::playCompletionChime()
 #endif
 }
 
-// ── 下载完成自动关机/休眠 ──────────────────────────────
-bool MainWindow::hasActiveOrPendingTasks() const
-{
-    // 还有正在下载（state==1）或排队等待（state==0）的任务
-    for (auto it = m_states.begin(); it != m_states.end(); ++it)
-        if (it.value() == 1 || it.value() == 0)
-            return true;
-    // 还有未到期的定时任务
-    if (!m_scheduledTasks.isEmpty())
-        return true;
-    return false;
-}
-
-bool MainWindow::hasCompletedOrFailed() const
-{
-    // 至少存在一个已完成（3）或失败（4）的任务，避免空列表误触发
-    for (auto it = m_states.begin(); it != m_states.end(); ++it)
-        if (it.value() == 3 || it.value() == 4)
-            return true;
-    return false;
-}
-
+// ── 下载完成自动关机/休眠（转调 AutoPowerController，见 src/app/auto_power.*）──
 void MainWindow::cancelPendingAutoPower()
 {
-    if (m_autoPowerDlg) {
-        m_autoPowerDlg->close();
-        m_autoPowerDlg->deleteLater();
-        m_autoPowerDlg = nullptr;
-    }
-    m_autoPowerPending = false;
+    if (m_autoPower) m_autoPower->cancelPending();
 }
 
 void MainWindow::maybeAutoPowerAction()
 {
-    if (m_autoPowerPending)
-        return;  // 已经在倒计时，避免重复弹窗
-    if (m_settings.shutdownAction() == QStringLiteral("none"))
-        return;  // 未开启此功能
-    if (hasActiveOrPendingTasks())
-        return;  // 仍有下载中/排队/未到期定时任务
-    if (!hasCompletedOrFailed())
-        return;  // 没有任何已完成的下载，避免启动即触发
-
-    m_autoPowerPending = true;
-    QString action = m_settings.shutdownAction();
-    QString actionText = (action == QStringLiteral("shutdown"))
-                             ? QStringLiteral("关机") : QStringLiteral("休眠");
-    int grace = qBound(10, m_settings.shutdownGraceSec(), 600);
-
-    auto* dlg = new AutoPowerDialog(
-        actionText, grace,
-        [this]() {                       // 倒计时结束 → 执行关机/休眠
-            m_autoPowerPending = false;
-            m_autoPowerDlg = nullptr;
-            performAutoPowerAction();
-        },
-        [this]() {                       // 用户取消
-            m_autoPowerPending = false;
-            m_autoPowerDlg = nullptr;
-            Log::info(QStringLiteral("已取消下载完成后的关机/休眠"));
-        },
-        this);
-    m_autoPowerDlg = dlg;
-    dlg->show();
-}
-
-void MainWindow::performAutoPowerAction()
-{
-    // 关机/休眠前先保存任务状态，避免下次启动丢失进度
-    if (!m_statePath.isEmpty())
-        m_manager->saveState(m_statePath);
-
-#ifdef Q_OS_WIN
-    QString action = m_settings.shutdownAction();
-    if (action == QStringLiteral("shutdown"))
-        windowsShutdown();
-    else if (action == QStringLiteral("sleep"))
-        windowsHibernate();
-#else
-    Log::info(QStringLiteral("（非 Windows 平台）跳过电源动作"));
-#endif
+    if (m_autoPower) m_autoPower->maybeTrigger();
 }
 

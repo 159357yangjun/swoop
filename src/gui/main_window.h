@@ -35,6 +35,7 @@ class QTimer;
 class QLocalServer;
 class QDialog;
 class WebServer;
+class AutoPowerController;
 class EmptyStateOverlay;
 class SidebarPanel;
 
@@ -118,12 +119,9 @@ private slots:
     void onTaskCompleted(int taskId, bool success, const QString& error);
     void onTaskStateChanged(int taskId, int state);
 
-    // 下载完成自动关机/休眠
+    // 下载完成自动关机/休眠（转调 AutoPowerController，见 src/app/auto_power.*）
     void maybeAutoPowerAction();     // 检测是否满足触发条件，满足则弹出倒计时
-    void performAutoPowerAction();   // 执行关机/休眠
     void cancelPendingAutoPower();   // 中止待定的关机/休眠（如有新任务开始）
-    bool hasActiveOrPendingTasks() const;  // 仍有下载中/排队/未到期定时任务
-    bool hasCompletedOrFailed() const;     // 至少存在一个已完成/失败任务
 
     // 队列调度与任务右键菜单
     void onQueueScheduler();
@@ -253,9 +251,8 @@ private:
     // 空状态插画
     EmptyStateOverlay*   m_emptyOverlay = nullptr;
 
-    // 下载完成自动关机/休眠
-    QDialog*    m_autoPowerDlg     = nullptr;  // 倒计时对话框（非模态）
-    bool        m_autoPowerPending = false;    // 是否已弹出倒计时待定
+    // 下载完成自动关机/休眠（L2 组件，状态与倒计时对话框由其内部持有）
+    AutoPowerController* m_autoPower = nullptr;
 
     // 视频下载后端（yt-dlp）：taskId → VideoDownloader 实例
     // 视频/HLS/YouTube 等流媒体由 yt-dlp 拉取，而非分段 HTTP 引擎
