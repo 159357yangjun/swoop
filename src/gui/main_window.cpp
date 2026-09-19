@@ -33,6 +33,7 @@
 #include "ipc_server.h"   // L2：IPC 单实例通信（从本文件抽取）
 #include "schedule_service.h"   // L2：定时下载持久化与触发（从本文件抽取）
 #include "tray_controller.h"    // L2：系统托盘（图标/菜单/双击恢复）（从本文件抽取）
+#include "queue_scheduler.h"    // L2：队列调度器（队列并发 + 全局上限）（从本文件抽取）
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -199,10 +200,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_trayController->syncTraffic(m_settings.trafficMode());
     m_trayIcon = m_trayController->trayIcon();
 
-    // 队列调度器：每 1 秒检查各队列并发数，启动排队中的任务
-    m_queueTimer = new QTimer(this);
-    connect(m_queueTimer, &QTimer::timeout, this, &MainWindow::onQueueScheduler);
-    m_queueTimer->start(1000);
+    // 队列调度器（L2 组件）：每 1 秒检查各队列并发数 + 全局上限，启动排队中的任务。
+    // 只读依赖经提供器注入（队列表 / 任务表 / 同时下载上限），启动动作经回调。
+    m_queueScheduler = new QueueScheduler(this);
+    m_queueScheduler->setQueuesProvider([this] { return m_queueMgr->queues(); });
+    m_queueScheduler->setTasksProvider([this] { return m_taskModel->tasks(); });
+    m_queueScheduler->setMaxConcurrentProvider([this] { return m_settings.maxConcurrent(); });
+    m_queueScheduler->setStartTaskCallback([this](int id) { startTaskById(id); });
+    m_queueScheduler->start(1000);
 
     // 启动 IPC server（让浏览器扩展/CLI 转发下载请求到正在运行的 GUI）
     // L2 组件：解耦 MainWindow 内部状态，注入任务添加与任务数查询回调
@@ -1805,7 +1810,7 @@ void MainWindow::enqueueUrl(const QString& url)
 }
 
 // ── 统一的新增任务入口 ──────────────────────────────
-// queue 为空：立即开始下载；否则加入指定队列，由 onQueueScheduler 调度启动
+// queue 为空：立即开始下载；否则加入指定队列，由 QueueScheduler 调度启动
 int MainWindow::internalAddTask(const QString& url, const QString& dir, const QString& name,
                                 int threads, const QString& queue, const QString& format,
                                 bool archiveByType)
@@ -1856,8 +1861,8 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
         row.lastConnection = QDateTime::currentDateTime();
         row.queue     = queue;
         // 无队列才立即开始；且无队列同样受「同时下载的任务数」全局上限约束——
-        // 满额时留在 state 0，由 onQueueScheduler 有空位再自动拉起（与有队列的任务一致）。
-        const bool startNow = queue.isEmpty() && hasFreeDownloadSlot();
+        // 满额时留在 state 0，由 QueueScheduler 有空位再自动拉起（与有队列的任务一致）。
+        const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
         row.state     = startNow ? 1 : 0;
         row.statusText = TaskListModel::stateText(row.state);
         m_taskModel->addTask(row);
@@ -1876,8 +1881,8 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
             td->start(req);
             cancelPendingAutoPower();
         } else {
-            m_pendingStream[id] = req;   // 交给 onQueueScheduler 延迟启动
-            if (queue.isEmpty()) m_deferredByCap.insert(id);   // 等全局并发空位
+            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
+            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
         }
 
         syncStatus();
@@ -1908,8 +1913,8 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
         row.lastConnection = QDateTime::currentDateTime();
         row.queue     = queue;
         // 无队列才立即开始；且无队列同样受「同时下载的任务数」全局上限约束——
-        // 满额时留在 state 0，由 onQueueScheduler 有空位再自动拉起（与有队列的任务一致）。
-        const bool startNow = queue.isEmpty() && hasFreeDownloadSlot();
+        // 满额时留在 state 0，由 QueueScheduler 有空位再自动拉起（与有队列的任务一致）。
+        const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
         row.state     = startNow ? 1 : 0;
         row.statusText = TaskListModel::stateText(row.state);
         m_taskModel->addTask(row);
@@ -1930,8 +1935,8 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
             hd->start(req);
             cancelPendingAutoPower();
         } else {
-            m_pendingStream[id] = req;   // 交给 onQueueScheduler 延迟启动
-            if (queue.isEmpty()) m_deferredByCap.insert(id);   // 等全局并发空位
+            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
+            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
         }
 
         syncStatus();
@@ -1965,8 +1970,8 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
         row.lastConnection = QDateTime::currentDateTime();
         row.queue     = queue;
         // 无队列才立即开始；且无队列同样受「同时下载的任务数」全局上限约束——
-        // 满额时留在 state 0，由 onQueueScheduler 有空位再自动拉起（与有队列的任务一致）。
-        const bool startNow = queue.isEmpty() && hasFreeDownloadSlot();
+        // 满额时留在 state 0，由 QueueScheduler 有空位再自动拉起（与有队列的任务一致）。
+        const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
         row.state     = startNow ? 1 : 0;
         row.statusText = TaskListModel::stateText(row.state);
         m_taskModel->addTask(row);
@@ -1987,8 +1992,8 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
             vd->start(req);
             cancelPendingAutoPower();
         } else {
-            m_pendingStream[id] = req;   // 交给 onQueueScheduler 延迟启动
-            if (queue.isEmpty()) m_deferredByCap.insert(id);   // 等全局并发空位
+            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
+            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
         }
 
         syncStatus();
@@ -2013,13 +2018,13 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
     row.lastConnection = QDateTime::currentDateTime();
     row.queue          = queue;
     // 与媒体任务一致：无队列也受「同时下载的任务数」约束，满额则排队等待
-    const bool startNow = queue.isEmpty() && hasFreeDownloadSlot();
+    const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
     if (startNow) {
         m_manager->startTask(id);
         row.state = 1;  // 下载中
     } else {
         row.state = 0;  // 等待队列调度（已入队列，或已达同时下载上限）
-        if (queue.isEmpty()) m_deferredByCap.insert(id);   // 等全局并发空位
+        if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
     }
     row.statusText = TaskListModel::stateText(row.state);
     m_taskModel->addTask(row);
@@ -2036,7 +2041,7 @@ int MainWindow::internalAddTask(const QString& url, const QString& dir, const QS
 // ── 后端无关的下载控制：按 taskId 自动分派到 C 引擎或 yt-dlp 视频后端 ──
 void MainWindow::startTaskById(int id)
 {
-    m_deferredByCap.remove(id);  // 无论手动还是调度器放行，都算已经脱离等待
+    m_queueScheduler->clearDeferred(id);  // 无论手动还是调度器放行，都算已经脱离等待
     // 加入队列的媒体任务在添加时未立即启动，缓存了 DownloadRequest；
     // 此处由队列调度器放行后真正拉起后端（视频/HLS/BT）。
     if (m_pendingStream.contains(id)) {
@@ -2177,7 +2182,7 @@ void MainWindow::removeTaskById(int id)
     // 任务没了，定时/重复设置也要一起清掉，否则 ScheduleService 里会残留
     // 指向已删除 id 的条目（到期后 startTaskById 作用在不存在的任务上）。
     m_scheduleService->removeTaskSchedule(id);
-    m_deferredByCap.remove(id);  // 已被并发上限暂缓的任务删除后不必再等空位
+    m_queueScheduler->clearDeferred(id);  // 已被并发上限暂缓的任务删除后不必再等空位
     if (isHlsTask(id)) {
         if (auto* hd = m_hlsTasks.value(id)) {
             hd->cancel();
@@ -2257,89 +2262,13 @@ void MainWindow::onShowHistory()
     dlg.exec();
 }
 
-// ── 全局并发余量：设置页「同时下载的任务数」──
-bool MainWindow::hasFreeDownloadSlot() const
-{
-    if (!m_taskModel)
-        return true;
-    const int limit = qMax(1, m_settings.maxConcurrent());
-    int running = 0;
-    for (const auto& t : m_taskModel->tasks())
-        if (t.state == 1)
-            running++;
-    return running < limit;
-}
+// ── 全局并发余量与队列调度已迁移至 L2 组件 QueueScheduler ──
+//    （src/app/queue_scheduler.cpp：hasFreeSlot / onTick / 暂缓集合 markDeferred）
 
 // ── 定时/重复设置的持久化已迁移至 L2 组件 ScheduleService（src/app/schedule_service.cpp） ──
 
-// ── 队列调度器：各队列并发数超限时排队等待 ───────────
-void MainWindow::onQueueScheduler()
-{
-    if (!m_queueMgr)
-        return;
+// ── 队列调度器：各队列并发数超限时排队等待（已迁移至 QueueScheduler::onTick） ──
 
-    // 统计每个队列正在下载（state==1）的任务数
-    QMap<QString, int> running;
-    int totalRunning = 0;                 // 全任务口径（含无队列的手动任务）
-    const auto& tasks = m_taskModel->tasks();
-    for (const auto& t : tasks) {
-        if (t.state != 1)
-            continue;
-        totalRunning++;
-        if (!t.queue.isEmpty())
-            running[t.queue]++;
-    }
-
-    // 「同时下载的任务数」是全局上限：队列内并发再高也不能把总量顶穿，
-    // 否则设置页那一项就只是摆设（各队列各管各的，加起来无上限）。
-    const int globalLimit = qMax(1, m_settings.maxConcurrent());
-    int globalBudget = globalLimit - totalRunning;
-
-    QTime now = QTime::currentTime();
-    for (const auto& q : m_queueMgr->queues()) {
-        // 队列被停止：不启动该队列的任何新任务
-        if (!q.enabled)
-            continue;
-        // 计划时间窗口：仅在开始~停止之间才启动新下载
-        if (q.useSchedule && (now < q.startAt || now > q.stopAt))
-            continue;
-
-        int canStart = qMax(0, q.maxConcurrent - running.value(q.name, 0));
-        if (canStart > globalBudget)
-            canStart = globalBudget;
-        if (canStart <= 0)
-            continue;
-        // 收集该队列中等待（state==0）的任务，按加入顺序（IDM 默认按序下载）
-        QList<int> pending;
-        for (const auto& t : tasks)
-            if (t.queue == q.name && t.state == 0)
-                pending << t.id;
-        if (!q.ordered)
-            std::reverse(pending.begin(), pending.end());
-        for (int i = 0; i < pending.size() && i < canStart; ++i) {
-            startTaskById(pending[i]);
-            globalBudget--;
-        }
-    }
-
-    // 无队列（手动/浏览器直下）的等待任务：只放行「因并发上限被暂缓」的那些
-    // （m_deferredByCap），用户自己留着不开始的任务绝不擅自拉起。
-    if (globalBudget > 0 && !m_deferredByCap.isEmpty()) {
-        QList<int> waiting = m_deferredByCap.values();
-        std::sort(waiting.begin(), waiting.end());   // 按加入顺序（ID 递增）
-        for (int id : waiting) {
-            if (globalBudget <= 0)
-                break;
-            if (m_states.value(id, -1) != 0) {   // 已不是等待态（被删/被手动开始）
-                m_deferredByCap.remove(id);
-                continue;
-            }
-            startTaskById(id);
-            m_deferredByCap.remove(id);
-            globalBudget--;
-        }
-    }
-}
 
 // ── 任务列表右键菜单 ────────────────────────────────
 void MainWindow::onTaskContextMenu(const QPoint& pos)

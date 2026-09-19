@@ -106,6 +106,8 @@ set(APP_SOURCES
     src/app/schedule_service.h
     src/app/tray_controller.cpp
     src/app/tray_controller.h
+    src/app/queue_scheduler.cpp
+    src/app/queue_scheduler.h
 )
 
 set(CORE_WRAPPER_SOURCES

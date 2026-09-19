@@ -38,6 +38,7 @@ class AutoPowerController;
 class IpcServer;
 class ScheduleService;
 class TrayController;
+class QueueScheduler;
 class EmptyStateOverlay;
 class SidebarPanel;
 
@@ -124,8 +125,7 @@ private slots:
     void maybeAutoPowerAction();     // 检测是否满足触发条件，满足则弹出倒计时
     void cancelPendingAutoPower();   // 中止待定的关机/休眠（如有新任务开始）
 
-    // 队列调度与任务右键菜单
-    void onQueueScheduler();
+    // 任务右键菜单
     void onTaskContextMenu(const QPoint& pos);
 
     // 定时任务到期（由 ScheduleService::taskDue 转发，启动下载 + 托盘/状态栏反馈）
@@ -181,10 +181,6 @@ private:
     bool isTorrentTask(int id) const { return m_torrentTasks.contains(id); }
     bool isStreamTask(int id) const { return isVideoTask(id) || isHlsTask(id) || isTorrentTask(id); }
 
-    // 设置页「同时下载的任务数」的全局余量：正在下载（state==1）的任务数是否还没到上限。
-    // 超限的新任务不再立即启动，而是留在 state 0 由 onQueueScheduler 有空位时自动拉起。
-    bool hasFreeDownloadSlot() const;
-
     void applyZoom();            // 应用视图缩放（字体 + 工具栏图标）
     void applyNetworkProxy();    // 应用 Qt 应用级代理（站点抓取器用）
 
@@ -218,9 +214,9 @@ private:
 
     // 定时下载（L2 组件，见 src/app/schedule_service.*）
     ScheduleService*     m_scheduleService = nullptr;
-    // 因「同时下载的任务数」上限而暂缓启动的任务（只登记这些，不含用户自己留着
-    // 不开始的任务——那些必须等用户明确点开始，不能由调度器擅自拉起）。
-    QSet<int>            m_deferredByCap;
+
+    // 队列调度器（L2 组件，见 src/app/queue_scheduler.*）——拥有「被并发上限暂缓」的任务集合
+    QueueScheduler*      m_queueScheduler = nullptr;
 
     // IPC 单实例通信（L2 组件，见 src/app/ipc_server.*）
     IpcServer*            m_ipcServer = nullptr;
@@ -232,7 +228,6 @@ private:
     QueueManager*        m_queueMgr = nullptr;
     QStandardItemModel*  m_categoryModel = nullptr;  // 左侧树模型（含分类+队列）
     QStandardItem*       m_queueParentItem = nullptr; // “下载队列”父节点
-    QTimer*              m_queueTimer = nullptr;       // 队列调度器节拍
     QTimer*              m_statusTimer = nullptr;      // 状态栏低频刷新节拍（4Hz）
 
     qint64               m_speedEma = 0;               // 状态栏总速度 EMA 平滑值
@@ -259,7 +254,7 @@ private:
     int m_videoIdSeq = 2000000;   // 与 C 引擎任务 id 区分的编号偏移
 
     // 延迟启动的媒体任务：加入队列（非立即开始）时缓存其 DownloadRequest，
-    // 待队列调度器（onQueueScheduler）放行后由 startTaskById 真正拉起后端。
+    // 待队列调度器（QueueScheduler）放行后由 startTaskById 真正拉起后端。
     QMap<int, DownloadRequest> m_pendingStream;
 
     // 视图缩放

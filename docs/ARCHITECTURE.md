@@ -164,7 +164,9 @@
 2. ✅ `app/ipc_server`（QLocalServer 收发壳 + JSON 命令解析 + 响应）— 已完成 (2026-09-19)：`IpcServer` 注入 `addTask` 回调与 `taskCount` 提供器解耦 MainWindow；`addTaskFromUrl`/`enqueueUrl` 保留为公开 API 不动；engine 37/0 + 三探针 PASS + 走查 7/7 md5 一致
 3. ✅ `app/schedule_service`（定时持久化 + 触发 + 每日重复）— 已完成 (2026-09-19)：`ScheduleService` 拥有定时表与每日重复集合，注入 `taskExists` 提供器 + `taskDue` 信号解耦；`schedulesRestored` 信号沿用原「已恢复 N 条」状态栏提示；engine 37/0 + 三探针 PASS + 走查 A/B 构建对照渲染零差异（01/04/05 逐字节一致，02/03/03b/06 的差异被同构建两次运行的噪声完全复现）
 4. ✅ `app/tray_controller`（托盘图标 + 菜单 + 双击恢复）— 已完成 (2026-09-19)：`TrayController` 拥有图标 + 右键菜单 + 流量档位子菜单，菜单动作经 6 个回调解耦（显示/恢复/新建/全开始/全暂停/流量档位）；`m_trayIcon` 经 `trayIcon()` 交给 MainWindow 供各处 showMessage；engine 37/0 + 三探针 PASS + A/B 构建对照渲染零差异（01/04/05 逐字节一致）
-5. `app/task_controller`（任务 CRUD + 后端分派表 + 队列调度）
+5. 🔶 `app/task_controller`（任务 CRUD + 后端分派表 + 队列调度）—— 分两步：
+   - ✅ **先拆出 `app/queue_scheduler`（2026-09-19）**：`QueueScheduler` 拥有各队列并发/计划窗口调度 + 全局「同时下载的任务数」上限判定 + 暂缓集合（原 `m_deferredByCap`，改为 `markDeferred`/`clearDeferred`）；只读依赖经提供器注入（队列表/任务表/上限），启动动作经回调 → `startTaskById`；自带 1s 节拍（取代原 `m_queueTimer`）。engine 37/0 + **并发探针 PASS** + 定时/设置探针 PASS + A/B 构建渲染零差异。
+   - ⏳ 余下：任务 CRUD（`internalAddTask`）+ 后端分派表（video/hls/torrent/ftp 实例表）+ `startTaskById`/`removeTaskById`/`onStart|Pause|Remove*`。
 6. `app/notification_aggregator`（完成气泡聚合）
 - **验收**：每个抽取后 engine 37/0 + 三探针 PASS + 走查出图一致
 
