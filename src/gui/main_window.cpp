@@ -32,6 +32,7 @@
 #include "auto_power.h"   // L2：下载完成自动关机/休眠（从本文件抽取）
 #include "ipc_server.h"   // L2：IPC 单实例通信（从本文件抽取）
 #include "schedule_service.h"   // L2：定时下载持久化与触发（从本文件抽取）
+#include "tray_controller.h"    // L2：系统托盘（图标/菜单/双击恢复）（从本文件抽取）
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -183,7 +184,20 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_queueMgr, &QueueManager::queuesChanged, this, &MainWindow::rebuildQueueTree);
 
     setupCategoryTree();
-    setupTrayIcon();
+
+    // 系统托盘（L2 组件）：图标 + 右键菜单 + 双击恢复，菜单动作经回调解耦
+    m_trayController = new TrayController(this);
+    m_trayController->setShowWindowCallback([this] { showNormal(); });
+    m_trayController->setRestoreWindowCallback([this] {
+        showNormal(); raise(); activateWindow();   // 原 onTrayActivated 的三连
+    });
+    m_trayController->setNewTaskCallback([this] { onNewTask(); });
+    m_trayController->setStartAllCallback([this] { onStartAll(); });
+    m_trayController->setPauseAllCallback([this] { onPauseAll(); });
+    m_trayController->setTrafficModeCallback([this](int mode) { applyTrafficMode(mode); });
+    m_trayController->setup();
+    m_trayController->syncTraffic(m_settings.trafficMode());
+    m_trayIcon = m_trayController->trayIcon();
 
     // 队列调度器：每 1 秒检查各队列并发数，启动排队中的任务
     m_queueTimer = new QTimer(this);
@@ -582,7 +596,7 @@ void MainWindow::applyTrafficMode(int mode)
     Log::info(QStringLiteral("流量档位切换为「%1」(%2 KB/s)")
                   .arg(trafficModeName(mode)).arg(kbps));
     syncTrafficCombo();
-    syncTrafficMenu();
+    m_trayController->syncTraffic(m_settings.trafficMode());  // 同步托盘流量子菜单勾选
     updateTrafficIndicator();   // 同步任务列表「限速」列
 }
 
@@ -592,14 +606,6 @@ void MainWindow::syncTrafficCombo()
     int idx = m_trafficCombo->findData(m_settings.trafficMode());
     if (idx < 0) idx = m_trafficCombo->findData(-1);  // 落到“自定义”
     m_trafficCombo->setCurrentIndex(idx);
-}
-
-void MainWindow::syncTrafficMenu()
-{
-    if (!m_trafficMenu) return;
-    int cur = m_settings.trafficMode();
-    for (QAction* a : m_trafficMenu->actions())
-        a->setChecked(a->data().toInt() == cur);
 }
 
 // 把全局流量档位/限速状态文本同步到任务列表「限速」列（所有行共用该值）
@@ -757,61 +763,8 @@ void MainWindow::rebuildQueueTree()
     }
 }
 
-void MainWindow::setupTrayIcon()
-{
-    m_trayIcon = new QSystemTrayIcon(this);
-    // 使用系统默认图标（后续可替换为自定义图标）
-    m_trayIcon->setIcon(QIcon::fromTheme(QStringLiteral("download"),
-                          QApplication::windowIcon()));
-    m_trayIcon->setToolTip(QStringLiteral("IDM Next - 下载平台"));
-
-    // 右键菜单
-    auto* trayMenu = new QMenu(this);
-    trayMenu->addAction(QStringLiteral("显示主窗口"), this, &QWidget::showNormal);
-    trayMenu->addAction(QStringLiteral("新建任务..."), this, &MainWindow::onNewTask);
-    trayMenu->addSeparator();
-    trayMenu->addAction(QStringLiteral("全部开始"), this, &MainWindow::onStartAll);
-    trayMenu->addAction(QStringLiteral("全部暂停"), this, &MainWindow::onPauseAll);
-    trayMenu->addSeparator();
-
-    // 流量档位子菜单（对标 FDM 托盘流量使用模式）
-    auto* trafficMenu = trayMenu->addMenu(QStringLiteral("流量档位"));
-    auto* tg = new QActionGroup(trafficMenu);
-    tg->setExclusive(true);
-    static const QList<QPair<QString, int>> kTrafficModes {
-        {QStringLiteral("自动"), 0}, {QStringLiteral("轻量"), 1},
-        {QStringLiteral("中等"), 2}, {QStringLiteral("重量"), 3}
-    };
-    for (const auto& m : kTrafficModes) {
-        QAction* a = trafficMenu->addAction(m.first);
-        a->setData(m.second);
-        a->setCheckable(true);
-        tg->addAction(a);
-        connect(a, &QAction::triggered, this, [this, mode = m.second] { applyTrafficMode(mode); });
-    }
-    m_trafficMenu = trafficMenu;
-    syncTrafficMenu();
-
-    trayMenu->addSeparator();
-    trayMenu->addAction(QStringLiteral("退出"), qApp, &QApplication::quit);
-    m_trayIcon->setContextMenu(trayMenu);
-
-    // 双击托盘图标恢复窗口
-    connect(m_trayIcon, &QSystemTrayIcon::activated,
-            this, [this](QSystemTrayIcon::ActivationReason reason) {
-        if (reason == QSystemTrayIcon::DoubleClick)
-            onTrayActivated();
-    });
-
-    m_trayIcon->show();
-}
-
-void MainWindow::onTrayActivated()
-{
-    showNormal();
-    raise();
-    activateWindow();
-}
+// 系统托盘（图标 / 右键菜单 / 流量档位子菜单 / 双击恢复）已迁移至 L2 组件
+// TrayController（src/app/tray_controller.cpp），菜单动作经回调接线回来。
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
@@ -1317,7 +1270,7 @@ void MainWindow::onSettings()
         // #50：全局限速变更实时推送给正在运行的 BT/磁力/FTP（aria2）任务
         TorrentDownloader::setGlobalSpeedLimit(m_settings.speedLimitKBps());
         syncTrafficCombo();   // 设置里改了限速值 → 同步工具栏档位下拉（显示“自定义”）
-        syncTrafficMenu();    // 同步托盘流量子菜单勾选（手动值 → 4 项全不勾）
+        m_trayController->syncTraffic(m_settings.trafficMode());  // 同步托盘流量子菜单勾选（手动值 → 4 项全不勾）
         updateTrafficIndicator();  // 同步任务列表「限速」列
     }
 }

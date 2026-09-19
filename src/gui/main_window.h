@@ -37,6 +37,7 @@ class WebServer;
 class AutoPowerController;
 class IpcServer;
 class ScheduleService;
+class TrayController;
 class EmptyStateOverlay;
 class SidebarPanel;
 
@@ -97,7 +98,6 @@ private slots:
     void onTrafficModeChanged(int index);  // 工具栏流量档位切换
     void syncTrafficCombo();      // 把下拉选中项同步到当前 trafficMode
     void applyTrafficMode(int mode);   // 统一应用流量档位（工具栏/托盘共用）
-    void syncTrafficMenu();       // 同步托盘流量子菜单勾选
 
     // 任务列表分组（按类型 / 按队列）折叠
     void applyGroupMode(int mode);       // 统一应用分组模式（视图菜单 / 启动恢复共用）
@@ -145,7 +145,6 @@ protected:
     void showEvent(QShowEvent* event) override;  // 首次显示时定位空状态插画
 
 private slots:
-    void onTrayActivated();
     void onClipboardChanged();  // 剪贴板变化时检测下载链接
     void rebuildQueueTree();  // 队列增删改后重建左侧树的队列节点
 
@@ -155,7 +154,6 @@ private:
     void setupToolBar();
     void setupStatusBar();
     void setupCategoryTree();
-    void setupTrayIcon();         // 系统托盘图标 + 右键菜单
     void applyWebServer();        // 依据设置启动/停止/更新 Web 管理界面
     void updateStatusBar();                 // O(1)：直接用缓存聚合值刷新状态栏
     void recomputeStatusAggregates();        // O(n)：由 m_speeds/m_states 权威重算缓存
@@ -201,7 +199,6 @@ private:
     QStatusBar* m_statusBar;
     QToolBar*   m_toolBar;
     QComboBox*  m_trafficCombo = nullptr;   // 状态栏流量档位下拉（自动/轻量/中等/重量/自定义）
-    QMenu*      m_trafficMenu  = nullptr;   // 托盘流量档位子菜单（自动/轻量/中等/重量）
     QActionGroup* m_groupActions = nullptr; // 「视图 → 列表分组」单选动作组
     QLabel*     m_speedPill = nullptr;      // 状态栏总速度胶囊
     QLabel*     m_taskCountLabel = nullptr; // 状态栏任务计数胶囊（文案格式被并发上限自测依赖，勿改）
@@ -213,8 +210,11 @@ private:
     int    m_activeCount = 0;    // 状态 == 1（下载中）的任务数
     QString           m_statePath; // 持久化文件路径（tasks.json）
     Settings          m_settings;  // 全局设置（默认目录/线程数/限速/主题）
-    QSystemTrayIcon*  m_trayIcon;  // 系统托盘图标
+    QSystemTrayIcon*  m_trayIcon = nullptr;  // 系统托盘图标（由 TrayController 创建，供各处 showMessage）
     bool              m_trayMinimize = false;  // 是否最小化到托盘
+
+    // 系统托盘（L2 组件，见 src/app/tray_controller.*）
+    TrayController*      m_trayController = nullptr;
 
     // 定时下载（L2 组件，见 src/app/schedule_service.*）
     ScheduleService*     m_scheduleService = nullptr;

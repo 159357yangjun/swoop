@@ -104,6 +104,8 @@ set(APP_SOURCES
     src/app/ipc_server.h
     src/app/schedule_service.cpp
     src/app/schedule_service.h
+    src/app/tray_controller.cpp
+    src/app/tray_controller.h
 )
 
 set(CORE_WRAPPER_SOURCES
