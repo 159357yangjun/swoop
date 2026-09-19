@@ -30,6 +30,7 @@
 #include "history_store.h"
 #include "logger.h"
 #include "auto_power.h"   // L2：下载完成自动关机/休眠（从本文件抽取）
+#include "ipc_server.h"   // L2：IPC 单实例通信（从本文件抽取）
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -71,14 +72,12 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QTimer>
-#include <QLocalServer>
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QCloseEvent>
 #include <QLibrary>
 #include <QProcess>
 #include <functional>
-#include <QLocalSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QInputDialog>
@@ -191,7 +190,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_queueTimer->start(1000);
 
     // 启动 IPC server（让浏览器扩展/CLI 转发下载请求到正在运行的 GUI）
-    startIpcServer();
+    // L2 组件：解耦 MainWindow 内部状态，注入任务添加与任务数查询回调
+    m_ipcServer = new IpcServer(this);
+    m_ipcServer->setAddTaskCallback(
+        [this](const QString& url, const QString& filename, const QString& dir,
+               int threads, const QString& queue, const QString& format) {
+            addTaskFromUrl(url, filename, dir, threads, queue, format);
+        });
+    m_ipcServer->setTaskCountProvider([this]() { return m_taskModel->rowCount(); });
+    m_ipcServer->start();
 
     // 加载全局设置（默认目录/线程数/限速/主题）
     m_settings.load();
@@ -1754,25 +1761,7 @@ void MainWindow::refreshSidebarCounts()
         m_sidebar->stats()->setCounts(t.m_all.dl, t.m_all.done, t.m_all.fail);
 }
 
-// ── IPC 单实例通信 ──────────────────────────────
-
-void MainWindow::startIpcServer()
-{
-    m_ipcServer = new QLocalServer(this);
-
-    // 如果有残留的旧服务端（上次崩溃），先移除
-    QLocalServer::removeServer(QStringLiteral("idm-next-ipc"));
-
-    if (!m_ipcServer->listen(QStringLiteral("idm-next-ipc"))) {
-        Log::warn(QStringLiteral("IPC server 启动失败: %1").arg(m_ipcServer->errorString()));
-        return;
-    }
-
-    connect(m_ipcServer, &QLocalServer::newConnection,
-            this, &MainWindow::onIpcConnection);
-
-    Log::info(QStringLiteral("IPC server 已启动，监听 idm-next-ipc"));
-}
+// ── IPC 单实例通信已迁移至 src/app/ipc_server.cpp（IpcServer 组件）──
 
 void MainWindow::applyWebServer()
 {
@@ -1846,68 +1835,7 @@ void MainWindow::applyWebServer()
     }
 }
 
-void MainWindow::onIpcConnection()
-{
-    QLocalSocket* client = m_ipcServer->nextPendingConnection();
-    if (!client) return;
-
-    // 读取客户端发来的 JSON 命令：原生消息以单次写入整体送达，但可能跨多次
-    // readyRead 分片到达；此处用有界循环累积，直到得到可解析的完整 JSON 对象，
-    // 避免单次 readAll 截断导致命令解析失败（原实现会退化成「不支持的操作」）。
-    QByteArray data;
-    for (int i = 0; i < 10; ++i) {
-        if (client->bytesAvailable() == 0)
-            client->waitForReadyRead(200);   // 最多 ~2s，正常情况首轮即有数据
-        QByteArray chunk = client->readAll();
-        if (!chunk.isEmpty())
-            data.append(chunk);
-        if (!data.isEmpty() && QJsonDocument::fromJson(data).isObject())
-            break;   // 已收到完整命令
-        if (client->state() != QLocalSocket::ConnectedState)
-            break;   // 对端已断开
-    }
-
-    QJsonDocument doc = QJsonDocument::fromJson(data);
-    QJsonObject msg = doc.object();
-
-    QString command = msg.value("command").toString();
-    QJsonObject response;
-
-    if (command == "add") {
-        QString url = msg.value("url").toString();
-        QString filename = msg.value("filename").toString();
-        QString dir = msg.value("dir").toString();
-        QString queue = msg.value("queue").toString();   // 非空=加入队列
-        QString format = msg.value("format").toString(); // 视频画质（yt-dlp -f 选择串）
-        int threads = msg.value("threads").toInt();
-
-        if (url.isEmpty()) {
-            response["success"] = false;
-            response["message"] = QStringLiteral("URL 为空");
-        } else {
-            addTaskFromUrl(url, filename, dir, threads, queue, format);
-            response["success"] = true;
-            response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
-        }
-    } else if (command == "list") {
-        // 简化：返回任务数量
-        response["success"] = true;
-        response["message"] = QStringLiteral("当前 %1 个任务").arg(m_taskModel->rowCount());
-    } else {
-        response["success"] = false;
-        response["message"] = QStringLiteral("不支持的操作: %1").arg(command);
-    }
-
-    // 发送响应
-    QByteArray respData = QJsonDocument(response).toJson(QJsonDocument::Compact);
-    client->write(respData);
-    client->flush();
-    client->waitForBytesWritten(2000);
-    client->disconnectFromServer();
-
-    Log::info(QStringLiteral("IPC 请求: %1 → %2")
-                 .arg(command, response.value("success").toBool() ? "成功" : "失败"));
-}
+// ── IPC 单实例通信已迁移至 src/app/ipc_server.cpp（IpcServer 组件）──
 
 void MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
                                  const QString& dir, int threads,

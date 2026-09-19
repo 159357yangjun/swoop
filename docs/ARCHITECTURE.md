@@ -161,7 +161,7 @@
 ### 阶段 2 — 抽出 L2 独立组件（行为不变）
 按隔离度从易到难，每个单独提交、单独验收：
 1. ✅ `app/auto_power`（关机/休眠/权限/倒计时/提示音）— 已完成 (2026-09-19)：`AutoPowerController` 注入回调解耦 MainWindow 内部状态；engine 37/0 + 三探针 PASS + 走查 7/7 md5 一致
-2. `app/ipc_server`（QLocalServer 收发壳 + 转发 MainWindow 的钩子）
+2. ✅ `app/ipc_server`（QLocalServer 收发壳 + JSON 命令解析 + 响应）— 已完成 (2026-09-19)：`IpcServer` 注入 `addTask` 回调与 `taskCount` 提供器解耦 MainWindow；`addTaskFromUrl`/`enqueueUrl` 保留为公开 API 不动；engine 37/0 + 三探针 PASS + 走查 7/7 md5 一致
 3. `app/schedule_service`（定时持久化 + 触发 + 每日重复）
 4. `app/tray_controller`（托盘图标 + 菜单 + 双击恢复）
 5. `app/task_controller`（任务 CRUD + 后端分派表 + 队列调度）

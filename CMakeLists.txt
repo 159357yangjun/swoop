@@ -100,6 +100,8 @@ set(WEB_SOURCES
 set(APP_SOURCES
     src/app/auto_power.cpp
     src/app/auto_power.h
+    src/app/ipc_server.cpp
+    src/app/ipc_server.h
 )
 
 set(CORE_WRAPPER_SOURCES

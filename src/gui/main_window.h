@@ -32,10 +32,10 @@ class QWidget;
 class QSystemTrayIcon;
 class QCloseEvent;
 class QTimer;
-class QLocalServer;
 class QDialog;
 class WebServer;
 class AutoPowerController;
+class IpcServer;
 class EmptyStateOverlay;
 class SidebarPanel;
 
@@ -146,7 +146,6 @@ private slots:
     void onCheckScheduledTasks();  // 定时任务到期检查
     void loadSchedules();          // 启动时从配置恢复定时/重复设置
     void saveSchedules() const;    // 把定时/重复设置写回配置
-    void onIpcConnection();  // 接收 CLI 转发的下载请求
     void rebuildQueueTree();  // 队列增删改后重建左侧树的队列节点
 
 private:
@@ -156,7 +155,6 @@ private:
     void setupStatusBar();
     void setupCategoryTree();
     void setupTrayIcon();         // 系统托盘图标 + 右键菜单
-    void startIpcServer();        // 启动 IPC server（单实例通信）
     void applyWebServer();        // 依据设置启动/停止/更新 Web 管理界面
     void updateStatusBar();                 // O(1)：直接用缓存聚合值刷新状态栏
     void recomputeStatusAggregates();        // O(n)：由 m_speeds/m_states 权威重算缓存
@@ -225,8 +223,8 @@ private:
     QSet<int>            m_deferredByCap;
     QTimer*              m_scheduleTimer = nullptr;
 
-    // IPC 单实例通信（接收浏览器扩展/CLI 转发的下载请求）
-    QLocalServer*         m_ipcServer = nullptr;
+    // IPC 单实例通信（L2 组件，见 src/app/ipc_server.*）
+    IpcServer*            m_ipcServer = nullptr;
 
     // Web 远程管理界面（内嵌 HTTP 服务器）
     WebServer*            m_webServer = nullptr;
