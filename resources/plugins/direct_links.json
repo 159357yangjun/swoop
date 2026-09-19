@@ -1,0 +1,13 @@
+{
+  "name": "通用直链增强（所有站点）",
+  "hosts": ["*"],
+  "enabled": true,
+  "description": "对所有站点生效：从页面与内联脚本中提取带常见下载扩展名的直链，补充通用 href/src 解析遗漏的链接。编辑本文件保存后自动热重载。",
+  "extract": [
+    {
+      "type": "linkify",
+      "group": 0,
+      "pattern": "https?://[^\\s\"'<>]+?\\.(?:zip|rar|7z|tar\\.gz|tgz|mp4|mkv|webm|avi|mov|mp3|flac|wav|pdf|epub|exe|msi|apk|dmg|iso|deb)"
+    }
+  ]
+}

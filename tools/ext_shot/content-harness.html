@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>IDM Next — 内容脚本面板验证页</title>
+<!--
+  为什么需要这个页面：
+    content.js 注入的浮层（悬浮球 / 资源面板 / 下载确认卡片 / toast）都是往
+    **宿主页面** 的 DOM 里塞节点，弹窗那套离屏截图完全照不到它们。
+    这里造一个尽量真实的播放页，然后 **原样加载 browser-extension/content.js**，
+    只把浏览器提供的 chrome.* 换成 mock —— 跑的是真实代码路径，不是另写一遍演示页。
+
+  用 preload="none" 是有意的：<video> 带了 src 才会被 scanMediaElements 计入，
+  但真去加载就会往 cdn.example-* 发请求、在控制台留下网络错误，把断言污染掉。
+-->
+<style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; background: #fff; color: #1f2329;
+        font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 26px 24px 90px; }
+    h1 { font-size: 21px; margin: 0 0 6px; letter-spacing: -.2px; }
+    .byline { color: #8a8f99; font-size: 12.5px; margin-bottom: 18px; }
+    .player { border: 1px solid #e6e8eb; border-radius: 10px; overflow: hidden; background: #0f1115; }
+    video { display: block; width: 100%; height: 302px; background: #0f1115; }
+    p { color: #5a6270; }
+    a { color: #2563eb; }
+    .dl { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .dl a { text-decoration: none; padding: 6px 11px; border: 1px solid #e6e8eb; border-radius: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <h1>Big Buck Bunny — 1080p 完整版</h1>
+    <div class="byline">示例站点 · 4K 片源 · 共 12 个分P</div>
+
+    <div class="player">
+        <video id="v" preload="none"
+               src="https://cdn.example-cdn.com/media/bigbuckbunny-1080p-h264-aac.mp4"></video>
+    </div>
+
+    <p>本页用于验证 IDM Next 内容脚本注入的浮层在真实页面里的观感与行为，
+        包含视频、音频、压缩包、安装程序、文档与图片六类可嗅探资源。</p>
+
+    <div class="dl">
+        <a href="https://mirror.example.cn/tools/curl-8.22.0_1-win64-mingw.zip" download>curl-8.22.0_1-win64-mingw.zip</a>
+        <a href="https://mirror.example.cn/tools/setup-runtime-x64.exe" download>setup-runtime-x64.exe</a>
+        <a href="https://docs.example.com/spec/%E4%BA%A7%E5%93%81%E6%8A%80%E6%9C%AF%E7%99%BD%E7%9A%AE%E4%B9%A6-v3.2.pdf" download>产品技术白皮书 v3.2.pdf</a>
+        <a href="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&amp;dn=ubuntu-24.04.iso">ubuntu-24.04.iso</a>
+    </div>
+    <img src="https://img.example.net/gallery/cover-hd-2026-09-18.jpg" width="240" height="135"
+         alt="封面" style="margin-top:18px;border-radius:8px;border:1px solid #e6e8eb">
+    <audio preload="none" src="https://dl.example.org/audio/album/01-opening-theme.flac"></audio>
+</div>
+
+<script>
+/* ── mock chrome.*：真实扩展里由浏览器注入，这里手工补上 ──────────── */
+window.__IDM_HANDLERS__ = [];
+(function () {
+    const S = () => window.__SHOT__ || {};
+    const RES = () => S().resources || [];
+
+    window.chrome = {
+        runtime: {
+            lastError: undefined,
+            onMessage: {
+                addListener(fn) { window.__IDM_HANDLERS__.push(fn); },
+                removeListener() {},
+            },
+            sendMessage(msg, cb) {
+                let resp = {};
+                switch (msg.action) {
+                    case 'reportMedia': return;   // 上报无回调
+                    case 'getResourcesForTab': resp = { resources: RES() }; break;
+                    case 'listFormats':
+                        resp = S().formatsFailure
+                            ? { success: false }
+                            : {
+                                success: true,
+                                formats: [
+                                    { fmt: '137+140', label: '1080p · MP4 · H.264（推荐）' },
+                                    { fmt: '136+140', label: '720p · MP4 · H.264' },
+                                    { fmt: '248+251', label: '1080p · WebM · VP9' },
+                                    { fmt: '140', label: '仅音频 · M4A · 128kbps' },
+                                ],
+                            };
+                        break;
+                    case 'downloadWithOptions': resp = { success: true, message: '已添加到 IDM Next' }; break;
+                    case 'batchDownload': {
+                        const n = (msg.items || []).length;
+                        resp = { success: n, message: '已发送 ' + n + ' 个到 IDM Next' };
+                        break;
+                    }
+                    default: resp = {};
+                }
+                if (cb) setTimeout(() => cb(resp), 8);
+            },
+        },
+        storage: {
+            local: {
+                _d: {},
+                get(keys, cb) {
+                    const d = Object.assign({}, this._d, S().storage || {});
+                    if (typeof keys === 'function') { keys(d); return; }
+                    if (cb) setTimeout(() => cb(d), 0);
+                },
+                set(o, cb) { Object.assign(this._d, o); if (cb) cb(); },
+            },
+            onChanged: { addListener() {}, removeListener() {} },
+        },
+    };
+
+    // 给 shot 脚本用的便捷入口：像 background 一样给内容脚本发消息
+    window.__IDM_SEND__ = (msg) => window.__IDM_HANDLERS__.forEach((fn) => fn(msg, {}, () => {}));
+})();
+</script>
+<script src="../../browser-extension/content.js"></script>
+</body>
+</html>

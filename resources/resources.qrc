@@ -1,0 +1,21 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>qss/light.qss</file>
+        <file>qss/dark.qss</file>
+        <file>plugins/direct_links.json</file>
+        <file>plugins/example_media.json</file>
+        <file>icons/chevron-down-light.png</file>
+        <file>icons/chevron-down-dark.png</file>
+        <file>icons/chevron-up-light.png</file>
+        <file>icons/chevron-up-dark.png</file>
+        <file>icons/chevron-down-light.svg</file>
+        <file>icons/chevron-down-dark.svg</file>
+        <file>icons/chevron-up-light.svg</file>
+        <file>icons/chevron-up-dark.svg</file>
+        <file>icons/calendar-light.svg</file>
+        <file>icons/calendar-dark.svg</file>
+        <file>icons/check-white.svg</file>
+        <file>icons/dot-white.svg</file>
+    </qresource>
+</RCC>

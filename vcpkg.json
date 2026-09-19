@@ -1,0 +1,10 @@
+{
+  "name": "idm-next",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "qt6-base",
+    "libcurl"
+  ],
+  "builtin-baseline": "2024.01.12",
+  "comments": "阶段3+ 需补充: libtorrent-rasterbar, sqlite3, spdlog, nlohmann-json"
+}

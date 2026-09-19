@@ -1,0 +1,26 @@
+# 换行与文本归一化
+#
+# 本工程全程在 Windows 上开发，但仓库内统一用 LF：
+# 避免 Git 的 autocrlf 在检出时把每个文件都改一遍（diff 噪音 + 走查工具读文件时
+# 多出 \r 导致字符串比对失败）。编辑器侧由 .editorconfig 保证。
+* text=auto eol=lf
+
+# 明确的二进制类型，别让 Git 尝试做文本转换
+*.exe   binary
+*.dll   binary
+*.lib   binary
+*.a     binary
+*.dylib binary
+*.so    binary
+*.ico   binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.db    binary
+
+# 生成物在 diff / 语言统计里可以忽略
+build/*   linguist-vendored
+third_party/* linguist-vendored
+
+# 第三方库自带的文档与示例不参与语言统计
+third_party/libcurl/docs/* linguist-documentation

@@ -1,0 +1,45 @@
+# IDM Next —— 编辑器统一约定（EditorConfig）
+# 目的：不管用 Qt Creator / VS Code / CLion / Vim，缩进与换行都一致，
+# 避免"同一文件里 Tab 与空格混排"这类只会制造 diff 噪音的问题。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# C / C++ / Qt
+[*.{c,h,cpp,hpp,cc}]
+indent_size = 4
+
+# CMake、Markdown、YAML、JSON 用 2 空格（业界通行）
+[*.{cmake,txt,md,yml,yaml,json}]
+indent_size = 2
+
+[CMakeLists.txt]
+indent_size = 2
+
+# Qt 资源与样式表
+[*.{qrc,qss,ui}]
+indent_size = 4
+
+# 前端与脚本
+[*.{js,mjs,ts,html,css}]
+indent_size = 2
+
+[*.py]
+indent_size = 4
+
+# PowerShell（NSIS 打包脚本）
+[*.{ps1,psm1}]
+indent_size = 4
+
+# 补丁与生成物不参与格式约束
+[*.{patch,diff}]
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

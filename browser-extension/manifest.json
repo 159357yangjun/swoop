@@ -1,0 +1,44 @@
+{
+    "manifest_version": 3,
+    "name": "IDM Next 资源嗅探器",
+    "version": "0.3.0",
+    "description": "嗅探网页中的视频、音频、文件下载链接，一键发送到 IDM Next 下载器",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9b7VxDNxBMNYcGUQqoEswAenE4c8qD1jyIQmKpwBXXHsXU6u7BMyADv1hoor0HNFaCe9WpBFW2c4HCBKtikjEfyDNGlHHBRE8G6dN8rTdFgSLZBqdjDQO42g07q07b7jCgDZDEswsQIImGsvqkC0dQQ0D7jiJjnfDu63oj9aAWOW/6ZH16+sxi/qezbUwuAdWpi1t79eDcFFLmwDQkr7djhhhqvdb+SZ8KrzZVEeAdDdM/l8l/k/EWl+/jOoDVpfaGtiHjndJNC7HJsvEM/b5mRO2lrDG26QKqvx9VhfAVoCbTpZNIw7zsblgCnCMwAm4q+fwEQ9vBtJ7M+/mggNfwIDAQAB",
+    "permissions": [
+        "webRequest",
+        "storage",
+        "activeTab",
+        "tabs",
+        "downloads",
+        "nativeMessaging",
+        "scripting",
+        "contextMenus"
+    ],
+    "host_permissions": [
+        "<all_urls>"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content.js"],
+            "run_at": "document_idle"
+        }
+    ],
+    "action": {
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "icons/icon16.png",
+            "48": "icons/icon48.png",
+            "128": "icons/icon128.png"
+        },
+        "default_title": "IDM Next 嗅探器"
+    },
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png"
+    }
+}

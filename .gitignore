@@ -1,0 +1,47 @@
+# ── 构建产物 ────────────────────────────────────────
+build/
+build-*/
+build_check/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.ninja
+.ninja_deps
+.ninja_log
+
+# ── Qt Creator / IDE ───────────────────────────────
+.qtcreator/
+*.user
+*.autosave
+
+# ── 打包产物（installer/ 只版本化脚本本身）──────────
+installer/dist/
+installer/*.exe
+
+# ── 运行时产生的临时文件 ───────────────────────────
+# 引擎的分片临时文件：走查/自测若以 "." 为保存目录会落在仓库根
+*.idmtmp
+*.tmp
+*.log
+
+# ── 浏览器扩展：windeployqt 生成的可执行与 Qt 运行时 ─
+# 源码（js/html/css/py/bat/ps1/manifest）与图标要版本化，产物不要
+browser-extension/native-messaging-host/*.exe
+browser-extension/native-messaging-host/*.dll
+browser-extension/ext-edge-profile/
+browser-extension/*.log
+
+# ── 外部参考资料 ───────────────────────────────────
+# FDM 3.9.7 源码仅用于设计对照，非本项目代码，不入库
+fdm-ref/
+
+# ── 系统杂项 ───────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 说明：third_party/libcurl（vendored libcurl 8.22.0）**入库**。
+# 它是构建的硬依赖（CMake 在找不到 vcpkg CURL 时回退到它），
+# 入库可保证 clone 后开箱即可构建，无需先下载 22MB 二进制。
+# 仅剔除 libcurl 自带的文档与示例（1.6MB，纯参考资料，不参与构建）：
+third_party/libcurl/docs/

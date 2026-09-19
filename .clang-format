@@ -1,0 +1,64 @@
+# IDM Next —— 代码格式约定（clang-format）
+#
+# ⚠️ 本文件是**增量约定**，不是"全量重排"指令。
+# 全工程一次性 clang-format 会产出上万行 diff、淹没真实改动、且让本次重构无法审查。
+# 用法：只格式化你正在改的文件 —— clang-format -i <file>，或让编辑器在保存时处理。
+#
+# 取值依据：与既有代码保持一致（实测 src/**/*.{c,cpp,h} 的主流写法）
+#   - 4 空格缩进，不用 Tab
+#   - `void f() {` 大括号不换行（Attach）
+#   - 单行长度实测上限 ~100 列
+#   - 注释以中文为主，不强制换行（含中文的长注释按显示宽度算容易误判）
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++17
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+
+BreakBeforeBraces: Attach
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  BeforeCatch: false
+  BeforeElse: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+SpaceAfterCStyleCast: false
+SpacesBeforeTrailingComments: 1
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments: true
+
+SortIncludes: false          # 头文件顺序是手工分组的（Qt 在前、项目头在后），别自动排
+IncludeBlocks: Preserve
+ReflowComments: false        # 中文注释不重排
+
+# 引擎是 C99，单独放宽（不用 C++ 的 4 空格以外的写法差异）
+---
+Language: C
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+PointerAlignment: Right
+SpaceAfterCStyleCast: false

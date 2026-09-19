@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<!-- ── 内联 SVG 图标库 ──────────────────────────────────────────────
+     用 <symbol> + <use> 而不是 emoji：字形由我们控制、两套主题都跟随
+     currentColor、且和桌面端那套线性自绘图标是同一个视觉语言。 -->
+<svg class="sprite" aria-hidden="true">
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4.2-4.2"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4 13l2.2-7.2A2 2 0 0 1 8.1 4.4h7.8a2 2 0 0 1 1.9 1.4L20 13v5.2a1.4 1.4 0 0 1-1.4 1.4H5.4A1.4 1.4 0 0 1 4 18.2Z"/><path d="M4 13h4l1 2.4h6L16 13h4"/></symbol>
+    <!-- ⚠️ 设置图标刻意用「滑杆」而不是齿轮：齿轮在本项目里被画成「圆 + 6 条短线」，
+         缩到 14px 后与主题按钮的太阳图标几乎一模一样（实测截图里两个都是太阳）。 -->
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7.5h9M17 7.5h3M4 16.5h3M11 16.5h9"/><circle cx="15" cy="7.5" r="2.2"/><circle cx="9" cy="16.5" r="2.2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M4.4 4.4l1.6 1.6M18 18l1.6 1.6M2.6 12h2.2M19.2 12h2.2M4.4 19.6L6 18M18 6l1.6-1.6"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.3A8.6 8.6 0 0 1 9.7 3.5a8.6 8.6 0 1 0 10.8 10.8Z"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.4"/><path d="M10 9.4l5 2.6-5 2.6Z"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 17.5V6.2l9-1.7v11"/><circle cx="6.6" cy="17.6" r="2.4"/><circle cx="15.6" cy="15.9" r="2.4"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.4"/><circle cx="8.8" cy="10" r="1.6"/><path d="M4 17l4.8-4.4 3.4 3 3-2.6L20 17"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="5" rx="1.4"/><path d="M5 9v9.2c0 .8.6 1.4 1.4 1.4h11.2c.8 0 1.4-.6 1.4-1.4V9"/><path d="M10.3 13h3.4"/></symbol>
+    <symbol id="i-app" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M8.5 12h7M12 8.4v7.2"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3.6h7.4L19 9.2v11.2H6Z"/><path d="M13.2 3.6v5.8H19"/><path d="M9 13.5h6M9 16.5h4"/></symbol>
+    <symbol id="i-magnet" viewBox="0 0 24 24"><path d="M6 4.5v7a6 6 0 0 0 12 0v-7"/><path d="M6 9.6h4M14 9.6h4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3.6h7.4L19 9.2v11.2H6Z"/><path d="M13.2 3.6v5.8H19"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v10.4"/><path d="M7.8 10.6L12 14.8l4.2-4.2"/><path d="M4.8 18.6h14.4"/></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6.5h11M4 12h11M4 17.5h7"/><path d="M18 12v7M18 19l2.4-2.4"/><path d="M18 19l-2.4-2.4"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.2"/><path d="M15.5 6.2V5.4A1.4 1.4 0 0 0 14.1 4H5.4A1.4 1.4 0 0 0 4 5.4v8.7c0 .8.6 1.4 1.4 1.4h.8"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 7.4c0-.9.7-1.6 1.6-1.6h3.2l2 2.4h8.6c.9 0 1.6.7 1.6 1.6v7.8c0 .9-.7 1.6-1.6 1.6H5.6A1.6 1.6 0 0 1 4 17.6Z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.8l4.4 4.2L19 7.6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.8v5.4M12 16.2h.01"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.6 6.6l10.8 10.8M17.4 6.6L6.6 17.4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4.5V9h-4.5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.8h15"/><path d="M9.2 6.8V5.2c0-.6.5-1.1 1.1-1.1h3.4c.6 0 1.1.5 1.1 1.1v1.6"/><path d="M6.6 6.8l.9 11.2c.05.7.6 1.2 1.3 1.2h6.4c.7 0 1.25-.5 1.3-1.2l.9-11.2"/><path d="M10.4 10.2v6M13.6 10.2v6"/></symbol>
+</svg>
+
+<div class="app">
+    <!-- 顶部：连接状态 + 当前站点 -->
+    <header class="hd">
+        <span class="dot" id="connDot"></span>
+        <div class="hd-main">
+            <div class="hd-title">
+                IDM Next
+                <span class="conn-text" id="connText">检测中</span>
+            </div>
+            <div class="hd-host" id="tabHost">—</div>
+        </div>
+        <button class="ibtn" id="themeBtn" title="切换主题（跟随系统 / 亮 / 暗）">
+            <svg class="i"><use href="#i-sun"/></svg>
+        </button>
+        <button class="ibtn" id="settingsBtn" title="设置">
+            <svg class="i"><use href="#i-settings"/></svg>
+        </button>
+    </header>
+
+    <!-- 搜索 + 排序 -->
+    <div class="tools">
+        <div class="search" id="searchWrap">
+            <svg class="i"><use href="#i-search"/></svg>
+            <input id="searchInput" type="text" placeholder="搜索文件名或地址…" spellcheck="false">
+            <button class="search-clear" id="searchClear" title="清除">
+                <svg class="i" style="width:12px;height:12px"><use href="#i-close"/></svg>
+            </button>
+        </div>
+        <select class="sort" id="sortSelect" title="排序方式">
+            <option value="default">默认顺序</option>
+            <option value="type">按类型</option>
+            <option value="size">按大小</option>
+            <option value="name">按名称</option>
+        </select>
+    </div>
+
+    <!-- 类型筛选（计数由 JS 填） -->
+    <nav class="chips" id="chips"></nav>
+
+    <!-- 资源列表 -->
+    <div class="list" id="resourceList"></div>
+
+    <!-- 底部操作条 -->
+    <footer class="ft">
+        <label class="ft-all">
+            <input type="checkbox" id="selectAll">
+            <span>全选</span>
+        </label>
+        <span class="ft-sel" id="selCount">已选 0 项</span>
+        <span class="ft-spacer"></span>
+        <!-- 清空做成图标按钮：「清空」两个字在 400px 宽的底栏里会把
+             批量按钮挤到换行（实测过），而它的使用频率远低于下载。 -->
+        <button class="ibtn" id="clearBtn" title="清空本页嗅探结果">
+            <svg class="i"><use href="#i-trash"/></svg>
+        </button>
+        <!-- 文案放在 <span class="lbl"> 里：按钮文本会随选中数变化
+             （未选中 = 全部下载 / 已选 = 下载 (N)），JS 直接改这个 span，
+             不要用 lastChild —— 标签内的空白也是文本节点，会写错位置。 -->
+        <button class="btn ghost" id="queueSelBtn" disabled>
+            <svg class="i"><use href="#i-queue"/></svg><span class="lbl">队列</span>
+        </button>
+        <button class="btn primary" id="downloadSelBtn" disabled>
+            <svg class="i"><use href="#i-download"/></svg><span class="lbl">下载</span>
+        </button>
+    </footer>
+
+    <div class="toast" id="toast"></div>
+
+    <!-- 设置弹层 -->
+    <section class="sheet" id="settingsSheet">
+        <div class="sheet-head">
+            <span>设置</span>
+            <button class="ibtn" id="closeSheetBtn" title="关闭">
+                <svg class="i"><use href="#i-close"/></svg>
+            </button>
+        </div>
+        <div class="sheet-body">
+            <label class="sw">
+                <input type="checkbox" id="interceptToggle">
+                <span class="sw-text">
+                    <span class="sw-title">自动接管浏览器下载</span>
+                    <span class="sw-desc">命中视频 / 音频 / 压缩包 / 程序 / 文档 / 种子时，交给 IDM Next 下载而不走浏览器</span>
+                </span>
+            </label>
+            <label class="sw">
+                <input type="checkbox" id="confirmToggle">
+                <span class="sw-text">
+                    <span class="sw-title">下载前确认</span>
+                    <span class="sw-desc">在页面上弹出选择卡片，可改文件名、目录与视频画质</span>
+                </span>
+            </label>
+            <label class="sw">
+                <input type="checkbox" id="queueToggle">
+                <span class="sw-text">
+                    <span class="sw-title">默认加入队列</span>
+                    <span class="sw-desc">新任务不立即开始，排进「浏览器」队列由桌面端调度</span>
+                </span>
+            </label>
+            <div class="sheet-sep"></div>
+            <div class="seg" id="themeSeg">
+                <button data-mode="auto">跟随系统</button>
+                <button data-mode="light">亮色</button>
+                <button data-mode="dark">暗色</button>
+            </div>
+            <div class="sheet-sep"></div>
+            <!-- 连接状态原本只在打开弹窗时检测一次；这里给个手动重试入口，
+                 比让用户"关掉再开一次"合理。 -->
+            <div class="about-row">
+                <div>
+                    <div class="sw-title">桌面端连接</div>
+                    <div class="sw-desc" id="aboutConn">检测中</div>
+                </div>
+                <button class="btn ghost" id="recheckBtn">
+                    <svg class="i"><use href="#i-refresh"/></svg>重新检测
+                </button>
+            </div>
+        </div>
+        <div class="sheet-note">
+            嗅探依赖 <code>webRequest</code> 权限，只记录资源地址与大小，不读取页面内容。<br>
+            桌面端未运行时，下载请求会回退到 <code>idm-next --cli add</code>。
+        </div>
+    </section>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

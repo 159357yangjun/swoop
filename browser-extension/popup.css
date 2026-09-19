@@ -1,0 +1,442 @@
+/* ============================================================================
+ * IDM Next 浏览器扩展 —— popup 样式
+ *
+ * 设计取向与桌面端（resources/qss/{light,dark}.qss）严格对齐：
+ *   中性灰底 + 单一克制强调色 + 小圆角(6~8px) + 扁平控件。
+ *   ❌ 不用蓝紫渐变、不用毛玻璃、不用 emoji 当图标、不用大圆角(>12px)。
+ *   图标一律用 popup.html 里的内联 SVG symbol（线性、1.6 描边、圆头），
+ *   与桌面端自绘图标集 AppIcons 同一套语言 —— 之前的 emoji（🎬🎵📄）
+ *   在不同系统上字形不一样，而且和桌面端放一起像两个产品。
+ *
+ * 主题：初始跟随系统 prefers-color-scheme，用户可在弹窗里手动切并持久化
+ *   （storage: uiTheme = auto|light|dark）。所有颜色只走下面的 token，
+ *   组件里不要出现硬编码色值 —— 否则暗色一定会漏。
+ * ========================================================================= */
+
+:root {
+    /* 亮色（默认） */
+    --bg:            #ffffff;
+    --bg-sunken:     #f7f8fa;
+    --bg-hover:      #f2f3f5;
+    --bg-active:     #eceef1;
+    --border:        #e6e8eb;
+    --border-strong: #d6dbe1;
+    --text:          #1f2329;
+    --text-2:        #5a6270;
+    --text-3:        #8a8f99;
+    --accent:        #2563eb;
+    --accent-hover:  #1d4ed8;
+    --accent-soft:   #eef2ff;
+    --accent-border: #c7d2fe;
+    --ok:            #2f9e6f;
+    --warn:          #b7791f;
+    --err:           #d05252;
+    --shadow:        0 8px 24px rgba(15, 23, 42, .14);
+    --radius:        8px;
+    --radius-sm:     6px;
+}
+
+:root[data-theme="dark"] {
+    --bg:            #1a1b1e;
+    --bg-sunken:     #202124;
+    --bg-hover:      #26272b;
+    --bg-active:     #2c2d31;
+    --border:        #32343a;
+    --border-strong: #3d4046;
+    --text:          #e8eaed;
+    --text-2:        #a8adb6;
+    --text-3:        #6b707a;
+    --accent:        #4c8dff;
+    --accent-hover:  #6aa0ff;
+    /* 比 #1e2b45 提亮一档：暗色下选中行/激活标签的底色太接近背景，
+       截图里几乎看不出哪一行是选中的。 */
+    --accent-soft:   #22314f;
+    --accent-border: #2f4a78;
+    --ok:            #3fb27f;
+    --warn:          #d0a03f;
+    --err:           #e06565;
+    --shadow:        0 8px 24px rgba(0, 0, 0, .5);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    width: 400px;
+    height: 560px;
+    overflow: hidden;
+    font-family: "Segoe UI", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+}
+
+:root[data-theme="dark"] body { color-scheme: dark; }
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+/* 隐藏内联 SVG 图标库（<symbol> 定义处） */
+.sprite { display: none; }
+
+svg.i {
+    width: 14px; height: 14px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* ── 顶部：连接状态 + 当前站点 + 工具按钮 ─────────────────────────── */
+.hd {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    flex: 0 0 auto;
+}
+.hd-main { flex: 1 1 auto; min-width: 0; }
+.hd-title {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 600; letter-spacing: .1px;
+}
+.hd-host {
+    font-size: 11px; color: var(--text-3);
+    margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 连接状态：一个小圆点 + 文字。比之前那个"已连接/未连接"彩色药丸安静得多，
+   而且不抢占标题的视觉权重。 */
+.dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--text-3);
+    transition: background .2s;
+}
+.dot.on  { background: var(--ok);   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.dot.off { background: var(--err); }
+.conn-text { font-size: 10.5px; color: var(--text-3); font-weight: 400; }
+
+/* 图标按钮（标题栏、行内操作共用一个类） */
+.ibtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+}
+.ibtn:hover { background: var(--bg-hover); color: var(--text); }
+.ibtn:active { background: var(--bg-active); }
+.ibtn.on { color: var(--accent); }
+
+/* ── 搜索 + 排序 ──────────────────────────────────────────────────── */
+.tools {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px 6px;
+    flex: 0 0 auto;
+}
+.search {
+    flex: 1 1 auto; min-width: 0;
+    display: flex; align-items: center; gap: 6px;
+    height: 28px; padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+    transition: border-color .12s, background .12s;
+}
+.search:focus-within { border-color: var(--accent); background: var(--bg); }
+.search svg.i { color: var(--text-3); }
+.search input {
+    flex: 1 1 auto; min-width: 0;
+    border: none; outline: none; background: transparent;
+    color: var(--text); font-size: 12.5px; font-family: inherit;
+}
+.search input::placeholder { color: var(--text-3); }
+.search-clear {
+    display: none;
+    border: none; background: transparent; cursor: pointer;
+    color: var(--text-3); padding: 0 2px; line-height: 1;
+}
+.search-clear:hover { color: var(--text); }
+.search.has-text .search-clear { display: block; }
+.sort {
+    height: 28px; padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+    color: var(--text-2); font-size: 11.5px; font-family: inherit;
+    cursor: pointer; outline: none;
+    max-width: 96px;
+}
+.sort:focus { border-color: var(--accent); }
+
+/* ── 类型筛选：带计数的小药丸 ─────────────────────────────────────── */
+.chips {
+    display: flex; gap: 4px; flex-wrap: wrap;
+    padding: 0 12px 8px;
+    flex: 0 0 auto;
+}
+.chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 24px; padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 11.5px; font-family: inherit;
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+}
+.chip:hover { background: var(--bg-hover); color: var(--text); }
+.chip.active {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+    color: var(--accent);
+    font-weight: 600;
+}
+.chip b { font-weight: 600; font-variant-numeric: tabular-nums; opacity: .85; }
+/* 计数为 0 的类型：仍然可点（让用户知道"确实没有"），但压暗 */
+.chip.zero { opacity: .45; }
+.chip.zero b { font-weight: 400; }
+
+/* ── 资源列表 ─────────────────────────────────────────────────────── */
+.list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-top: 1px solid var(--border);
+    /* 用 flex column 是为了让空状态能在整个列表区里垂直居中；
+       行因此要显式 flex:0 0 auto，否则会被压扁。 */
+    display: flex;
+    flex-direction: column;
+}
+.list::-webkit-scrollbar { width: 8px; }
+.list::-webkit-scrollbar-track { background: transparent; }
+.list::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 4px;
+    border: 2px solid var(--bg);
+}
+.list::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+.row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background .1s;
+    flex: 0 0 auto;   /* 列表是 flex column，行不能被拉伸/压扁 */
+}
+.row:hover { background: var(--bg-hover); }
+.row.sel { background: var(--accent-soft); }
+.row.sent .row-name { color: var(--text-3); }
+
+.row input[type="checkbox"] {
+    width: 14px; height: 14px; flex: 0 0 auto;
+    accent-color: var(--accent);
+    cursor: pointer;
+    margin: 0;
+}
+
+/* 类型色块：一个 26×26 的圆角方块里放线性图标。
+   颜色只用在图标上（不铺底），比之前的彩色底 + emoji 安静、
+   而且在两种主题下都不会出现对比度问题。 */
+.tico {
+    width: 26px; height: 26px; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+}
+.tico svg.i { width: 14px; height: 14px; }
+.t-video   { color: #e06565; }
+.t-audio   { color: #4c8dff; }
+.t-image   { color: #2f9e6f; }
+.t-archive { color: #8b5cf6; }
+.t-app     { color: #d08a2f; }
+.t-document{ color: #2fa3b8; }
+.t-magnet  { color: #b7791f; }
+.t-file    { color: var(--text-2); }
+
+.row-main { flex: 1 1 auto; min-width: 0; }
+.row-name {
+    font-size: 12.5px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 副行：域名 · 大小 · 扩展名。中间用 · 分隔，比堆三个彩色徽章好读 */
+.row-sub {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 10.5px; color: var(--text-3);
+    margin-top: 1px;
+    white-space: nowrap; overflow: hidden;
+}
+.row-sub .sep { opacity: .5; }
+.row-sub .host { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.row-sub .badge-ok { color: var(--ok); display: inline-flex; align-items: center; gap: 3px; }
+
+.row-ops { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; opacity: 0; transition: opacity .12s; }
+.row:hover .row-ops, .row:focus-within .row-ops { opacity: 1; }
+.row-ops .ibtn { width: 24px; height: 24px; }
+
+/* ── 空状态 ───────────────────────────────────────────────────────── */
+/* 空状态：在列表区里垂直+水平居中。之前是 padding 撑开，结果文字贴着顶部、
+   下面留一大片空白，看起来像"内容没加载出来"。 */
+.empty {
+    flex: 1 1 auto;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 0 28px 24px;
+    text-align: center;
+    color: var(--text-3);
+    font-size: 12px;
+}
+.empty svg.i { width: 30px; height: 30px; stroke-width: 1.3; margin-bottom: 10px; opacity: .55; }
+.empty .empty-title { color: var(--text-2); font-size: 12.5px; margin-bottom: 3px; }
+.empty .empty-hint { line-height: 1.7; }
+
+/* ── 底部操作条 ───────────────────────────────────────────────────── */
+/* ⚠️ 底栏必须 nowrap + 所有文字 nowrap：400px 宽放不下时，
+   浏览器会把「全选」「清空」「全部下载 (0)」各自折成两行，
+   主按钮甚至会被挤出右边界（实测截图里就长这样）。 */
+.ft {
+    display: flex; align-items: center; gap: 7px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-sunken);
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+.ft-all {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; color: var(--text-2);
+    cursor: pointer; user-select: none;
+    flex: 0 0 auto;
+}
+.ft-all input { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+.ft-sel {
+    font-size: 11.5px; color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
+    overflow: hidden; text-overflow: ellipsis;
+    max-width: 74px;
+}
+.ft-spacer { flex: 1 1 auto; min-width: 0; }
+
+.btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 28px; padding: 0 12px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px; font-family: inherit; font-weight: 500;
+    cursor: pointer;
+    transition: background .12s, border-color .12s, color .12s, opacity .12s;
+}
+.btn:hover:not(:disabled) { background: var(--bg-hover); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+.btn.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.ghost { background: transparent; }
+.btn.danger { color: var(--err); }
+
+/* ── 弹窗内轻提示（替代原来常驻的状态栏）───────────────────────────── */
+.toast {
+    position: absolute; left: 12px; right: 12px; bottom: 52px;
+    padding: 7px 11px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-strong);
+    background: var(--bg);
+    box-shadow: var(--shadow);
+    font-size: 11.5px; color: var(--text);
+    display: flex; align-items: center; gap: 6px;
+    opacity: 0; transform: translateY(6px);
+    pointer-events: none;
+    transition: opacity .18s, transform .18s;
+    z-index: 30;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.ok  { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.toast.err { border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.toast svg.i { width: 13px; height: 13px; }
+.toast.ok  svg.i { color: var(--ok); }
+.toast.err svg.i { color: var(--err); }
+
+/* ── 设置弹层 ─────────────────────────────────────────────────────── */
+.sheet {
+    position: absolute; inset: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    z-index: 40;
+    transform: translateY(8px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .16s, transform .16s;
+}
+.sheet.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.sheet-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px; font-weight: 600;
+    flex: 0 0 auto;
+}
+.sheet-body { flex: 1 1 auto; overflow-y: auto; padding: 6px 0; }
+.sw {
+    display: flex; align-items: flex-start; gap: 9px;
+    padding: 9px 12px;
+    cursor: pointer;
+}
+.sw:hover { background: var(--bg-hover); }
+.sw input { width: 15px; height: 15px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; flex: 0 0 auto; }
+/* ⚠️ 必须是 flex column：<span> 默认是行内元素，标题和说明会挤在同一行、
+   而且 margin-top 对行内元素不生效（实测截图里就是"标题说明连成一句"）。 */
+.sw-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.sw-title { font-size: 12.5px; color: var(--text); }
+.sw-desc { font-size: 10.5px; color: var(--text-3); margin-top: 1px; line-height: 1.5; }
+.sheet-sep { height: 1px; background: var(--border); margin: 4px 0; }
+.about-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 9px 12px;
+}
+.about-row .btn { height: 26px; padding: 0 10px; }
+.sheet-note {
+    padding: 10px 12px;
+    font-size: 10.5px; color: var(--text-3); line-height: 1.7;
+    border-top: 1px solid var(--border);
+    flex: 0 0 auto;
+}
+.sheet-note code {
+    font-family: ui-monospace, Consolas, monospace;
+    background: var(--bg-sunken);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 3px;
+}
+.seg { display: flex; gap: 0; padding: 6px 12px 2px; }
+.seg button {
+    flex: 1 1 auto; height: 26px;
+    border: 1px solid var(--border);
+    background: var(--bg-sunken);
+    color: var(--text-2);
+    font-size: 11.5px; font-family: inherit;
+    cursor: pointer;
+}
+.seg button:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.seg button:last-child  { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.seg button + button { border-left: none; }
+.seg button.active { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); font-weight: 600; }

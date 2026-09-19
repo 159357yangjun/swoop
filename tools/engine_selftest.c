@@ -1,0 +1,827 @@
+/*
+ * engine_selftest.c — 下载引擎自测（可选目标，默认不构建）
+ *
+ * 为什么要它：本项目的教训是「编译通过 ≠ 功能生效」——出现过多个设置项只存盘、
+ * 引擎从不下发的死设置。这个自测用**真实本地 HTTP 服务**验证设置链路端到端可用。
+ *
+ * 覆盖：
+ *   1. 负向对照：未配置站点登录时 401 站点必须失败（证明第 2 项不是假阳性）
+ *   2. 站点登录：配置凭据后同一 URL 必须下载成功，且落盘字节数一致
+ *   3. 每服务器连接数：真实封顶并发分片数
+ *   4. 中文文件名端到端落盘正确（UTF-8 路径）
+ *   5. 「不使用代理」压得住环境变量代理
+ *   6. 服务器宣称支持 Range 却无视它 → 必须自动降级为单连接，且内容逐字节正确
+ *   7. >2GB 偏移写盘（32 位 long 截断探针：3 GiB 处写 4 KiB 再读回比对）
+ *
+ * 用法（先起服务，再跑自测）：
+ *   python tools/engine_selftest_server.py 18080 idmuser idmpass &
+ *   cmake -DIDM_BUILD_ENGINE_SELFTEST=ON -B build && cmake --build build --target engine_selftest
+ *   ./build/engine_selftest.exe 18080 idmuser idmpass
+ *
+ * 退出码 = 失败项数量（0 表示全部通过）。
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <windows.h>
+
+#include "download_core.h"
+
+static int g_pass = 0, g_fail = 0;
+
+static void check(const char *what, int ok, const char *detail)
+{
+    if (ok) {
+        printf("  [PASS] %s\n", what);
+        g_pass++;
+    } else {
+        printf("  [FAIL] %s%s%s\n", what,
+               (detail && detail[0]) ? "  -> " : "",
+               (detail && detail[0]) ? detail : "");
+        g_fail++;
+    }
+}
+
+/* 轮询等待任务结束（0 等待 / 1 下载中 / 2 暂停 / 3 完成 / 4 失败 / 5 取消） */
+static int wait_task(int id, int timeout_ms, int *out_status, int64_t *out_downloaded)
+{
+    int waited = 0;
+    while (waited < timeout_ms) {
+        TaskInfo info;
+        if (dlmgr_get_task_info(id, &info) != 0) return -1;
+        if (info.status != 0 && info.status != 1) {
+            if (out_status)     *out_status = info.status;
+            if (out_downloaded) *out_downloaded = info.downloaded;
+            return 0;
+        }
+        Sleep(100);
+        waited += 100;
+    }
+    if (out_status) *out_status = -1;
+    return -1;
+}
+
+/* ⚠️ 必须走 _wfopen：Windows 的 ANSI fopen 吃 UTF-8 路径会失败/乱码，
+ * 这正是本项目修过的坑，测试自己也不能犯（否则会误报「文件不存在」）。 */
+static FILE *utf8_fopen_rb(const char *path)
+{
+    wchar_t wpath[MAX_PATH * 2];
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])));
+    if (n <= 0) return NULL;
+    return _wfopen(wpath, L"rb");
+}
+
+/* 写文件（同样走 _wfopen），返回写入字节数，失败返回 -1 */
+static long utf8_write_file(const char *path, const char *data)
+{
+    wchar_t wpath[MAX_PATH * 2];
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])));
+    if (n <= 0) return -1;
+    FILE *f = _wfopen(wpath, L"wb");
+    if (!f) return -1;
+    size_t len = strlen(data);
+    size_t wr = fwrite(data, 1, len, f);
+    fclose(f);
+    return (wr == len) ? (long)wr : -1;
+}
+
+/* 把整个文件读进 buf（已经保证 NUL 结尾），返回读到的字节数，失败返回 -1 */
+static long utf8_read_file(const char *path, char *buf, size_t cap)
+{
+    FILE *f = utf8_fopen_rb(path);
+    if (!f) { if (cap) buf[0] = '\0'; return -1; }
+    size_t rd = fread(buf, 1, cap - 1, f);
+    buf[rd] = '\0';
+    fclose(f);
+    return (long)rd;
+}
+
+static long file_size_of(const char *path)
+{
+    FILE *f = utf8_fopen_rb(path);
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fclose(f);
+    return n;
+}
+
+/* 64 位版本：>2GB 的文件用 ftell(long) 会溢出，那正是本项目要测的缺陷之一，
+ * 测试自己不能踩（否则「长度断言」永远失灵）。 */
+static long long file_size_i64_of(const char *path)
+{
+    FILE *f = utf8_fopen_rb(path);
+    if (!f) return -1;
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long long n = _ftelli64(f);
+    fclose(f);
+    return n;
+}
+
+/* 校验文件内容是否与测试服务端的确定性负载逐字节一致：byte[i] == i % 251。
+ * 返回 1=一致，0=内容不一致，-1=长度不对，-2=读不到文件。
+ * ⚠️ 为什么非要比对内容：本项目修过的缺陷正是「大小对、状态显示已完成、内容却错位」——
+ * 只看长度或只看 status 都抓不到它。 */
+static int content_matches_pattern(const char *path, long long expect_size)
+{
+    FILE *f = utf8_fopen_rb(path);
+    if (!f) return -2;
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return -2; }
+    long long n = _ftelli64(f);
+    if (n != expect_size) { fclose(f); return -1; }
+    if (_fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return -2; }
+
+    unsigned char buf[65536];
+    long long off = 0;
+    int ok = 1;
+    while (off < n) {
+        long long left = n - off;
+        size_t want = (size_t)(left > (long long)sizeof(buf) ? (long long)sizeof(buf) : left);
+        size_t got = fread(buf, 1, want, f);
+        if (got != want) { ok = 0; break; }
+        for (size_t k = 0; k < got; k++) {
+            if (buf[k] != (unsigned char)((off + (long long)k) % 251)) { ok = 0; break; }
+        }
+        if (!ok) break;
+        off += (long long)got;
+    }
+    fclose(f);
+    return ok ? 1 : 0;
+}
+
+/* 等待任务进入**终态**（完成 3 / 失败 4）。
+ * ⚠️ 不能用 wait_task：不支持 Range 的降级重下会瞬时把任务置为「已取消」(5)，
+ * 那个中间态会被 wait_task 当成结束，用例就会误判为失败。 */
+static int wait_final(int id, int timeout_ms, int *out_status, int64_t *out_downloaded)
+{
+    int waited = 0;
+    while (waited < timeout_ms) {
+        TaskInfo info;
+        if (dlmgr_get_task_info(id, &info) != 0) return -1;
+        if (info.status == 3 || info.status == 4) {
+            if (out_status)     *out_status = info.status;
+            if (out_downloaded) *out_downloaded = info.downloaded;
+            return 0;
+        }
+        Sleep(100);
+        waited += 100;
+    }
+    if (out_status) *out_status = -1;
+    return -1;
+}
+
+/* 删除测试产物（含 .idmtmp）。必须走宽字符 API，理由同 utf8_fopen_rb。
+ * ⚠️ 不做这一步的话，上一轮遗留的产物会让「落盘文件与下载字节一致」在
+ * 本轮完全失败的情况下依然通过——测试自己制造假阳性，比没有测试更糟。 */
+static void utf8_delete(const char *path)
+{
+    wchar_t wpath[MAX_PATH * 2];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
+                            (int)(sizeof(wpath) / sizeof(wpath[0]))) <= 0)
+        return;
+    DeleteFileW(wpath);
+}
+
+/* 清除本轮会写入的所有产物，返回清理前残留的非空文件数（>0 说明上轮有遗留） */
+static int clean_outputs(const char *outdir)
+{
+    static const char *names[] = { "noauth.bin", "withauth.bin", "nocap.bin",
+                                   "cap.bin", "shared.bin", "norange.bin",
+                                   "bigoffset.bin",
+                                   "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
+    int leftover = 0;
+    for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
+        char p[MAX_PATH + 64];
+        snprintf(p, sizeof(p), "%s\\%s", outdir, names[i]);
+        if (file_size_of(p) > 0) leftover++;
+        utf8_delete(p);
+        snprintf(p, sizeof(p), "%s\\%s.idmtmp", outdir, names[i]);
+        utf8_delete(p);
+    }
+    return leftover;
+}
+
+/* ── 测试服务的并发统计（免认证接口 /_stats、/_reset）── */
+/* 清零服务端统计，使每次测得的并发峰值只反映本轮任务 */
+static void server_reset(int port)
+{
+    char u[256];
+    snprintf(u, sizeof(u), "http://127.0.0.1:%d/_reset", port);
+    NetResponse r = network_get_html(u, NULL);
+    free(r.data);
+}
+
+/* 取 /_stats 里的整数字段，如 "max_cur"。取不到返回 -1。 */
+static int server_stat(int port, const char *key)
+{
+    char u[256];
+    snprintf(u, sizeof(u), "http://127.0.0.1:%d/_stats", port);
+    NetResponse r = network_get_html(u, NULL);
+    if (!r.data) return -1;
+    int val = -1;
+    const char *p = strstr(r.data, key);
+    if (p) {
+        p = strchr(p, ':');
+        if (p) val = atoi(p + 1);
+    }
+    free(r.data);
+    return val;
+}
+
+/* 打印完整 /_stats（诊断用） */
+static void server_dump_stats(int port, const char *tag)
+{
+    char u[256];
+    snprintf(u, sizeof(u), "http://127.0.0.1:%d/_stats", port);
+    NetResponse r = network_get_html(u, NULL);
+    printf("      [stats:%s] %s\n", tag, r.data ? r.data : "(null)");
+    free(r.data);
+}
+
+int main(int argc, char **argv)
+{
+    int port = (argc > 1) ? atoi(argv[1]) : 18080;
+    const char *user = (argc > 2) ? argv[2] : "idmuser";
+    const char *pass = (argc > 3) ? argv[3] : "idmpass";
+
+    char url[512], outdir[MAX_PATH];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/secret.bin", port);
+    snprintf(outdir, sizeof(outdir), "%s\\idm_selftest_out",
+             getenv("TEMP") ? getenv("TEMP") : ".");
+    CreateDirectoryA(outdir, NULL);
+
+    printf("== 下载引擎自测（本地带 Basic 认证的 HTTP 服务 127.0.0.1:%d）==\n", port);
+    dlmgr_init(NULL);
+
+    /* 先等服务端真的开始监听再开测。
+     * ⚠️ 这不是保险起见：服务端是 Python，进程起来了但 socket 还没 listen 的那一两百毫秒里
+     * 发请求会得到「连不上」，而 [0] HEAD 探测会把它记成 file_size=-1 —— 一条与代码无关的
+     * 假失败；更坏的是后面「无凭据必须失败」那类用例反而会因此假通过。
+     * 用 /_stats 轮询到有响应为止，把启动竞态从结果里彻底剔掉。 */
+    {
+        int ready = 0;
+        for (int i = 0; i < 100 && !ready; i++) {
+            if (server_stat(port, "auth_ok") >= 0) { ready = 1; break; }
+            Sleep(100);
+        }
+        printf("    服务端就绪检查：%s\n", ready ? "已响应 /_stats" : "★超时，后续结果不可信");
+    }
+
+    {
+        int leftover = clean_outputs(outdir);
+        printf("    输出目录 %s（清理了 %d 个上轮遗留产物）\n", outdir, leftover);
+    }
+
+    /* ── 0. HEAD 探测：大小 / Range 支持 ──
+     * 这是分段下载的前提：探测拿不到大小 → piece 数只能是 1 → 多线程引擎完全不参与。
+     * 所以单独断言一次，避免「下载成功」掩盖「根本没分段」。 */
+    printf("\n[0] HEAD 探测：文件大小与 Range 支持\n");
+    {
+        char huge[512];
+        snprintf(huge, sizeof(huge), "http://127.0.0.1:%d/huge.bin", port);
+        NetOptions opt = network_default_options();
+        char au[128], ap[128];
+        strncpy(au, user, sizeof(au) - 1); au[sizeof(au) - 1] = '\0';
+        strncpy(ap, pass, sizeof(ap) - 1); ap[sizeof(ap) - 1] = '\0';
+        opt.auth_user = au;
+        opt.auth_pass = ap;
+
+        NetworkProbe pr = network_probe(huge, &opt);
+        printf("      success=%d file_size=%lld supports_range=%d http=%ld ver=%s\n",
+               pr.success, (long long)pr.file_size, pr.supports_range,
+               pr.http_code, pr.http_version);
+        char d[200];
+        snprintf(d, sizeof(d), "期望 %d，实得 %lld", 40 * 1024 * 1024, (long long)pr.file_size);
+        check("探测到正确的文件大小", pr.file_size == 40 * 1024 * 1024, d);
+        snprintf(d, sizeof(d), "supports_range=%d", pr.supports_range);
+        check("探测到服务器支持 Range", pr.supports_range == 1, d);
+    }
+
+    /* ── 1. 负向对照：无凭据必须失败 ── */
+    printf("\n[1] 未配置站点登录 → 401 站点应当失败\n");
+    {
+        int id = dlmgr_add(url, outdir, "noauth.bin", 4, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 15000, &st, &dl);
+            char d[160];
+            snprintf(d, sizeof(d), "status=%d downloaded=%lld", st, (long long)dl);
+            check("无凭据时判定为失败（status=4）", st == 4, d);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 2. 站点登录：必须成功 ── */
+    printf("\n[2] 配置站点登录 → 同一 URL 应当成功\n");
+    {
+        DownloadConfig cfg = dlmgr_get_config();
+        memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+        cfg.site_login_count = 1;
+        strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+        strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user) - 1);
+        strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass) - 1);
+        dlmgr_set_config(&cfg);
+
+        int id = dlmgr_add(url, outdir, "withauth.bin", 4, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            char d[160];
+            snprintf(d, sizeof(d), "status=%d downloaded=%lld", st, (long long)dl);
+            check("带凭据下载完成（status=3）", st == 3 && dl > 0, d);
+
+            char path[MAX_PATH + 64];
+            snprintf(path, sizeof(path), "%s\\withauth.bin", outdir);
+            long fsz = file_size_of(path);
+            snprintf(d, sizeof(d), "file=%ld downloaded=%lld", fsz, (long long)dl);
+            check("落盘文件与下载字节一致", fsz > 0 && fsz == (long)dl, d);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 3. 每服务器连接数：验证**真实并发连接数**被封顶 ──
+     * /huge.bin 是 40 MiB，DEFAULT_CHUNK_SIZE 4 MiB → by_size = 10 片。
+     * 请求线程数 8：不封顶时并发应为 min(8, 10) = 8；
+     * 设 max_conn_per_server = 2 后并发必须 ≤ 2。
+     * 分片数只是弱代理（3 片时无论封不封顶都 ≤3），所以这里直接看服务端的并发峰值。 */
+    printf("\n[3] 每服务器连接数：真实并发连接数封顶（服务端统计并发峰值）\n");
+    {
+        char huge[512];
+        snprintf(huge, sizeof(huge), "http://127.0.0.1:%d/huge.bin", port);
+
+        /* 3a. 不封顶（对照） */
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            cfg.max_conn_per_server = 0;
+            cfg.site_login_count = 1;
+            dlmgr_set_config(&cfg);
+            server_reset(port);
+
+            int id = dlmgr_add(huge, outdir, "nocap.bin", 8, NULL, NULL, NULL, NULL);
+            check("任务创建成功", id >= 0, "");
+            if (id >= 0) {
+                dlmgr_start(id);
+                int st = 0; int64_t dl = 0;
+                wait_task(id, 120000, &st, &dl);
+                int peak = server_stat(port, "max_cur");
+                server_dump_stats(port, "3a 不封顶");
+                TaskInfo ti;
+                if (dlmgr_get_task_info(id, &ti) == 0)
+                    printf("      chunk_count=%d（40MiB/4MiB 期望 10）\n", ti.chunk_count);
+                char d[200];
+                snprintf(d, sizeof(d), "status=%d downloaded=%lld 并发峰值=%d（期望 >=4）",
+                         st, (long long)dl, peak);
+                check("不封顶时确实并发（对照有效）", st == 3 && peak >= 4, d);
+                dlmgr_remove(id);
+            }
+        }
+
+        /* 3b. 封顶 2 */
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            cfg.max_conn_per_server = 2;
+            cfg.site_login_count = 1;
+            dlmgr_set_config(&cfg);
+            server_reset(port);
+
+            int id = dlmgr_add(huge, outdir, "cap.bin", 8, NULL, NULL, NULL, NULL);
+            check("任务创建成功", id >= 0, "");
+            if (id >= 0) {
+                dlmgr_start(id);
+                int st = 0; int64_t dl = 0;
+                wait_task(id, 120000, &st, &dl);
+                int peak = server_stat(port, "max_cur");
+                server_dump_stats(port, "3b 封顶2");
+                char d[200];
+                snprintf(d, sizeof(d), "status=%d downloaded=%lld 并发峰值=%d（期望 <=2）",
+                         st, (long long)dl, peak);
+                check("并发被 max_conn_per_server 封顶到 2", st == 3 && peak > 0 && peak <= 2, d);
+                dlmgr_remove(id);
+            }
+        }
+    }
+
+    /* ── 4. 中文文件名端到端 ── */
+    printf("\n[4] 中文文件名落盘\n");
+    {
+        /* UTF-8 字节：中文名文件.bin */
+        const char *cn = "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin";
+        int id = dlmgr_add(url, outdir, cn, 2, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            char path[MAX_PATH + 64];
+            snprintf(path, sizeof(path), "%s\\%s", outdir, cn);
+            long fsz = file_size_of(path);
+            char d[MAX_PATH + 96];
+            snprintf(d, sizeof(d), "status=%d file=%ld path=%s", st, fsz, path);
+            check("中文文件名文件存在于磁盘且非空", st == 3 && fsz > 0, d);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 5. 「不使用代理」必须压得住环境变量代理 ──
+     * libcurl 默认会读 http_proxy / HTTPS_PROXY / all_proxy。若不显式下发
+     * CURLOPT_PROXY，用户界面上选的「直连」会被环境变量悄悄推翻：请求被送进
+     * 代理，本机服务收到的请求行变成绝对 URL → 404；或者直接被代理拦成 401。
+     * 这是真实踩过的坑（不是假想），所以固定成回归项。 */
+    printf("\n[5] 「不使用代理」不得被环境变量代理覆盖\n");
+    {
+        char small[512];
+        snprintf(small, sizeof(small), "http://127.0.0.1:%d/small.bin", port);
+
+        /* ⚠️ 不能只「看看进程里有没有 http_proxy」然后照样 PASS——环境变量本来就没设时，
+         *    这个用例什么也没验证，却永远是绿的（不会失败的测试等于没测）。
+         *    必须自己塞一个**必然连不通**的代理进去：只有引擎真的显式下发了
+         *    CURLOPT_PROXY=""，直连才会成功；若引擎放任 libcurl 去读环境变量，
+         *    请求就会被打到 127.0.0.1:9（discard 端口，没人监听）上、以连接失败告终。
+         *    这样本用例在「环境本来干净」和「环境本来有代理」两种机器上都真的在测东西。 */
+        static char envbuf[512];
+        char saved[512] = {0};
+        const char *hp = getenv("http_proxy");
+        const int had_hp = (hp && hp[0]) ? 1 : 0;
+        if (had_hp) snprintf(saved, sizeof(saved), "%s", hp);
+        snprintf(envbuf, sizeof(envbuf), "http_proxy=http://127.0.0.1:9");
+        _putenv(envbuf);
+        const char *now = getenv("http_proxy");
+        printf("      强制注入 http_proxy=%s（原有值：%s）\n",
+               (now && now[0]) ? now : "(注入失败)", had_hp ? saved : "(未设置)");
+        /* 注入失败就必须判失败，否则本用例又会退化成永远绿的摆设。 */
+        check("已注入一个必然连不通的代理（确保本用例真的在测东西）",
+              now && now[0] != '\0', "");
+
+        DownloadConfig cfg = dlmgr_get_config();
+        cfg.proxy_type = PROXY_NONE;
+        cfg.site_login_count = 1;
+        dlmgr_set_config(&cfg);
+
+        int id = dlmgr_add(small, outdir, "shared.bin", 2, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            char path[MAX_PATH + 64];
+            snprintf(path, sizeof(path), "%s\\shared.bin", outdir);
+            long fsz = file_size_of(path);
+            char d[200];
+            snprintf(d, sizeof(d), "status=%d downloaded=%lld file=%ld",
+                     st, (long long)dl, fsz);
+            check("界面选「不使用代理」时，环境里的 http_proxy 被压住、真直连成功",
+                  st == 3 && fsz == 1024 * 1024, d);
+            dlmgr_remove(id);
+        }
+
+        /* 还原环境，别把副作用带给后面的用例 */
+        snprintf(envbuf, sizeof(envbuf), "http_proxy=%s", had_hp ? saved : "");
+        _putenv(envbuf);
+    }
+
+    /* ── 6. 服务器宣称支持 Range、实际无视它 ──
+     * /norange.bin 的 HEAD 回 Accept-Ranges: bytes，GET 时却永远 200 + 整份文件。
+     * 引擎若按「分片偏移顺序写」处理，就会把从 0 开始的全量数据灌进分片位置，
+     * 产出一个大小看着对、内容整体错位、状态还显示「已完成」的文件。
+     * 期望：识别出服务器不吃 Range，自动降级为单连接重下，落盘内容逐字节正确。 */
+    printf("\n[6] 服务器无视 Range → 必须自动降级为单连接，且内容正确\n");
+    {
+        char nu[512], path[MAX_PATH + 64];
+        snprintf(nu, sizeof(nu), "http://127.0.0.1:%d/norange.bin", port);
+        snprintf(path, sizeof(path), "%s\\norange.bin", outdir);
+        utf8_delete(path);
+        {   char t[MAX_PATH + 64];
+            snprintf(t, sizeof(t), "%s.idmtmp", path); utf8_delete(t); }
+
+        server_reset(port);
+        /* 站点登录仍按上一节配置？[5] 只改了 proxy_type，site_login_count 保持 1，无需重设 */
+
+        int id = dlmgr_add(nu, outdir, "norange.bin", 4, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 120000, &st, &dl);
+
+            int ranged = server_stat(port, "norange_range");
+            char d[240];
+            snprintf(d, sizeof(d), "服务端收到的带 Range 请求数=%d", ranged);
+            /* 没有这条断言，本用例可能在「引擎压根没分段」的情况下永远绿——那是假阳性 */
+            check("确实向服务端发过 Range 请求（确保本用例真的触发了该场景）", ranged > 0, d);
+
+            snprintf(d, sizeof(d), "status=%d downloaded=%lld", st, (long long)dl);
+            check("降级重下后完成（status=3）", st == 3, d);
+
+            int mc = content_matches_pattern(path, 12LL * 1024 * 1024);
+            snprintf(d, sizeof(d), "file_size=%lld 比对结果=%d（1=一致 0=内容错位 -1=长度不对 -2=无文件）",
+                     file_size_i64_of(path), mc);
+            check("落盘内容与源文件逐字节一致（不是「大小对但内容错位」）", mc == 1, d);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 7. >2GB 偏移写盘：32 位 long 截断的直接探针 ──
+     * 在 3 GiB（跨越 2^31）处请求 4 KiB。Windows 上 long 是 32 位，
+     * 若偏移被 `(long)` 截断，数据就会写到别的offset上，文件长度随之变成
+     * 「被截断后的偏移 + 4096」——长度断言即可抓到；再补一次内容比对堵死角。
+     * 只传 4 KiB，所以不需要真的下 3 GiB。 */
+    printf("\n[7] >2GB 偏移写盘（32 位 long 截断探针）\n");
+    {
+        const long long BIG = 3LL * 1024 * 1024 * 1024;   /* 3 GiB */
+        const long long LEN = 4096;
+        char bu[512], path[MAX_PATH + 64];
+        snprintf(bu, sizeof(bu), "http://127.0.0.1:%d/bigoffset.bin", port);
+        snprintf(path, sizeof(path), "%s\\bigoffset.bin", outdir);
+        utf8_delete(path);
+
+        NetOptions opt = network_default_options();
+        char au[128], ap[128];
+        strncpy(au, user, sizeof(au) - 1); au[sizeof(au) - 1] = '\0';
+        strncpy(ap, pass, sizeof(ap) - 1); ap[sizeof(ap) - 1] = '\0';
+        opt.auth_user = au;
+        opt.auth_pass = ap;
+
+        NetDownloadTask nd;
+        memset(&nd, 0, sizeof(nd));
+        nd.url         = bu;
+        nd.save_path   = path;
+        nd.range_start = BIG;
+        nd.range_end   = BIG + LEN - 1;
+        nd.opt         = &opt;
+
+        NetDownloadResult r = network_download_range(&nd);
+        char d[240];
+        snprintf(d, sizeof(d), "success=%d http=%ld written=%lld err=%s",
+                 r.success, r.http_code, (long long)r.bytes_written, r.error_msg);
+        check("3 GiB 偏移处的 Range 请求成功（HTTP 206）",
+              r.success && r.http_code == 206, d);
+
+        long long fsz = file_size_i64_of(path);
+        snprintf(d, sizeof(d), "file=%lld 期望=%lld（偏移+长度）", fsz, BIG + LEN);
+        check("文件长度 = 3GiB + 4KiB（偏移没有被截断到低位）", fsz == BIG + LEN, d);
+
+        /* 内容比对：把 3 GiB 处那 4 KiB 读回来，逐字节核对 */
+        int mc = 0;
+        {
+            FILE *f = utf8_fopen_rb(path);
+            if (f && _fseeki64(f, BIG, SEEK_SET) == 0) {
+                unsigned char buf[4096];
+                size_t got = fread(buf, 1, sizeof(buf), f);
+                mc = (got == sizeof(buf)) ? 1 : 0;
+                for (size_t k = 0; mc == 1 && k < got; k++) {
+                    if (buf[k] != (unsigned char)((BIG + (long long)k) % 251)) mc = 0;
+                }
+            }
+            if (f) fclose(f);
+        }
+        snprintf(d, sizeof(d), "比对结果=%d（1=一致）", mc);
+        check("3 GiB 处读回的字节与源数据一致（数据没写错位置）", mc == 1, d);
+
+        utf8_delete(path);
+    }
+
+    /* ── 8. 暂停排队中的任务：状态必须真的变成「已暂停」──
+     * 原实现只在 RUNNING 时改状态、对 PENDING 静默返回 0，于是 GUI 把行标成「已暂停」
+     * 而引擎里还是 PENDING —— 退出后以 PENDING 落盘，下次启动队列调度器照样拉起来下载。
+     * 这条同时是「暂停→继续」的回归闸：need_size 若仍按「状态==PENDING」判断，
+     * 继续时就会跳过探测分段，chunk_count 停在 0，线程拿着 0 个分片空转到超时。 */
+    printf("\n[8] 暂停排队中的任务（PENDING → PAUSED）与暂停后继续\n");
+    {
+        char su[512], sp[MAX_PATH + 64];
+        snprintf(su, sizeof(su), "http://127.0.0.1:%d/small.bin", port);
+        snprintf(sp, sizeof(sp), "%s\\pausetest.bin", outdir);
+        utf8_delete(sp);
+
+        int id = dlmgr_add(su, outdir, "pausetest.bin", 4, NULL, NULL, NULL, NULL);
+        TaskInfo ti;
+        char d[240];
+
+        memset(&ti, 0, sizeof(ti));
+        int got0 = (dlmgr_get_task_info(id, &ti) == 0);
+        snprintf(d, sizeof(d), "id=%d status=%d（0=等待下载）", id, got0 ? ti.status : -1);
+        check("新建任务是排队中（PENDING）而不是已在下载", got0 && ti.status == 0, d);
+
+        int prc = dlmgr_pause(id);
+        memset(&ti, 0, sizeof(ti));
+        int got1 = (dlmgr_get_task_info(id, &ti) == 0);
+        snprintf(d, sizeof(d), "pause 返回=%d，status=%d（2=已暂停）", prc, got1 ? ti.status : -1);
+        check("暂停排队中的任务后状态为「已暂停」", prc == 0 && got1 && ti.status == 2, d);
+
+        /* 落盘再读回：暂停必须写进状态文件，否则重启后它会自己开始 */
+        char stPath[MAX_PATH + 64];
+        snprintf(stPath, sizeof(stPath), "%s\\pausetest.json", outdir);
+        int sv = dlmgr_save_state(stPath);
+        char want[64];
+        snprintf(want, sizeof(want), "\"id\":%d", id);
+        char body[16384];
+        body[0] = '\0';
+        utf8_read_file(stPath, body, sizeof(body));
+        char *obj = strstr(body, want);
+        int persisted = 0;
+        if (obj) {
+            char *st = strstr(obj, "\"status\":");
+            if (st) persisted = (atoi(st + 9) == 2);
+        }
+        snprintf(d, sizeof(d), "save 返回=%d，文件里该任务 status=%s",
+                 sv, persisted ? "2" : "(不是 2)");
+        check("暂停状态已落盘（下次启动不会自动开始）", sv == 0 && persisted, d);
+
+        /* 继续：这里才是 need_size 判据的回归点 */
+        dlmgr_start(id);
+        int st = -1; int64_t dl = 0;
+        int fin = wait_final(id, 15000, &st, &dl);
+        memset(&ti, 0, sizeof(ti));
+        dlmgr_get_task_info(id, &ti);
+        snprintf(d, sizeof(d), "wait=%d status=%d chunk_count=%d downloaded=%lld",
+                 fin, st, ti.chunk_count, (long long)dl);
+        /* chunk_count > 0 是关键：暂停后继续若跳过探测，这里会是 0（线程空转） */
+        /* wait_final 成功返回 0（沿用既有约定），别写成 `if (fin && ...)` 反过来 */
+        check("暂停后继续能真正下完（status=3）", fin == 0 && st == 3, d);
+        check("继续时确实做了分段（chunk_count>0，不是空转）", ti.chunk_count > 0, d);
+
+        int mc = content_matches_pattern(sp, 1024 * 1024);
+        snprintf(d, sizeof(d), "file_size=%lld 比对=%d（1=逐字节一致）",
+                 file_size_i64_of(sp), mc);
+        check("继续后落盘内容逐字节正确", mc == 1, d);
+
+        dlmgr_remove(id);
+        utf8_delete(sp);
+        utf8_delete(stPath);
+    }
+
+    /* ── 9. 状态文件转义：写→读→再写，字符串一字不差 ──
+     * 原实现直接 %s 把路径写进 JSON。Windows 目录里全是反斜杠，产出的是 "\Users" 这种
+     * 非法转义序列 —— 严格解析器（QJsonDocument）会因一个字符读不出整份文件，所有任务
+     * 一起丢。这里手工造一份「转义版」状态文件，加载后再存一次，两份里该任务的
+     * url/file/dir 三元组必须完全相同（能发现「转义了但没还原」这类半吊子修法）。 */
+    printf("\n[9] 状态文件 JSON 转义：含反斜杠与引号的路径往返\n");
+    {
+        char fA[MAX_PATH + 64], fB[MAX_PATH + 64];
+        snprintf(fA, sizeof(fA), "%s\\esc_a.json", outdir);
+        snprintf(fB, sizeof(fB), "%s\\esc_b.json", outdir);
+
+        /* 与写入器完全同构的布局；字符串部分已按 JSON 规则转义：
+         *   dir  = D:\idm test\子目录   → "D:\\idm test\\子目录"
+         *   file = say "hi".bin        → "say \"hi\".bin"
+         *   url  = https://x/a?q=1\2   → "https://x/a?q=1\\2" */
+        const char *content =
+            "{\n  \"idmFormat\": 2,\n  \"tasks\": [\n"
+            "    {\"id\":9001, \"url\":\"https://ex.test/a?q=1\\\\2\", "
+            "\"file\":\"say \\\"hi\\\".bin\", \"dir\":\"D:\\\\idm test\\\\sub\", "
+            "\"size\":1024, \"downloaded\":0, \"status\":2,\n"
+            "     \"chunks\":[] }\n"
+            "  ]\n}\n";
+        {
+            long wr = utf8_write_file(fA, content);
+            (void)wr;
+        }
+
+        int ld = dlmgr_load_state(fA);
+        TaskInfo ti;
+        memset(&ti, 0, sizeof(ti));
+        int got = (dlmgr_get_task_info(9001, &ti) == 0);
+        char d[240];
+        snprintf(d, sizeof(d), "load 返回=%d 能否按 id 找到=%d status=%d",
+                 ld, got, got ? ti.status : -1);
+        check("转义版状态文件能被加载（id=9001 可查）", ld == 0 && got, d);
+
+        /* 文件名里的引号必须原样还原，不能把 \" 之后的半截当成结束 */
+        snprintf(d, sizeof(d), "filename=「%s」期望「say \"hi\".bin」", ti.filename);
+        check("文件名中的引号被正确还原", strcmp(ti.filename, "say \"hi\".bin") == 0, d);
+
+        int sv = dlmgr_save_state(fB);
+        /* 同一个任务对象里的 "url"/"file"/"dir" 三元组，两份文件应逐字符相同。
+         * 这是「转义 + 还原」闭环的直接证据：只转义不还原的话第二次写出的内容会变。 */
+        char ta[1024] = "", tb[1024] = "";
+        const char *keys = "\"url\":";
+        const char *stop = "\", \"size\":";
+        char wholeA[16384], wholeB[16384];
+        wholeA[0] = wholeB[0] = '\0';
+        utf8_read_file(fA, wholeA, sizeof(wholeA));
+        utf8_read_file(fB, wholeB, sizeof(wholeB));
+        char *a = strstr(wholeA, keys); char *z = a ? strstr(a, stop) : NULL;
+        if (a && z) { size_t len = (size_t)(z - a); if (len < sizeof(ta)) { memcpy(ta, a, len); ta[len] = '\0'; } }
+        char *b = strstr(wholeB, keys); char *z2 = b ? strstr(b, stop) : NULL;
+        if (b && z2) { size_t len2 = (size_t)(z2 - b); if (len2 < sizeof(tb)) { memcpy(tb, b, len2); tb[len2] = '\0'; } }
+        snprintf(d, sizeof(d), "写回=%d\n      原: %s\n      新: %s", sv, ta, tb);
+        check("加载后再存一次，url/file/dir 三元组逐字符不变",
+              sv == 0 && ta[0] && strcmp(ta, tb) == 0, d);
+
+        dlmgr_remove(9001);
+        utf8_delete(fA);
+        utf8_delete(fB);
+    }
+
+    /* ── 10. 乱序 task_id 的状态文件：加载后仍能按 id 找到 ──
+     * find_task 是二分查找，依赖数组按 task_id 升序。文件顺序 = 数组顺序（未修时），
+     * 这里故意把 9001 放在最后：从 [9002, 9003, 9001] 里找 9001，二分会在前半段
+     * 反复收窄后判定「不存在」。修好之后（加载末尾统一排序）三个 id 都必须可查。 */
+    printf("\n[10] 乱序 task_id 的状态文件（二分查找不变量）\n");
+    {
+        char fp[MAX_PATH + 64];
+        snprintf(fp, sizeof(fp), "%s\\unordered.json", outdir);
+        const char *content =
+            "{\n  \"idmFormat\": 2,\n  \"tasks\": [\n"
+            "    {\"id\":9002, \"url\":\"https://ex.test/b2\", \"file\":\"b2\", \"dir\":\"D:\\\\u\", "
+            "\"size\":10, \"downloaded\":0, \"status\":2,\n     \"chunks\":[] },\n"
+            "    {\"id\":9003, \"url\":\"https://ex.test/b3\", \"file\":\"b3\", \"dir\":\"D:\\\\u\", "
+            "\"size\":10, \"downloaded\":0, \"status\":2,\n     \"chunks\":[] },\n"
+            "    {\"id\":9001, \"url\":\"https://ex.test/b1\", \"file\":\"b1\", \"dir\":\"D:\\\\u\", "
+            "\"size\":10, \"downloaded\":0, \"status\":2,\n     \"chunks\":[] }\n"
+            "  ]\n}\n";
+        {
+            long wr = utf8_write_file(fp, content);
+            (void)wr;
+        }
+
+        int ld = dlmgr_load_state(fp);
+        TaskInfo ti;
+        char d[240];
+        int ok2 = 0, ok3 = 0, ok1 = 0;
+        memset(&ti, 0, sizeof(ti)); if (dlmgr_get_task_info(9002, &ti) == 0) ok2 = (ti.task_id == 9002);
+        memset(&ti, 0, sizeof(ti)); if (dlmgr_get_task_info(9003, &ti) == 0) ok3 = (ti.task_id == 9003);
+        memset(&ti, 0, sizeof(ti)); if (dlmgr_get_task_info(9001, &ti) == 0) ok1 = (ti.task_id == 9001);
+        snprintf(d, sizeof(d), "load=%d 可查: 9001=%d 9002=%d 9003=%d", ld, ok1, ok2, ok3);
+        check("乱序文件加载后三个 id 都能查到（9001 是修复前必失的那个）",
+              ld == 0 && ok1 && ok2 && ok3, d);
+
+        /* 顺带确认「暂停/删除」这类按 id 操作也真的生效（都走 find_task） */
+        int prc = dlmgr_pause(9001);
+        memset(&ti, 0, sizeof(ti));
+        dlmgr_get_task_info(9001, &ti);
+        snprintf(d, sizeof(d), "pause 返回=%d status=%d", prc, ti.status);
+        check("乱序文件里的任务同样能被暂停", prc == 0 && ti.status == 2, d);
+
+        dlmgr_remove(9001);
+        dlmgr_remove(9002);
+        dlmgr_remove(9003);
+        utf8_delete(fp);
+    }
+
+    /* ── 11. 重复 load 的幂等性：同一进程第二次 load 不得让队列翻倍 ──
+     * 原实现只往 g_tasks[] 尾部追加，所以「文件里 3 条」加载两次得到 6 条，
+     * 而且 task_id 成对重复 —— find_task 的二分会在同一条上反复命中，
+     * 「任务数莫名变多 / 删了一条还剩一条」这类现象都由此而来。
+     * 真实触发路径不是理论推演：走查工具里连开两个 MainWindow（各构造一次），
+     * 用户目录里的 tasks.json 就从 61 条涨到 117 条并被写回磁盘。
+     * 这里直接连 load 两次，第二次必须仍是 3 条且 id 不重复。 */
+    printf("\n[11] 重复 dlmgr_load_state 的幂等性（队列不得翻倍）\n");
+    {
+        char fp[MAX_PATH + 64];
+        snprintf(fp, sizeof(fp), "%s\\idempotent.json", outdir);
+        const char *content =
+            "{\n  \"idmFormat\": 2,\n  \"tasks\": [\n"
+            "    {\"id\":9101, \"url\":\"https://ex.test/i1\", \"file\":\"i1\", \"dir\":\"D:\\\\i\", "
+            "\"size\":10, \"downloaded\":0, \"status\":2,\n     \"chunks\":[] },\n"
+            "    {\"id\":9102, \"url\":\"https://ex.test/i2\", \"file\":\"i2\", \"dir\":\"D:\\\\i\", "
+            "\"size\":10, \"downloaded\":0, \"status\":2,\n     \"chunks\":[] },\n"
+            "    {\"id\":9103, \"url\":\"https://ex.test/i3\", \"file\":\"i3\", \"dir\":\"D:\\\\i\", "
+            "\"size\":10, \"downloaded\":0, \"status\":2,\n     \"chunks\":[] }\n"
+            "  ]\n}\n";
+        { long wr = utf8_write_file(fp, content); (void)wr; }
+
+        int ids[64];
+        char d[240];
+
+        int ld1 = dlmgr_load_state(fp);
+        int n1 = dlmgr_list(ids, 64);
+
+        /* 再来一次：模拟「同一进程里又构造了一次主窗口」 */
+        int ld2 = dlmgr_load_state(fp);
+        int n2 = dlmgr_list(ids, 64);
+
+        snprintf(d, sizeof(d), "第一次 load=%d 得到 %d 条；第二次 load=%d 得到 %d 条（期望 3/3）",
+                 ld1, n1, ld2, n2);
+        check("同一进程重复 load 后任务数不翻倍", ld1 == 0 && ld2 == 0 && n1 == 3 && n2 == 3, d);
+
+        /* 数量对了还不够：重复 id 会让二分查找退化，逐个确认三条都在 */
+        int c1 = 0, c2 = 0, c3 = 0;
+        for (int i = 0; i < n2; i++) {
+            if (ids[i] == 9101) c1++;
+            else if (ids[i] == 9102) c2++;
+            else if (ids[i] == 9103) c3++;
+        }
+        snprintf(d, sizeof(d), "id 出现次数: 9101×%d 9102×%d 9103×%d（各应为 1 次）", c1, c2, c3);
+        check("重复 load 后 task_id 不重复、三条任务都在", c1 == 1 && c2 == 1 && c3 == 1, d);
+
+        /* 按 id 操作仍要命中唯一那条 */
+        TaskInfo ti;
+        memset(&ti, 0, sizeof(ti));
+        int ok = (dlmgr_get_task_info(9102, &ti) == 0) && ti.task_id == 9102;
+        snprintf(d, sizeof(d), "get_task_info(9102) 成功=%d", ok);
+        check("重复 load 后按 id 查任务仍然唯一且正确", ok, d);
+
+        dlmgr_remove(9101);
+        dlmgr_remove(9102);
+        dlmgr_remove(9103);
+        utf8_delete(fp);
+    }
+
+    dlmgr_destroy();
+    printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
+    return g_fail;
+}
