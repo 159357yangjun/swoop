@@ -36,6 +36,7 @@ class QDialog;
 class WebServer;
 class AutoPowerController;
 class IpcServer;
+class ScheduleService;
 class EmptyStateOverlay;
 class SidebarPanel;
 
@@ -127,6 +128,9 @@ private slots:
     void onQueueScheduler();
     void onTaskContextMenu(const QPoint& pos);
 
+    // 定时任务到期（由 ScheduleService::taskDue 转发，启动下载 + 托盘/状态栏反馈）
+    void onScheduledTaskDue(int id);
+
     // 完成通知聚合（批量完成时合并托盘气泡 + 单次提示音）
     void onNotifyTimer();
     void updateEmptyState();      // 空状态插画显隐
@@ -143,9 +147,6 @@ protected:
 private slots:
     void onTrayActivated();
     void onClipboardChanged();  // 剪贴板变化时检测下载链接
-    void onCheckScheduledTasks();  // 定时任务到期检查
-    void loadSchedules();          // 启动时从配置恢复定时/重复设置
-    void saveSchedules() const;    // 把定时/重复设置写回配置
     void rebuildQueueTree();  // 队列增删改后重建左侧树的队列节点
 
 private:
@@ -215,13 +216,11 @@ private:
     QSystemTrayIcon*  m_trayIcon;  // 系统托盘图标
     bool              m_trayMinimize = false;  // 是否最小化到托盘
 
-    // 定时下载：taskId → 计划开始时间；m_recurringTasks 里的是「每日重复」的那部分
-    QMap<int, QDateTime> m_scheduledTasks;
-    QSet<int>            m_recurringTasks;
+    // 定时下载（L2 组件，见 src/app/schedule_service.*）
+    ScheduleService*     m_scheduleService = nullptr;
     // 因「同时下载的任务数」上限而暂缓启动的任务（只登记这些，不含用户自己留着
     // 不开始的任务——那些必须等用户明确点开始，不能由调度器擅自拉起）。
     QSet<int>            m_deferredByCap;
-    QTimer*              m_scheduleTimer = nullptr;
 
     // IPC 单实例通信（L2 组件，见 src/app/ipc_server.*）
     IpcServer*            m_ipcServer = nullptr;

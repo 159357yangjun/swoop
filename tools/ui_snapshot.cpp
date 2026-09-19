@@ -28,6 +28,7 @@
 #include "button_translator.h"
 #include "app_icons.h"
 #include "app_paths.h"
+#include "schedule_service.h"
 #include <stdio.h>
 #include <QDateTime>
 #include <QStatusBar>
@@ -309,10 +310,12 @@ int main(int argc, char** argv) {
             printf("[schedule] 启动后状态栏: 「%s」\n", qUtf8Printable(restored));
             loaded = restored.contains(QStringLiteral("已恢复 1 条"));
 
-            // 3) 触发一次到期检查。onCheckScheduledTasks 是私有槽，经元对象系统按名调用，
-            //    走的就是真实代码路径（不用为测试开后门）。
-            const bool invoked = QMetaObject::invokeMethod(&sw, "onCheckScheduledTasks",
-                                                          Qt::DirectConnection);
+            // 3) 触发一次到期检查。定时检查逻辑已迁到 L2 组件 ScheduleService::onTick
+            //    （私有槽，经元对象系统按名调用，走真实代码路径，不用为测试开后门）。
+            //    它按日递推 + 删除已到点任务 + 写回配置，并对每个到期任务 emit taskDue(id)；
+            //    该信号已连到 MainWindow::onScheduledTaskDue → startTaskById，所以任务会被真正拉起。
+            ScheduleService* ss = sw.findChild<ScheduleService*>();
+            const bool invoked = ss && QMetaObject::invokeMethod(ss, "onTick", Qt::DirectConnection);
             QCoreApplication::processEvents();
             TaskInfo ti;
             const bool gotInfo = (dlmgr_get_task_info(1, &ti) == 0);

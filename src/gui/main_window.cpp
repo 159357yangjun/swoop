@@ -31,6 +31,7 @@
 #include "logger.h"
 #include "auto_power.h"   // L2：下载完成自动关机/休眠（从本文件抽取）
 #include "ipc_server.h"   // L2：IPC 单实例通信（从本文件抽取）
+#include "schedule_service.h"   // L2：定时下载持久化与触发（从本文件抽取）
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -282,20 +283,24 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_manager->loadState(m_statePath))
             refreshFromEngine();
     }
-    // 定时/重复设置：必须在任务列表恢复之后再读——要按任务 ID 校验有效性，
+    // 定时下载服务（L2 组件）：解耦 MainWindow 内部状态。
+    // 必须在任务列表恢复（loadState）之后再 load——要按任务 ID 校验有效性，
     // 列表还没填的话所有记录都会被当成失效而丢掉。
-    loadSchedules();
+    m_scheduleService = new ScheduleService(this);
+    m_scheduleService->setTaskExistsProvider([this](int id) { return m_taskModel->contains(id); });
+    connect(m_scheduleService, &ScheduleService::taskDue, this, &MainWindow::onScheduledTaskDue);
+    // 恢复出定时设置时在状态栏提示（沿用原 loadSchedules 的 UX，避免无声丢失信息）
+    connect(m_scheduleService, &ScheduleService::schedulesRestored, this, [this](int count) {
+        m_statusBar->showMessage(QStringLiteral("已恢复 %1 条定时下载设置").arg(count), 5000);
+    });
+    m_scheduleService->load();
+    m_scheduleService->startChecker(5000);   // 每 5 秒检查一次到期任务
 
     // 剪贴板监听：检测到下载链接时提示用户
     if (m_settings.clipboardMonitor()) {
         connect(QApplication::clipboard(), &QClipboard::dataChanged,
                 this, &MainWindow::onClipboardChanged);
     }
-
-    // 定时下载检查器：每 5 秒检查一次到期任务
-    m_scheduleTimer = new QTimer(this);
-    connect(m_scheduleTimer, &QTimer::timeout, this, &MainWindow::onCheckScheduledTasks);
-    m_scheduleTimer->start(5000);
 
     // L2 组件：下载完成自动关机/休眠（解耦 MainWindow 内部状态，注入查询/保存回调）
     m_autoPower = new AutoPowerController(&m_settings, this);
@@ -304,7 +309,7 @@ MainWindow::MainWindow(QWidget* parent)
         for (auto it = m_states.begin(); it != m_states.end(); ++it)
             if (it.value() == 1 || it.value() == 0) return true;
         // 还有未到期的定时任务
-        if (!m_scheduledTasks.isEmpty()) return true;
+        if (!m_scheduleService->hasPending()) return true;
         return false;
     });
     m_autoPower->setHasCompletedOrFailedCallback([this]() {
@@ -883,22 +888,17 @@ void MainWindow::onScheduleDownload()
 
     ScheduleDialog dlg(this);
     // 如果已有定时设置，预填
-    if (m_scheduledTasks.contains(id)) {
+    if (m_scheduleService->hasSchedule(id)) {
         dlg.setEnabled(true);
-        dlg.setScheduledTime(m_scheduledTasks.value(id));
-        dlg.setRecurring(m_recurringTasks.contains(id));
+        dlg.setScheduledTime(m_scheduleService->scheduleTime(id));
+        dlg.setRecurring(m_scheduleService->isRecurring(id));
     }
 
     if (dlg.exec() != QDialog::Accepted)
         return;
 
     if (dlg.isEnabled()) {
-        m_scheduledTasks[id] = dlg.scheduledTime();
-        // 「每日重复」必须真的被记住并参与调度：对话框一直有这个勾选项，
-        // 但此前没人读 isRecurring()，勾了等于没勾（典型的 UI 有、行为无）。
-        if (dlg.isRecurring()) m_recurringTasks.insert(id);
-        else                   m_recurringTasks.remove(id);
-        saveSchedules();   // 立刻落盘：用户期望「设了就记住」，而不是关掉程序就丢
+        m_scheduleService->setSchedule(id, dlg.scheduledTime(), dlg.isRecurring());
         const QString when = dlg.scheduledTime().toString(QStringLiteral("MM-dd HH:mm"));
         Log::info(QStringLiteral("任务 #%1 定时于 %2 开始%3")
                      .arg(id).arg(dlg.scheduledTime().toString("yyyy-MM-dd HH:mm:ss"))
@@ -908,60 +908,25 @@ void MainWindow::onScheduleDownload()
                 ? QStringLiteral("任务 #%1 已设定为每日 %2 自动开始").arg(id).arg(when)
                 : QStringLiteral("任务 #%1 已设定于 %2 自动开始").arg(id).arg(when), 5000);
     } else {
-        m_scheduledTasks.remove(id);
-        m_recurringTasks.remove(id);
-        saveSchedules();
+        m_scheduleService->clearSchedule(id);
         m_statusBar->showMessage(QStringLiteral("任务 #%1 定时已取消").arg(id), 3000);
     }
 }
 
-void MainWindow::onCheckScheduledTasks()
+void MainWindow::onScheduledTaskDue(int id)
 {
-    if (m_scheduledTasks.isEmpty())
+    // ScheduleService::onTick 判定到点后 emit taskDue(id)，这里只负责「启动 + 提示 + 刷新」，
+    // 到期/每日重复的递推与持久化全部由 ScheduleService 接管。
+    if (id <= 0)
         return;
+    startTaskById(id);
+    Log::info(QStringLiteral("定时任务 #%1 已自动开始").arg(id));
 
-    QDateTime now = QDateTime::currentDateTime();
-    QList<int> toStart;
-    bool changed = false;   // 有递推或删除就要回写配置（重复任务的下次时间得记住）
-
-    for (auto it = m_scheduledTasks.begin(); it != m_scheduledTasks.end(); ) {
-        if (it.value() <= now) {
-            toStart << it.key();
-            if (m_recurringTasks.contains(it.key())) {
-                /* 每日重复：递推到下一个未来时刻，而不是简单 +24 小时。
-                 * 按天递推能对齐到「每天的同一时刻」，即使程序当天没开、
-                 * 连续错过好几天，重开后也只会立刻补跑一次并跳到下一个未来时刻，
-                 * 不会攒出一串过期时间把任务反复拉起。 */
-                QDateTime next = it.value();
-                do { next = next.addDays(1); } while (next <= now);
-                it.value() = next;
-                Log::info(QStringLiteral("任务 #%1 每日重复，下次 %2")
-                              .arg(it.key()).arg(next.toString("yyyy-MM-dd HH:mm:ss")));
-                changed = true;
-                ++it;
-            } else {
-                it = m_scheduledTasks.erase(it);
-                changed = true;
-            }
-        } else {
-            ++it;
-        }
-    }
-    if (changed)
-        saveSchedules();
-
-    for (int id : toStart) {
-        startTaskById(id);
-        Log::info(QStringLiteral("定时任务 #%1 已自动开始").arg(id));
-
-        if (m_trayIcon && m_trayIcon->isVisible())
-            m_trayIcon->showMessage(QStringLiteral("定时下载"),
-                                    QStringLiteral("任务 #%1 已自动开始下载").arg(id),
-                                    QSystemTrayIcon::Information, 3000);
-    }
-
-    if (!toStart.isEmpty())
-        syncStatus();
+    if (m_trayIcon && m_trayIcon->isVisible())
+        m_trayIcon->showMessage(QStringLiteral("定时下载"),
+                                QStringLiteral("任务 #%1 已自动开始下载").arg(id),
+                                QSystemTrayIcon::Information, 3000);
+    syncStatus();
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event)
@@ -2256,12 +2221,10 @@ void MainWindow::restartTaskById(int id)
 void MainWindow::removeTaskById(int id)
 {
     m_pendingStream.remove(id);  // 清理可能仍在等待队列调度的媒体任务请求
-    // 任务没了，定时/重复设置也要一起清掉，否则 m_scheduledTasks 里会残留
+    // 任务没了，定时/重复设置也要一起清掉，否则 ScheduleService 里会残留
     // 指向已删除 id 的条目（到期后 startTaskById 作用在不存在的任务上）。
-    m_scheduledTasks.remove(id);
-    m_recurringTasks.remove(id);
+    m_scheduleService->removeTaskSchedule(id);
     m_deferredByCap.remove(id);  // 已被并发上限暂缓的任务删除后不必再等空位
-    saveSchedules();             // 同步落盘，避免留下指向已删任务的幽灵定时
     if (isHlsTask(id)) {
         if (auto* hd = m_hlsTasks.value(id)) {
             hd->cancel();
@@ -2354,63 +2317,7 @@ bool MainWindow::hasFreeDownloadSlot() const
     return running < limit;
 }
 
-// ── 定时/重复设置的持久化 ──
-/* 原本这两张表只活在内存里，关掉程序就没了（对话框里只能如实写「退出后不保留」）。
- * 现在存成一条紧凑配置串："<任务ID>|<ISO 时间>|<是否每日重复>"，多条用 ';' 分隔。
- * 用**一条**键而不是每组一个键：写入是原子的（不会崩在半套设置上），
- * 删除任务时也不用去逐个清理 QSettings 里残留的键。
- * 存储走 AppPaths::settings()，这样便携模式（exe 同目录 ini）也能正常保存。 */
-static const char *kSchedulesKey = "schedules";
-
-void MainWindow::saveSchedules() const
-{
-    QStringList items;
-    for (auto it = m_scheduledTasks.constBegin(); it != m_scheduledTasks.constEnd(); ++it) {
-        items << QStringLiteral("%1|%2|%3")
-                     .arg(it.key())
-                     .arg(it.value().toString(Qt::ISODate))
-                     .arg(m_recurringTasks.contains(it.key()) ? 1 : 0);
-    }
-    QSettings st = AppPaths::settings();
-    st.setValue(QLatin1String(kSchedulesKey), items.join(QLatin1Char(';')));
-}
-
-void MainWindow::loadSchedules()
-{
-    QSettings st = AppPaths::settings();
-    const QString raw = st.value(QLatin1String(kSchedulesKey)).toString();
-    if (raw.isEmpty())
-        return;
-
-    int kept = 0, dropped = 0;
-    const QStringList items = raw.split(QLatin1Char(';'), Qt::SkipEmptyParts);
-    for (const QString& s : items) {
-        const QStringList f = s.split(QLatin1Char('|'));
-        if (f.size() != 3)
-            continue;
-        const int id = f.at(0).toInt();
-        const QDateTime at = QDateTime::fromString(f.at(1), Qt::ISODate);
-        if (id <= 0 || !at.isValid())
-            continue;
-        // 任务已不存在（被删掉，或状态文件丢了）→ 丢弃这条，
-        // 否则会留下一个到点后对着不存在任务反复触发的「幽灵定时」。
-        if (!m_taskModel->contains(id)) {
-            dropped++;
-            continue;
-        }
-        m_scheduledTasks[id] = at;
-        if (f.at(2) == QLatin1String("1"))
-            m_recurringTasks.insert(id);
-        kept++;
-    }
-
-    if (kept > 0) {
-        Log::info(QStringLiteral("已恢复 %1 条定时设置（丢弃 %2 条失效记录）").arg(kept).arg(dropped));
-        m_statusBar->showMessage(QStringLiteral("已恢复 %1 条定时下载设置").arg(kept), 5000);
-    }
-    if (dropped > 0 && kept == 0)
-        saveSchedules();   // 顺手把失效记录清掉，别一直留着
-}
+// ── 定时/重复设置的持久化已迁移至 L2 组件 ScheduleService（src/app/schedule_service.cpp） ──
 
 // ── 队列调度器：各队列并发数超限时排队等待 ───────────
 void MainWindow::onQueueScheduler()

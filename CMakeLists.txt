@@ -102,6 +102,8 @@ set(APP_SOURCES
     src/app/auto_power.h
     src/app/ipc_server.cpp
     src/app/ipc_server.h
+    src/app/schedule_service.cpp
+    src/app/schedule_service.h
 )
 
 set(CORE_WRAPPER_SOURCES
