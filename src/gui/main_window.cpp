@@ -35,6 +35,7 @@
 #include "tray_controller.h"    // L2：系统托盘（图标/菜单/双击恢复）（从本文件抽取）
 #include "queue_scheduler.h"    // L2：队列调度器（队列并发 + 全局上限）（从本文件抽取）
 #include "task_controller.h"     // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）（从本文件抽取）
+#include "notification_aggregator.h" // L2：下载完成/失败气泡聚合
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -221,6 +222,18 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_taskController, &TaskController::mediaProgress,     this, &MainWindow::onTaskProgress);
     connect(m_taskController, &TaskController::mediaCompleted,    this, &MainWindow::onTaskCompleted);
     connect(m_taskController, &TaskController::mediaStateChanged, this, &MainWindow::onTaskStateChanged);
+
+    // 完成通知聚合（L2 组件）：750ms 窗口内的多次完成/失败合并为单条托盘气泡 + 至多一次提示音。
+    // 组件只负责聚合，到期经 notify 信号交回主窗口显示气泡并按 chime 播放提示音。
+    m_notificationAggregator = new NotificationAggregator(this);
+    connect(m_notificationAggregator, &NotificationAggregator::notify, this,
+            [this](const QString& title, const QString& body, bool chime) {
+                if (m_trayIcon) {
+                    m_trayIcon->showMessage(title, body, QSystemTrayIcon::Information, 3500);
+                    if (chime)
+                        playCompletionChime();
+                }
+            });
 
     // 队列调度器（L2 组件）：每 1 秒检查各队列并发数 + 全局上限，启动排队中的任务。
     // 只读依赖经提供器注入（队列表 / 任务表 / 同时下载上限），启动动作经回调。
@@ -1341,7 +1354,6 @@ void MainWindow::onTaskCompleted(int taskId, bool success, const QString& error)
     syncStatus();
 
     if (!success) {
-        m_lastError = error;
         // 失败原因必须同时落到任务行上，不能只在托盘气泡里说一次就没了：
         // 用户过一会儿回来翻列表，只看到「失败」却查不到为什么，等于没有诊断信息。
         // 媒体后端（yt-dlp / aria2 / ffmpeg）的原因由各自 completed 信号带过来；
@@ -1380,7 +1392,7 @@ void MainWindow::onTaskCompleted(int taskId, bool success, const QString& error)
         m_taskModel->setErrorMsg(taskId, QString());
     }
 
-    // 聚合通知：累计完成/失败，由 m_notifyTimer 合并为单条气泡 + 单次提示音，避免刷屏
+    // 聚合通知（详见下方 enqueue）：750ms 窗口内的完成/失败由 NotificationAggregator 合并为单条气泡 + 单次提示音
     QString name;
     QString url;
     qint64 size = -1;
@@ -1399,57 +1411,13 @@ void MainWindow::onTaskCompleted(int taskId, bool success, const QString& error)
     // 下载历史持久化（SQLite）：#46 —— 记录终态（完成/失败）
     HistoryStore::instance().recordFinished(url, name, size, success);
 
-    if (success) {
-        m_doneCount++;
-        if (m_doneNames.size() < 4)   // 仅保留前几个名字用于提示
-            m_doneNames.append(name);
-    } else {
-        m_failCount++;
-    }
-
-    if (!m_notifyTimer) {
-        m_notifyTimer = new QTimer(this);
-        m_notifyTimer->setSingleShot(true);
-        connect(m_notifyTimer, &QTimer::timeout, this, &MainWindow::onNotifyTimer);
-    }
-    m_notifyTimer->start(750);  // 750ms 内的连续完成合并为一条
+    // 聚合通知交给 L2 组件：750ms 窗口内的连续完成/失败合并为单条气泡 + 至多一次提示音
+    m_notificationAggregator->enqueue(success, name, error);
 
     // 全部下载完成 → 检查是否需要自动关机/休眠
     maybeAutoPowerAction();
 }
 
-void MainWindow::onNotifyTimer()
-{
-    if (!m_trayIcon) {
-        m_doneCount = 0; m_failCount = 0; m_doneNames.clear();
-        return;
-    }
-
-    QString title, body;
-    if (m_doneCount > 0 && m_failCount == 0) {
-        title = QStringLiteral("下载完成");
-        body  = (m_doneCount == 1)
-                    ? m_doneNames.first()
-                    : QStringLiteral("%1 个下载已完成").arg(m_doneCount);
-    } else if (m_doneCount == 0 && m_failCount > 0) {
-        title = QStringLiteral("下载失败");
-        body  = QStringLiteral("%1 个下载失败").arg(m_failCount);
-        if (!m_lastError.isEmpty())
-            body += QStringLiteral("：%1").arg(m_lastError);
-    } else {
-        title = QStringLiteral("下载完成");
-        body  = QStringLiteral("完成 %1 个，失败 %2 个").arg(m_doneCount).arg(m_failCount);
-    }
-
-    m_trayIcon->showMessage(title, body,
-                            QSystemTrayIcon::Information, 3500);
-
-    // 仅在有成功项时播放完成提示音（每次聚合最多一次）
-    if (m_doneCount > 0)
-        playCompletionChime();
-
-    m_doneCount = 0; m_failCount = 0; m_doneNames.clear(); m_lastError.clear();
-}
 
 void MainWindow::onTaskStateChanged(int taskId, int state)
 {

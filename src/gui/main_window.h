@@ -10,6 +10,7 @@
 #include "legacy/glass_effect.h"   // 玻璃拟态特效（已停用，留档；见 ARCHITECTURE.md）
 #include "idownloader.h"   // DownloadRequest：媒体任务延迟启动（队列调度）时缓存请求
 #include "task_controller.h"   // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）
+#include "notification_aggregator.h" // L2：下载完成/失败气泡聚合
 
 class DownloadManager;
 class TaskListModel;
@@ -132,8 +133,7 @@ private slots:
     // 定时任务到期（由 ScheduleService::taskDue 转发，启动下载 + 托盘/状态栏反馈）
     void onScheduledTaskDue(int id);
 
-    // 完成通知聚合（批量完成时合并托盘气泡 + 单次提示音）
-    void onNotifyTimer();
+    // 完成通知聚合已抽到 L2 组件 NotificationAggregator（onTaskCompleted 内调用其 enqueue）
     void updateEmptyState();      // 空状态插画显隐
     void playCompletionChime();   // Windows PlaySound 播放内存合成提示音
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -210,6 +210,8 @@ private:
 
     // 任务控制（L2 组件，见 src/app/task_controller.*）——媒体后端实例表 + 任务 CRUD/分派
     TaskController*      m_taskController = nullptr;
+    // 完成通知聚合（L2 组件，见 src/app/notification_aggregator.*）——750ms 窗口合并气泡 + 提示音
+    NotificationAggregator* m_notificationAggregator = nullptr;
 
     // IPC 单实例通信（L2 组件，见 src/app/ipc_server.*）
     IpcServer*            m_ipcServer = nullptr;
@@ -225,13 +227,6 @@ private:
 
     qint64               m_speedEma = 0;               // 状态栏总速度 EMA 平滑值
     int                  m_sidebarTick = 0;            // 侧栏降频计数：每 4 次状态栏刷新（≈1s）重算一次分类计数
-
-    // 完成通知聚合
-    QTimer*              m_notifyTimer = nullptr;      // 单发聚合定时器（~700ms）
-    int                  m_doneCount = 0;              // 待聚合的完成数
-    int                  m_failCount = 0;              // 待聚合的失败数
-    QStringList          m_doneNames;                  // 已完成任务名（取首个用于单条提示）
-    QString              m_lastError;                  // 最近一次失败的错误信息（用于托盘提示）
 
     // 空状态插画
     EmptyStateOverlay*   m_emptyOverlay = nullptr;

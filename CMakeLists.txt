@@ -110,6 +110,8 @@ set(APP_SOURCES
     src/app/queue_scheduler.h
     src/app/task_controller.cpp
     src/app/task_controller.h
+    src/app/notification_aggregator.cpp
+    src/app/notification_aggregator.h
 )
 
 set(CORE_WRAPPER_SOURCES
