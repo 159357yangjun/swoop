@@ -9,6 +9,7 @@
 #include "settings.h"
 #include "legacy/glass_effect.h"   // 玻璃拟态特效（已停用，留档；见 ARCHITECTURE.md）
 #include "idownloader.h"   // DownloadRequest：媒体任务延迟启动（队列调度）时缓存请求
+#include "task_controller.h"   // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）
 
 class DownloadManager;
 class TaskListModel;
@@ -163,22 +164,11 @@ private:
     void applyTheme();       // 根据 m_settings.theme() 加载 QSS 样式表
     int  selectedTaskId() const;
 
-    // 统一的新增任务入口：返回 taskId；queue 非空时加入队列（不立即开始，由调度器启动）
-    // format 仅视频任务使用（yt-dlp -f 格式码），空=最佳画质
-    int  internalAddTask(const QString& url, const QString& dir, const QString& name,
-                         int threads, const QString& queue, const QString& format = QString(),
-                         bool archiveByType = true);
-
-    // 后端无关的下载控制：按 taskId 自动分派到 C 引擎或 yt-dlp 视频后端
-    void startTaskById(int id);
-    void pauseTaskById(int id);
-    void resumeTaskById(int id);
-    void cancelTaskById(int id);
-    void restartTaskById(int id);
-    void removeTaskById(int id);
-    bool isVideoTask(int id) const { return m_videoTasks.contains(id); }
-    bool isHlsTask(int id) const   { return m_hlsTasks.contains(id); }
-    bool isTorrentTask(int id) const { return m_torrentTasks.contains(id); }
+    // 任务 CRUD/分派已抽取至 L2 组件 TaskController（见 src/app/task_controller.*），
+    // 此处仅保留媒体类型判定作为转发（后端实例表由 m_taskController 持有）。
+    bool isVideoTask(int id) const { return m_taskController && m_taskController->isVideoTask(id); }
+    bool isHlsTask(int id) const   { return m_taskController && m_taskController->isHlsTask(id); }
+    bool isTorrentTask(int id) const { return m_taskController && m_taskController->isTorrentTask(id); }
     bool isStreamTask(int id) const { return isVideoTask(id) || isHlsTask(id) || isTorrentTask(id); }
 
     void applyZoom();            // 应用视图缩放（字体 + 工具栏图标）
@@ -218,6 +208,9 @@ private:
     // 队列调度器（L2 组件，见 src/app/queue_scheduler.*）——拥有「被并发上限暂缓」的任务集合
     QueueScheduler*      m_queueScheduler = nullptr;
 
+    // 任务控制（L2 组件，见 src/app/task_controller.*）——媒体后端实例表 + 任务 CRUD/分派
+    TaskController*      m_taskController = nullptr;
+
     // IPC 单实例通信（L2 组件，见 src/app/ipc_server.*）
     IpcServer*            m_ipcServer = nullptr;
 
@@ -246,16 +239,8 @@ private:
     // 下载完成自动关机/休眠（L2 组件，状态与倒计时对话框由其内部持有）
     AutoPowerController* m_autoPower = nullptr;
 
-    // 视频下载后端（yt-dlp）：taskId → VideoDownloader 实例
-    // 视频/HLS/YouTube 等流媒体由 yt-dlp 拉取，而非分段 HTTP 引擎
-    QHash<int, VideoDownloader*> m_videoTasks;
-    QHash<int, HlsDownloader*>   m_hlsTasks;
-    QHash<int, TorrentDownloader*> m_torrentTasks;  // BT/磁力（aria2 式）
-    int m_videoIdSeq = 2000000;   // 与 C 引擎任务 id 区分的编号偏移
-
-    // 延迟启动的媒体任务：加入队列（非立即开始）时缓存其 DownloadRequest，
-    // 待队列调度器（QueueScheduler）放行后由 startTaskById 真正拉起后端。
-    QMap<int, DownloadRequest> m_pendingStream;
+    // 视频/HLS/BT 后端实例表、编号偏移与延迟启动缓存已移入 TaskController
+    // （见 src/app/task_controller.*），MainWindow 不再持有媒体后端状态。
 
     // 视图缩放
     int m_zoomLevel = 0;            // 字体缩放级数（每级 ±1pt）

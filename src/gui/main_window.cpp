@@ -34,6 +34,7 @@
 #include "schedule_service.h"   // L2：定时下载持久化与触发（从本文件抽取）
 #include "tray_controller.h"    // L2：系统托盘（图标/菜单/双击恢复）（从本文件抽取）
 #include "queue_scheduler.h"    // L2：队列调度器（队列并发 + 全局上限）（从本文件抽取）
+#include "task_controller.h"     // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）（从本文件抽取）
 
 #include <QStandardPaths>
 #include <QScreen>
@@ -200,14 +201,36 @@ MainWindow::MainWindow(QWidget* parent)
     m_trayController->syncTraffic(m_settings.trafficMode());
     m_trayIcon = m_trayController->trayIcon();
 
+    // 任务控制（L2 组件）：媒体后端实例表 + 任务 CRUD/分派。
+    // 后台表与分派逻辑此前都在 MainWindow，连同引擎信号桥接的转发一并抽出。
+    m_taskController = new TaskController(this);
+    m_taskController->setModel(m_taskModel);
+    m_taskController->setManager(m_manager);
+    m_taskController->setQueueManager(m_queueMgr);
+    m_taskController->setSettings(&m_settings);
+    m_taskController->setStateSink(
+        [this](int id, int s) { m_states[id] = s; },
+        [this](int id) { m_states.remove(id); });
+    m_taskController->setSpeedSink(
+        [this](int id, qint64 v) { m_speeds[id] = v; },
+        [this](int id) { m_speeds.remove(id); });
+    m_taskController->setCancelAutoPower([this]() { cancelPendingAutoPower(); });
+    m_taskController->setSyncStatus([this]() { syncStatus(); });
+    // 媒体后端（Video/Hls/Torrent）进度/完成/状态经 TaskController 转发到主窗口桥接槽，
+    // 与 C 引擎信号会聚到同一套 UI 更新逻辑（onTaskProgress/Completed/StateChanged）。
+    connect(m_taskController, &TaskController::mediaProgress,     this, &MainWindow::onTaskProgress);
+    connect(m_taskController, &TaskController::mediaCompleted,    this, &MainWindow::onTaskCompleted);
+    connect(m_taskController, &TaskController::mediaStateChanged, this, &MainWindow::onTaskStateChanged);
+
     // 队列调度器（L2 组件）：每 1 秒检查各队列并发数 + 全局上限，启动排队中的任务。
     // 只读依赖经提供器注入（队列表 / 任务表 / 同时下载上限），启动动作经回调。
     m_queueScheduler = new QueueScheduler(this);
     m_queueScheduler->setQueuesProvider([this] { return m_queueMgr->queues(); });
     m_queueScheduler->setTasksProvider([this] { return m_taskModel->tasks(); });
     m_queueScheduler->setMaxConcurrentProvider([this] { return m_settings.maxConcurrent(); });
-    m_queueScheduler->setStartTaskCallback([this](int id) { startTaskById(id); });
+    m_queueScheduler->setStartTaskCallback([this](int id) { m_taskController->startTaskById(id); });
     m_queueScheduler->start(1000);
+    m_taskController->setQueueScheduler(m_queueScheduler);
 
     // 启动 IPC server（让浏览器扩展/CLI 转发下载请求到正在运行的 GUI）
     // L2 组件：解耦 MainWindow 内部状态，注入任务添加与任务数查询回调
@@ -314,6 +337,9 @@ MainWindow::MainWindow(QWidget* parent)
     });
     m_scheduleService->load();
     m_scheduleService->startChecker(5000);   // 每 5 秒检查一次到期任务
+    // 删除任务时顺带清掉其定时/重复设置（ScheduleService 在 m_taskController 之后创建，
+    // 故以回调延迟注入，TaskController::removeTaskById 内部已做空判）
+    m_taskController->setRemoveScheduleCallback([this](int id) { m_scheduleService->removeTaskSchedule(id); });
 
     // 剪贴板监听：检测到下载链接时提示用户
     if (m_settings.clipboardMonitor()) {
@@ -828,7 +854,7 @@ void MainWindow::onClipboardChanged()
 
     if (ret == QMessageBox::Yes) {
         // 直接用链接创建任务
-        int id = internalAddTask(text, m_settings.defaultSaveDir(), QString(),
+        int id = m_taskController->internalAddTask(text, m_settings.defaultSaveDir(), QString(),
                                  m_settings.maxThreads(), QString());
         if (id > 0)
             Log::info(QStringLiteral("剪贴板捕获链接 → 任务 #%1").arg(id));
@@ -877,7 +903,7 @@ void MainWindow::onScheduledTaskDue(int id)
     // 到期/每日重复的递推与持久化全部由 ScheduleService 接管。
     if (id <= 0)
         return;
-    startTaskById(id);
+    m_taskController->startTaskById(id);
     Log::info(QStringLiteral("定时任务 #%1 已自动开始").arg(id));
 
     if (m_trayIcon && m_trayIcon->isVisible())
@@ -915,7 +941,7 @@ void MainWindow::dropEvent(QDropEvent* event)
     dlg.setUrl(url);
     if (dlg.exec() == QDialog::Accepted) {
         NewTaskInput inp = dlg.result();
-        int id = internalAddTask(inp.url, inp.saveDir, inp.fileName,
+        int id = m_taskController->internalAddTask(inp.url, inp.saveDir, inp.fileName,
                                  inp.threadCount > 0 ? inp.threadCount : m_settings.maxThreads(),
                                  QString());
         if (id > 0)
@@ -1155,7 +1181,7 @@ void MainWindow::onNewTask()
         return;
 
     NewTaskInput inp = dlg.result();
-    int id = internalAddTask(inp.url, inp.saveDir, inp.fileName,
+    int id = m_taskController->internalAddTask(inp.url, inp.saveDir, inp.fileName,
                              inp.threadCount > 0 ? inp.threadCount : m_settings.maxThreads(),
                              QString(), inp.format);
     if (id <= 0)
@@ -1172,7 +1198,7 @@ void MainWindow::onBatchImport()
     BatchImportResult r = dlg.result();
     int added = 0;
     for (const QString& url : r.urls) {
-        int id = internalAddTask(url, r.saveDir, QString(),
+        int id = m_taskController->internalAddTask(url, r.saveDir, QString(),
                                  r.threadCount > 0 ? r.threadCount : m_settings.maxThreads(),
                                  QString());
         if (id > 0)
@@ -1187,39 +1213,39 @@ void MainWindow::onBatchImport()
 void MainWindow::onStartSelected()
 {
     int id = selectedTaskId();
-    if (id > 0) startTaskById(id);
+    if (id > 0) m_taskController->startTaskById(id);
 }
 
 void MainWindow::onPauseSelected()
 {
     int id = selectedTaskId();
-    if (id > 0) pauseTaskById(id);
+    if (id > 0) m_taskController->pauseTaskById(id);
 }
 
 void MainWindow::onResumeSelected()
 {
     int id = selectedTaskId();
-    if (id > 0) resumeTaskById(id);
+    if (id > 0) m_taskController->resumeTaskById(id);
 }
 
 void MainWindow::onCancelSelected()
 {
     int id = selectedTaskId();
-    if (id > 0) cancelTaskById(id);
+    if (id > 0) m_taskController->cancelTaskById(id);
 }
 
 void MainWindow::onRestartSelected()
 {
     int id = selectedTaskId();
     if (id <= 0) return;
-    restartTaskById(id);
+    m_taskController->restartTaskById(id);
 }
 
 void MainWindow::onRemoveSelected()
 {
     int id = selectedTaskId();
     if (id <= 0) return;
-    removeTaskById(id);
+    m_taskController->removeTaskById(id);
 }
 
 void MainWindow::onRemoveAll()
@@ -1236,7 +1262,7 @@ void MainWindow::onRemoveAll()
     // 拷贝一份 id，避免边删边遍历
     QList<int> ids = m_states.keys();
     for (int id : ids)
-        removeTaskById(id);
+        m_taskController->removeTaskById(id);
     m_speeds.clear();
     m_states.clear();
     syncStatus();
@@ -1725,13 +1751,13 @@ void MainWindow::applyWebServer()
                    int threads) -> int {
                 QString saveDir = dir.isEmpty() ? m_settings.defaultSaveDir() : dir;
                 int th = threads > 0 ? threads : m_settings.maxThreads();
-                return internalAddTask(url, saveDir, QString(), th, queue, QString());
+                return m_taskController->internalAddTask(url, saveDir, QString(), th, queue, QString());
             },
             [this](int id, const QString& action) -> bool {
-                if (action == QStringLiteral("pause"))        pauseTaskById(id);
-                else if (action == QStringLiteral("resume"))  resumeTaskById(id);
-                else if (action == QStringLiteral("cancel"))  cancelTaskById(id);
-                else if (action == QStringLiteral("remove"))  removeTaskById(id);
+                if (action == QStringLiteral("pause"))        m_taskController->pauseTaskById(id);
+                else if (action == QStringLiteral("resume"))  m_taskController->resumeTaskById(id);
+                else if (action == QStringLiteral("cancel"))  m_taskController->cancelTaskById(id);
+                else if (action == QStringLiteral("remove"))  m_taskController->removeTaskById(id);
                 else return false;
                 return true;
             });
@@ -1767,7 +1793,7 @@ void MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
     QString saveDir = dir.isEmpty() ? m_settings.defaultSaveDir() : dir;
     int threadCount = threads > 0 ? threads : m_settings.maxThreads();
 
-    int id = internalAddTask(url, saveDir, filename, threadCount, queue, format);
+    int id = m_taskController->internalAddTask(url, saveDir, filename, threadCount, queue, format);
     if (id <= 0) {
         Log::warn(QStringLiteral("IPC 添加任务失败: %1").arg(url));
         return;
@@ -1799,7 +1825,7 @@ void MainWindow::enqueueUrl(const QString& url)
     QString u = url.trimmed();
     if (u.isEmpty())
         return;
-    int id = internalAddTask(u, m_settings.defaultSaveDir(), QString(),
+    int id = m_taskController->internalAddTask(u, m_settings.defaultSaveDir(), QString(),
                              m_settings.maxThreads(), QString());
     if (id > 0)
         Log::info(QStringLiteral("外部 URL 加入任务 #%1: %2").arg(id).arg(u));
@@ -1807,423 +1833,6 @@ void MainWindow::enqueueUrl(const QString& url)
     showNormal();
     raise();
     activateWindow();
-}
-
-// ── 统一的新增任务入口 ──────────────────────────────
-// queue 为空：立即开始下载；否则加入指定队列，由 QueueScheduler 调度启动
-int MainWindow::internalAddTask(const QString& url, const QString& dir, const QString& name,
-                                int threads, const QString& queue, const QString& format,
-                                bool archiveByType)
-{
-    // 浏览器扩展等外部来源可能传入一个尚未存在的队列名：自动创建，
-    // 否则该队列的 HTTP 任务会永远停在 state 0 等待调度（卡死）。
-    if (!queue.isEmpty() && m_queueMgr && !m_queueMgr->contains(queue))
-        m_queueMgr->addQueue(queue, 2);
-
-    // 按文件类型自动归档（IDM 风格）：开启时把文件归入 saveDir/<分类>/ 子目录。
-    // archiveByType=false 表示调用方已自行拼好归档子目录（如站点抓取器），不再二次归档。
-    QString finalDir = dir;
-    if (archiveByType && m_settings.autoArchiveByType() && !dir.isEmpty()) {
-        FileType ft = FileType::Other;
-        if (VideoDownloader::isVideoUrl(url)
-                || url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive)
-                || url.endsWith(QStringLiteral(".mpd"),  Qt::CaseInsensitive)) {
-            ft = FileType::Video;  // 视频站点 URL 无扩展名，单独判定
-        } else {
-            QString fname = name.isEmpty() ? QUrl(url).fileName() : name;
-            if (fname.isEmpty())
-                fname = url;
-            ft = CategoryFilterProxy::detectFileType(fname);
-        }
-        finalDir = dir + QStringLiteral("/") + CategoryFilterProxy::fileTypeFolderName(ft);
-    }
-    QDir().mkpath(finalDir);
-
-    // ── BT/磁力/FTP（magnet / .torrent / ftp://）：交给 aria2 后端（aria2 式 RPC 集成）
-    if (TorrentDownloader::isAria2Url(url)) {
-        int id = m_videoIdSeq++;
-        auto* td = new TorrentDownloader(this);
-        td->setTaskId(id);
-
-        connect(td, &TorrentDownloader::progressChanged, this, &MainWindow::onTaskProgress);
-        connect(td, &TorrentDownloader::completed,      this, &MainWindow::onTaskCompleted);
-        connect(td, &TorrentDownloader::stateChanged,   this, &MainWindow::onTaskStateChanged);
-
-        TaskRow row;
-        row.id = id;
-        row.fileName = name.isEmpty() ? QUrl(url).fileName() : name;
-        if (row.fileName.isEmpty())
-            row.fileName = url;
-        row.url       = url;
-        row.fileSize  = -1;
-        row.downloaded = 0;
-        row.speedBps  = 0;
-        row.lastConnection = QDateTime::currentDateTime();
-        row.queue     = queue;
-        // 无队列才立即开始；且无队列同样受「同时下载的任务数」全局上限约束——
-        // 满额时留在 state 0，由 QueueScheduler 有空位再自动拉起（与有队列的任务一致）。
-        const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
-        row.state     = startNow ? 1 : 0;
-        row.statusText = TaskListModel::stateText(row.state);
-        m_taskModel->addTask(row);
-
-        m_speeds[id] = 0;
-        m_states[id] = row.state;
-        m_torrentTasks[id] = td;
-
-        DownloadRequest req;
-        req.url       = url;
-        req.savePath  = finalDir;
-        req.fileName  = name;
-        req.threadCount = threads > 0 ? threads : m_settings.maxThreads();
-        req.isMagnet  = url.startsWith(QStringLiteral("magnet:"), Qt::CaseInsensitive);
-        if (startNow) {
-            td->start(req);
-            cancelPendingAutoPower();
-        } else {
-            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
-            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
-        }
-
-        syncStatus();
-        HistoryStore::instance().recordAdded(url, row.fileName, finalDir);
-        Log::info(QStringLiteral("添加 aria2 任务 #%1: %2").arg(id).arg(url));
-        return id;
-    }
-
-    // ── HLS（M3U8）：交给原生 HlsDownloader（自建解析 + ffmpeg 合并），不依赖 yt-dlp
-    if (url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive)) {
-        int id = m_videoIdSeq++;  // 与视频/引擎任务区分的编号偏移
-        auto* hd = new HlsDownloader(this);
-        hd->setTaskId(id);
-
-        connect(hd, &HlsDownloader::progressChanged, this, &MainWindow::onTaskProgress);
-        connect(hd, &HlsDownloader::completed,      this, &MainWindow::onTaskCompleted);
-        connect(hd, &HlsDownloader::stateChanged,   this, &MainWindow::onTaskStateChanged);
-
-        TaskRow row;
-        row.id = id;
-        row.fileName = name.isEmpty() ? QUrl(url).fileName() : name;
-        if (row.fileName.isEmpty())
-            row.fileName = url;
-        row.url       = url;
-        row.fileSize  = -1;
-        row.downloaded = 0;
-        row.speedBps  = 0;
-        row.lastConnection = QDateTime::currentDateTime();
-        row.queue     = queue;
-        // 无队列才立即开始；且无队列同样受「同时下载的任务数」全局上限约束——
-        // 满额时留在 state 0，由 QueueScheduler 有空位再自动拉起（与有队列的任务一致）。
-        const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
-        row.state     = startNow ? 1 : 0;
-        row.statusText = TaskListModel::stateText(row.state);
-        m_taskModel->addTask(row);
-
-        m_speeds[id] = 0;
-        m_states[id] = row.state;
-        m_hlsTasks[id] = hd;
-
-        DownloadRequest req;
-        req.url       = url;
-        req.savePath  = finalDir;
-        req.fileName  = name;
-        req.threadCount = threads > 0 ? threads : m_settings.maxThreads();
-        req.isMagnet  = false;
-        if (!format.isEmpty())
-            req.extra.insert(QStringLiteral("format"), format);
-        if (startNow) {
-            hd->start(req);
-            cancelPendingAutoPower();
-        } else {
-            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
-            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
-        }
-
-        syncStatus();
-        HistoryStore::instance().recordAdded(url, row.fileName, finalDir);
-        Log::info(QStringLiteral("添加 HLS 任务 #%1: %2").arg(id).arg(url));
-        return id;
-    }
-
-    // ── 视频站点（YouTube / B 站 / …）/ DASH：交给 yt-dlp 后端，不走分段 HTTP 引擎
-    bool isVideo = VideoDownloader::isVideoUrl(url)
-                   || url.endsWith(QStringLiteral(".mpd"),  Qt::CaseInsensitive);
-    if (isVideo) {
-        int id = m_videoIdSeq++;
-        auto* vd = new VideoDownloader(this);
-        vd->setTaskId(id);
-
-        // 信号接入统一的任务进度/完成/状态处理（与 C 引擎任务共用同一套 UI 更新逻辑）
-        connect(vd, &VideoDownloader::progressChanged, this, &MainWindow::onTaskProgress);
-        connect(vd, &VideoDownloader::completed,      this, &MainWindow::onTaskCompleted);
-        connect(vd, &VideoDownloader::stateChanged,   this, &MainWindow::onTaskStateChanged);
-
-        TaskRow row;
-        row.id = id;
-        row.fileName = name.isEmpty() ? QUrl(url).fileName() : name;
-        if (row.fileName.isEmpty())
-            row.fileName = url;
-        row.url       = url;
-        row.fileSize  = -1;
-        row.downloaded = 0;
-        row.speedBps  = 0;
-        row.lastConnection = QDateTime::currentDateTime();
-        row.queue     = queue;
-        // 无队列才立即开始；且无队列同样受「同时下载的任务数」全局上限约束——
-        // 满额时留在 state 0，由 QueueScheduler 有空位再自动拉起（与有队列的任务一致）。
-        const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
-        row.state     = startNow ? 1 : 0;
-        row.statusText = TaskListModel::stateText(row.state);
-        m_taskModel->addTask(row);
-
-        m_speeds[id] = 0;
-        m_states[id] = row.state;
-        m_videoTasks[id] = vd;
-
-        DownloadRequest req;
-        req.url       = url;
-        req.savePath  = finalDir;
-        req.fileName  = name;
-        req.threadCount = threads > 0 ? threads : m_settings.maxThreads();
-        req.isMagnet  = false;
-        if (!format.isEmpty())
-            req.extra.insert(QStringLiteral("format"), format);
-        if (startNow) {
-            vd->start(req);
-            cancelPendingAutoPower();
-        } else {
-            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
-            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
-        }
-
-        syncStatus();
-        HistoryStore::instance().recordAdded(url, row.fileName, finalDir);
-        Log::info(QStringLiteral("添加视频任务 #%1 (yt-dlp): %2").arg(id).arg(url));
-        return id;
-    }
-
-    int id = m_manager->addTask(url, finalDir, name, threads > 0 ? threads : m_settings.maxThreads());
-    if (id <= 0)
-        return -1;
-
-    TaskRow row;
-    row.id = id;
-    row.fileName = name.isEmpty() ? QUrl(url).fileName() : name;
-    if (row.fileName.isEmpty())
-        row.fileName = url;
-    row.url            = url;
-    row.fileSize       = -1;
-    row.downloaded     = 0;
-    row.speedBps       = 0;
-    row.lastConnection = QDateTime::currentDateTime();
-    row.queue          = queue;
-    // 与媒体任务一致：无队列也受「同时下载的任务数」约束，满额则排队等待
-    const bool startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot();
-    if (startNow) {
-        m_manager->startTask(id);
-        row.state = 1;  // 下载中
-    } else {
-        row.state = 0;  // 等待队列调度（已入队列，或已达同时下载上限）
-        if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
-    }
-    row.statusText = TaskListModel::stateText(row.state);
-    m_taskModel->addTask(row);
-
-    m_speeds[id] = 0;
-    m_states[id] = row.state; cancelPendingAutoPower();
-    syncStatus();
-    HistoryStore::instance().recordAdded(url, row.fileName, finalDir);
-    Log::info(QStringLiteral("添加任务 #%1 (队列:%2): %3")
-                  .arg(id).arg(queue.isEmpty() ? QStringLiteral("无") : queue).arg(url));
-    return id;
-}
-
-// ── 后端无关的下载控制：按 taskId 自动分派到 C 引擎或 yt-dlp 视频后端 ──
-void MainWindow::startTaskById(int id)
-{
-    m_queueScheduler->clearDeferred(id);  // 无论手动还是调度器放行，都算已经脱离等待
-    // 加入队列的媒体任务在添加时未立即启动，缓存了 DownloadRequest；
-    // 此处由队列调度器放行后真正拉起后端（视频/HLS/BT）。
-    if (m_pendingStream.contains(id)) {
-        DownloadRequest req = m_pendingStream.take(id);
-        if (isTorrentTask(id)) {
-            if (auto* td = m_torrentTasks.value(id)) td->start(req);
-        } else if (isHlsTask(id)) {
-            if (auto* hd = m_hlsTasks.value(id)) hd->start(req);
-        } else if (isVideoTask(id)) {
-            if (auto* vd = m_videoTasks.value(id)) vd->start(req);
-        }
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    if (isStreamTask(id)) return;  // 视频/HLS 任务在添加时已由后端启动
-    m_manager->startTask(id);
-    m_states[id] = 1; cancelPendingAutoPower();
-    m_taskModel->updateStatus(id, 1);
-    syncStatus();
-}
-
-void MainWindow::pauseTaskById(int id)
-{
-    if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) hd->pause();
-        m_states[id] = 2;
-        m_taskModel->updateStatus(id, 2);
-        return;
-    }
-    if (isVideoTask(id)) {
-        if (auto* vd = m_videoTasks.value(id)) vd->pause();
-        m_states[id] = 2;
-        m_taskModel->updateStatus(id, 2);
-        return;
-    }
-    if (isTorrentTask(id)) {
-        if (auto* td = m_torrentTasks.value(id)) td->pause();
-        m_states[id] = 2;
-        m_taskModel->updateStatus(id, 2);
-        return;
-    }
-    m_manager->pauseTask(id);
-    m_states[id] = 2;
-    m_taskModel->updateStatus(id, 2);
-}
-
-void MainWindow::resumeTaskById(int id)
-{
-    if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) hd->resume();
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    if (isVideoTask(id)) {
-        if (auto* vd = m_videoTasks.value(id)) vd->resume();
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    if (isTorrentTask(id)) {
-        if (auto* td = m_torrentTasks.value(id)) td->resume();
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    m_manager->resumeTask(id);
-    m_states[id] = 1; cancelPendingAutoPower();
-    m_taskModel->updateStatus(id, 1);
-    syncStatus();
-}
-
-void MainWindow::cancelTaskById(int id)
-{
-    if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) hd->cancel();
-        m_states[id] = 5;
-        m_taskModel->updateStatus(id, 5);
-        return;
-    }
-    if (isVideoTask(id)) {
-        if (auto* vd = m_videoTasks.value(id)) vd->cancel();
-        m_states[id] = 5;
-        m_taskModel->updateStatus(id, 5);
-        return;
-    }
-    if (isTorrentTask(id)) {
-        if (auto* td = m_torrentTasks.value(id)) td->cancel();
-        m_states[id] = 5;
-        m_taskModel->updateStatus(id, 5);
-        return;
-    }
-    m_manager->cancelTask(id);
-    m_states[id] = 5;
-    m_taskModel->updateStatus(id, 5);
-    syncStatus();
-}
-
-void MainWindow::restartTaskById(int id)
-{
-    if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) hd->resume();  // HLS 无断点续传，重新下载
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    if (isVideoTask(id)) {
-        if (auto* vd = m_videoTasks.value(id)) vd->resume();  // yt-dlp 无断点续传，重新下载
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    if (isTorrentTask(id)) {
-        if (auto* td = m_torrentTasks.value(id)) td->resume();  // aria2 重新拉起任务
-        m_states[id] = 1; cancelPendingAutoPower();
-        m_taskModel->updateStatus(id, 1);
-        syncStatus();
-        return;
-    }
-    m_manager->restartTask(id);
-    m_taskModel->updateProgress(id, 0, 0);
-    m_speeds[id] = 0;
-    m_states[id] = 1; cancelPendingAutoPower();
-    syncStatus();
-    Log::info(QStringLiteral("任务 #%1 已重新开始").arg(id));
-}
-
-void MainWindow::removeTaskById(int id)
-{
-    m_pendingStream.remove(id);  // 清理可能仍在等待队列调度的媒体任务请求
-    // 任务没了，定时/重复设置也要一起清掉，否则 ScheduleService 里会残留
-    // 指向已删除 id 的条目（到期后 startTaskById 作用在不存在的任务上）。
-    m_scheduleService->removeTaskSchedule(id);
-    m_queueScheduler->clearDeferred(id);  // 已被并发上限暂缓的任务删除后不必再等空位
-    if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) {
-            hd->cancel();
-            hd->deleteLater();
-            m_hlsTasks.remove(id);
-        }
-        m_taskModel->removeTask(id);
-        m_speeds.remove(id);
-        m_states.remove(id);
-        syncStatus();
-        return;
-    }
-    if (isVideoTask(id)) {
-        if (auto* vd = m_videoTasks.value(id)) {
-            vd->cancel();
-            vd->deleteLater();
-            m_videoTasks.remove(id);
-        }
-        m_taskModel->removeTask(id);
-        m_speeds.remove(id);
-        m_states.remove(id);
-        syncStatus();
-        return;
-    }
-    if (isTorrentTask(id)) {
-        if (auto* td = m_torrentTasks.value(id)) {
-            td->cancel();
-            td->deleteLater();
-            m_torrentTasks.remove(id);
-        }
-        m_taskModel->removeTask(id);
-        m_speeds.remove(id);
-        m_states.remove(id);
-        syncStatus();
-        return;
-    }
-    m_manager->removeTask(id);
-    m_taskModel->removeTask(id);
-    m_speeds.remove(id);
-    m_states.remove(id);
-    syncStatus();
 }
 
 // ── 站点抓取器 ──────────────────────────────────────
@@ -2235,16 +1844,16 @@ void MainWindow::onSiteExplorer()
     auto* dlg = new SiteExplorerDialog(names, m_settings.defaultSaveDir(), this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     connect(dlg, &SiteExplorerDialog::requestAddUrl, this, [this](const QString& url) {
-        internalAddTask(url, m_settings.defaultSaveDir(), QString(), 0, QString());
+        m_taskController->internalAddTask(url, m_settings.defaultSaveDir(), QString(), 0, QString());
     });
     connect(dlg, &SiteExplorerDialog::requestAddUrlToQueue, this,
             [this](const QString& url, const QString& q) {
-        internalAddTask(url, m_settings.defaultSaveDir(), QString(), 0, q);
+        m_taskController->internalAddTask(url, m_settings.defaultSaveDir(), QString(), 0, q);
     });
     connect(dlg, &SiteExplorerDialog::requestAddUrlWithDir, this,
             [this](const QString& url, const QString& dir, const QString& q) {
         // 站点抓取器已自行拼好 saveDir/<分类>/，传 archiveByType=false 避免二次归档
-        internalAddTask(url, dir, QString(), 0, q, QString(), false);
+        m_taskController->internalAddTask(url, dir, QString(), 0, q, QString(), false);
     });
     dlg->show();
 }
@@ -2284,15 +1893,15 @@ void MainWindow::onTaskContextMenu(const QPoint& pos)
         return;
     QMenu menu(this);
     menu.addAction(AppIcons::icon(AppIcons::Glyph::Start), QStringLiteral("开始"),
-                   this, [this, id] { startTaskById(id); });
+                   this, [this, id] { m_taskController->startTaskById(id); });
     menu.addAction(AppIcons::icon(AppIcons::Glyph::Pause), QStringLiteral("暂停"),
-                   this, [this, id] { pauseTaskById(id); });
+                   this, [this, id] { m_taskController->pauseTaskById(id); });
     menu.addAction(AppIcons::icon(AppIcons::Glyph::Cancel), QStringLiteral("取消"),
-                   this, [this, id] { cancelTaskById(id); });
+                   this, [this, id] { m_taskController->cancelTaskById(id); });
     menu.addAction(AppIcons::icon(AppIcons::Glyph::Restart), QStringLiteral("重新开始"),
-                   this, [this, id] { restartTaskById(id); });
+                   this, [this, id] { m_taskController->restartTaskById(id); });
     menu.addAction(AppIcons::icon(AppIcons::Glyph::Remove), QStringLiteral("删除"),
-                   this, [this, id] { removeTaskById(id); });
+                   this, [this, id] { m_taskController->removeTaskById(id); });
     menu.addSeparator();
 
     QMenu* queueMenu = menu.addMenu(QStringLiteral("移动到队列"));
