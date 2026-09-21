@@ -18,7 +18,7 @@
 #include "app_icons.h"
 #include "video_downloader.h"
 #include "video_backend.h"
-#include "web_server.h"
+#include "web_server_controller.h"
 #include <QJsonArray>
 #include <QJsonObject>
 #include "hls_downloader.h"
@@ -230,6 +230,31 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_taskController, &TaskController::mediaProgress,     this, &MainWindow::onTaskProgress);
     connect(m_taskController, &TaskController::mediaCompleted,    this, &MainWindow::onTaskCompleted);
     connect(m_taskController, &TaskController::mediaStateChanged, this, &MainWindow::onTaskStateChanged);
+    // Web 管理界面（L2 组件）：内嵌 HTTP 服务器的启动/停止/端口-令牌刷新，
+    // 经提供器/回调与任务模型、任务控制、托盘通知解耦，自身不持有引擎/任务状态。
+    m_webServerController = new WebServerController(this);
+    m_webServerController->setSettings(&m_settings);
+    m_webServerController->setTaskModel(m_taskModel);
+    m_webServerController->setSpeedSink([this](int id) { return m_speeds.value(id, 0); });
+    m_webServerController->setAddTaskSink(
+        [this](const QString& url, const QString& dir, const QString& queue, int threads) -> int {
+            QString saveDir = dir.isEmpty() ? m_settings.defaultSaveDir() : dir;
+            int th = threads > 0 ? threads : m_settings.maxThreads();
+            return m_taskController->internalAddTask(url, saveDir, QString(), th, queue, QString());
+        });
+    m_webServerController->setControlSink(
+        [this](int id, const QString& action) -> bool {
+            if (action == QStringLiteral("pause"))        m_taskController->pauseTaskById(id);
+            else if (action == QStringLiteral("resume"))  m_taskController->resumeTaskById(id);
+            else if (action == QStringLiteral("cancel"))  m_taskController->cancelTaskById(id);
+            else if (action == QStringLiteral("remove"))  m_taskController->removeTaskById(id);
+            else return false;
+            return true;
+        });
+    m_webServerController->setTraySink(
+        [this](const QString& t, const QString& b, QSystemTrayIcon::MessageIcon i, int m) {
+            if (m_trayIcon && m_trayIcon->isVisible()) m_trayIcon->showMessage(t, b, i, m);
+        });
 
     // 完成通知聚合（L2 组件）：750ms 窗口内的多次完成/失败合并为单条托盘气泡 + 至多一次提示音。
     // 组件只负责聚合，到期经 notify 信号交回主窗口显示气泡并按 chime 播放提示音。
@@ -301,7 +326,7 @@ MainWindow::MainWindow(QWidget* parent)
     applyZoom();   // 应用初始视图缩放（字体 + 工具栏图标）
     applyNetworkProxy();  // 应用代理（站点抓取器等 Qt 网络）
 
-    applyWebServer();  // 依据设置启动 Web 管理界面（默认关闭）
+    m_webServerController->apply();  // 依据设置启动 Web 管理界面（默认关闭）
 
     // 引擎回调在 worker 线程触发，Qt 自动以 QueuedConnection 投递到 GUI 线程，安全
     connect(m_manager, &DownloadManager::taskProgress,     this, &MainWindow::onTaskProgress);
@@ -1235,7 +1260,7 @@ void MainWindow::onSettings()
         // SettingsDialog::accept() 内部已 save + applyToEngine，这里只需刷新主题
         applyTheme();
         applyNetworkProxy();   // 代理可能在设置中修改，同步到 Qt 网络栈
-        applyWebServer();      // 依据新设置启动/停止/更新 Web 管理界面
+        m_webServerController->apply();      // 依据新设置启动/停止/更新 Web 管理界面
 
         // 重新连接/断开剪贴板监听
         auto* clip = QApplication::clipboard();
@@ -1612,77 +1637,7 @@ void MainWindow::refreshSidebarCounts()
 
 // ── IPC 单实例通信已迁移至 src/app/ipc_server.cpp（IpcServer 组件）──
 
-void MainWindow::applyWebServer()
-{
-    if (!m_settings.webEnabled()) {
-        if (m_webServer && m_webServer->isListening()) {
-            m_webServer->stopServer();
-            Log::info(QStringLiteral("Web 管理界面已关闭"));
-        }
-        return;
-    }
 
-    if (!m_webServer) {
-        m_webServer = new WebServer(this);
-        m_webServer->setProviders(
-            [this]() -> QJsonArray {
-                QJsonArray arr;
-                const auto& tasks = m_taskModel->tasks();
-                for (const auto& t : tasks) {
-                    QJsonObject o;
-                    o[QStringLiteral("id")]         = t.id;
-                    o[QStringLiteral("name")]       = t.fileName;
-                    o[QStringLiteral("url")]        = t.url;
-                    o[QStringLiteral("size")]       = t.fileSize;
-                    o[QStringLiteral("downloaded")] = t.downloaded;
-                    o[QStringLiteral("speed")]      = m_speeds.value(t.id, 0);
-                    o[QStringLiteral("state")]      = t.state;
-                    o[QStringLiteral("status")]     = t.statusText;
-                    o[QStringLiteral("queue")]      = t.queue;
-                    int pct = t.progressPct >= 0 ? t.progressPct
-                        : (t.fileSize > 0
-                           ? static_cast<int>(t.downloaded * 100 / t.fileSize) : -1);
-                    o[QStringLiteral("progress")] = pct;
-                    arr.append(o);
-                }
-                return arr;
-            },
-            [this](const QString& url, const QString& dir, const QString& queue,
-                   int threads) -> int {
-                QString saveDir = dir.isEmpty() ? m_settings.defaultSaveDir() : dir;
-                int th = threads > 0 ? threads : m_settings.maxThreads();
-                return m_taskController->internalAddTask(url, saveDir, QString(), th, queue, QString());
-            },
-            [this](int id, const QString& action) -> bool {
-                if (action == QStringLiteral("pause"))        m_taskController->pauseTaskById(id);
-                else if (action == QStringLiteral("resume"))  m_taskController->resumeTaskById(id);
-                else if (action == QStringLiteral("cancel"))  m_taskController->cancelTaskById(id);
-                else if (action == QStringLiteral("remove"))  m_taskController->removeTaskById(id);
-                else return false;
-                return true;
-            });
-    }
-
-    // 已监听则先停后启，以套用新的端口 / 令牌
-    if (m_webServer->isListening())
-        m_webServer->stopServer();
-
-    if (m_webServer->startServer(static_cast<quint16>(m_settings.webPort()),
-                                 m_settings.webToken())) {
-        Log::info(QStringLiteral("Web 管理界面已启动: http://127.0.0.1:%1/")
-                      .arg(m_settings.webPort()));
-        if (m_trayIcon && m_trayIcon->isVisible())
-            m_trayIcon->showMessage(QStringLiteral("Web 管理界面"),
-                QStringLiteral("已启动：http://127.0.0.1:%1/").arg(m_settings.webPort()),
-                QSystemTrayIcon::Information, 4000);
-    } else {
-        Log::warn(QStringLiteral("Web 管理界面启动失败: %1").arg(m_webServer->errorString()));
-        if (m_trayIcon && m_trayIcon->isVisible())
-            m_trayIcon->showMessage(QStringLiteral("Web 管理界面"),
-                QStringLiteral("启动失败：端口 %1 可能被占用").arg(m_settings.webPort()),
-                QSystemTrayIcon::Warning, 4000);
-    }
-}
 
 // ── IPC 单实例通信已迁移至 src/app/ipc_server.cpp（IpcServer 组件）──
 

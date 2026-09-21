@@ -12,6 +12,7 @@
 #include "task_controller.h"   // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）
 #include "notification_aggregator.h" // L2：下载完成/失败气泡聚合
 #include "traffic_mode_controller.h" // L2：流量档位应用（写设置+下发引擎/aria2/托盘+同步 UI）
+#include "web_server_controller.h" // L2：Web 管理界面启动/停止/刷新
 
 class DownloadManager;
 class TaskListModel;
@@ -36,7 +37,7 @@ class QSystemTrayIcon;
 class QCloseEvent;
 class QTimer;
 class QDialog;
-class WebServer;
+
 class AutoPowerController;
 class IpcServer;
 class ScheduleService;
@@ -154,7 +155,7 @@ private:
     void setupToolBar();
     void setupStatusBar();
     void setupCategoryTree();
-    void applyWebServer();        // 依据设置启动/停止/更新 Web 管理界面
+
     void updateStatusBar();                 // O(1)：直接用缓存聚合值刷新状态栏
     void recomputeStatusAggregates();        // O(n)：由 m_speeds/m_states 权威重算缓存
     void syncStatus();                       // 重算缓存 + 刷新状态栏（结构/状态变更时调用）
@@ -219,7 +220,7 @@ private:
     IpcServer*            m_ipcServer = nullptr;
 
     // Web 远程管理界面（内嵌 HTTP 服务器）
-    WebServer*            m_webServer = nullptr;
+    WebServerController* m_webServerController = nullptr;
 
     // 下载队列管理
     QueueManager*        m_queueMgr = nullptr;
