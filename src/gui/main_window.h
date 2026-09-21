@@ -13,6 +13,7 @@
 #include "notification_aggregator.h" // L2：下载完成/失败气泡聚合
 #include "traffic_mode_controller.h" // L2：流量档位应用（写设置+下发引擎/aria2/托盘+同步 UI）
 #include "web_server_controller.h" // L2：Web 管理界面启动/停止/刷新
+#include "appearance_controller.h" // L2：外观应用（主题 QSS + 视图缩放）
 
 class DownloadManager;
 class TaskListModel;
@@ -108,11 +109,6 @@ private slots:
     void onTaskListClicked(const QModelIndex& index); // 点击分组头 → 折叠/展开
     void applyGroupSpans();      // 为分组头行设置跨列合并（modelReset 后重排）
 
-    // 视图缩放
-    void onZoomIn();
-    void onZoomOut();
-    void onZoomReset();
-
     // 批量操作（接入引擎 start_all / stop_all / remove_completed）
     void onStartAll();
     void onPauseAll();
@@ -161,7 +157,6 @@ private:
     void syncStatus();                       // 重算缓存 + 刷新状态栏（结构/状态变更时调用）
     // 流量档位/限速状态同步已抽到 L2 组件 TrafficModeController（见 src/app/traffic_mode_controller.*）
     void refreshSidebarCounts();    // 重算左侧树各节点的任务数，写进模型的 CountRole
-    void applyTheme();       // 根据 m_settings.theme() 加载 QSS 样式表
     int  selectedTaskId() const;
 
     // 任务 CRUD/分派已抽取至 L2 组件 TaskController（见 src/app/task_controller.*），
@@ -171,7 +166,6 @@ private:
     bool isTorrentTask(int id) const { return m_taskController && m_taskController->isTorrentTask(id); }
     bool isStreamTask(int id) const { return isVideoTask(id) || isHlsTask(id) || isTorrentTask(id); }
 
-    void applyZoom();            // 应用视图缩放（字体 + 工具栏图标）
     void applyNetworkProxy();    // 应用 Qt 应用级代理（站点抓取器用）
 
     DownloadManager*       m_manager;
@@ -240,10 +234,8 @@ private:
     // 视频/HLS/BT 后端实例表、编号偏移与延迟启动缓存已移入 TaskController
     // （见 src/app/task_controller.*），MainWindow 不再持有媒体后端状态。
 
-    // 视图缩放
-    int m_zoomLevel = 0;            // 字体缩放级数（每级 ±1pt）
-    static constexpr int BASE_FONT_PT = 13;
-    static constexpr int BASE_ICON_SZ = 22;
+    // 外观应用（L2 组件，见 src/app/appearance_controller.*）——主题 QSS + 视图缩放
+    AppearanceController* m_appearanceController = nullptr;
 };
 
 #endif // MAIN_WINDOW_H

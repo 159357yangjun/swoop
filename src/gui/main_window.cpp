@@ -19,6 +19,7 @@
 #include "video_downloader.h"
 #include "video_backend.h"
 #include "web_server_controller.h"
+#include "appearance_controller.h"
 #include <QJsonArray>
 #include <QJsonObject>
 #include "hls_downloader.h"
@@ -178,6 +179,10 @@ MainWindow::MainWindow(QWidget* parent)
     , m_proxy(new CategoryFilterProxy(this))
 {
     setupUi();
+
+    // 外观（L2 组件）：主题/缩放状态与应用于早期创建，供上方 setupMenus 的缩放菜单连接
+    m_appearanceController = new AppearanceController(this);
+    m_appearanceController->setSettings(&m_settings);
     setupMenus();
     setupToolBar();
     setupStatusBar();
@@ -322,8 +327,16 @@ MainWindow::MainWindow(QWidget* parent)
             if (ok) Log::info(QStringLiteral("BT/磁力组件 aria2c 已就绪（开箱即用）"));
         }, false);
 
-    applyTheme();  // 根据设置应用 QSS 主题样式
-    applyZoom();   // 应用初始视图缩放（字体 + 工具栏图标）
+    m_appearanceController->setToolBar(m_toolBar);
+    m_appearanceController->setRepaintSink([this]() {
+        if (m_sidebar) {
+            m_sidebar->update();
+            if (m_sidebar->stats()) m_sidebar->stats()->update();
+        }
+        if (m_categoryTree) m_categoryTree->viewport()->update();
+    });
+    m_appearanceController->applyTheme();  // 根据设置应用 QSS 主题样式
+    m_appearanceController->applyZoom();   // 应用初始视图缩放（字体 + 工具栏图标）
     applyNetworkProxy();  // 应用代理（站点抓取器等 Qt 网络）
 
     m_webServerController->apply();  // 依据设置启动 Web 管理界面（默认关闭）
@@ -542,9 +555,9 @@ void MainWindow::setupMenus()
     taskMenu->addAction(QStringLiteral("清除已完成"), this, &MainWindow::onRemoveCompleted);
 
     auto* viewMenu = menuBar()->addMenu(QStringLiteral("视图(&V)"));
-    viewMenu->addAction(QStringLiteral("放大(&I)"), QKeySequence::ZoomIn, this, &MainWindow::onZoomIn);
-    viewMenu->addAction(QStringLiteral("缩小(&O)"), QKeySequence::ZoomOut, this, &MainWindow::onZoomOut);
-    viewMenu->addAction(QStringLiteral("重置缩放(&R)"), QKeySequence(Qt::CTRL | Qt::Key_0), this, &MainWindow::onZoomReset);
+    viewMenu->addAction(QStringLiteral("放大(&I)"), QKeySequence::ZoomIn, m_appearanceController, &AppearanceController::zoomIn);
+    viewMenu->addAction(QStringLiteral("缩小(&O)"), QKeySequence::ZoomOut, m_appearanceController, &AppearanceController::zoomOut);
+    viewMenu->addAction(QStringLiteral("重置缩放(&R)"), QKeySequence(Qt::CTRL | Qt::Key_0), m_appearanceController, &AppearanceController::zoomReset);
     viewMenu->addSeparator();
 
     // 任务列表分组：从工具栏下拉框搬进菜单（工具栏已经不再堆控件）。
@@ -920,83 +933,15 @@ void MainWindow::dropEvent(QDropEvent* event)
     event->acceptProposedAction();
 }
 
-void MainWindow::applyTheme()
-{
-    // 从 Qt 资源系统加载 QSS 样式表（light/dark），应用到整个应用
-    QString qssPath = QStringLiteral(":/qss/%1.qss").arg(m_settings.theme());
-    QFile f(qssPath);
-    if (f.open(QFile::ReadOnly | QFile::Text)) {
-        qApp->setStyleSheet(QString::fromUtf8(f.readAll()));
-        Log::info(QStringLiteral("已加载主题: %1").arg(m_settings.theme()));
-    } else {
-        // 回退到亮色主题
-        QFile fallback(QStringLiteral(":/qss/light.qss"));
-        if (fallback.open(QFile::ReadOnly | QFile::Text))
-            qApp->setStyleSheet(QString::fromUtf8(fallback.readAll()));
-        Log::warn(QStringLiteral("主题 %1 加载失败，回退到 light").arg(m_settings.theme()));
-    }
 
-    // 状态列委托是自绘的，QSS 管不到它：必须把主题色调同步过去，
-    // 否则暗色主题下进度条百分比/状态徽章文字对比度不足（旧版渐变即因此不可读）。
-    const bool dark = (m_settings.theme() == QStringLiteral("dark"));
-    ProgressDelegate::setDarkTheme(dark);
-    // 侧栏状态行与数量徽标同样是自绘的（文字色/底色/圆点色 QSS 表达不了），
-    // 它们的颜色在 paintEvent 里实时解析，所以这里只需改标记位再让它们重绘。
-    // 注意要直接 update 状态行：它是子控件且自己铺满底色，父容器的 update 不会重绘它。
-    SidebarPanel::setDarkTheme(dark);
-    if (m_sidebar) {
-        m_sidebar->update();
-        if (m_sidebar->stats())
-            m_sidebar->stats()->update();
-    }
-    if (m_categoryTree)
-        m_categoryTree->viewport()->update();   // 徽标是委托自绘的，显式重绘一次更稳妥
-    // 自绘图标集同理：QIconEngine 在每次 paint 时实时取色，所以这里只需更新标记位，
-    // 图标本身不用重建（工具栏按钮、分类树、右键菜单都会在下次重绘时自动换色）。
-    AppIcons::setDarkTheme(dark);
-}
 
-void MainWindow::applyZoom()
-{
-    // 全局字体缩放：每级 ±1pt；同时调整工具栏图标大小
-    int pt = BASE_FONT_PT + m_zoomLevel;
-    if (pt < 8) pt = 8;
-    if (pt > 24) pt = 24;
 
-    QFont font = qApp->font();
-    font.setPointSize(pt);
-    qApp->setFont(font);
 
-    int iconSz = BASE_ICON_SZ + m_zoomLevel * 2;
-    if (iconSz < 16) iconSz = 16;
-    if (iconSz > 48) iconSz = 48;
-    m_toolBar->setIconSize(QSize(iconSz, iconSz));
-}
 
-void MainWindow::onZoomIn()
-{
-    if (m_zoomLevel < 6) {
-        ++m_zoomLevel;
-        applyZoom();
-        Log::info(QStringLiteral("视图放大: %1pt").arg(BASE_FONT_PT + m_zoomLevel));
-    }
-}
 
-void MainWindow::onZoomOut()
-{
-    if (m_zoomLevel > -4) {
-        --m_zoomLevel;
-        applyZoom();
-        Log::info(QStringLiteral("视图缩小: %1pt").arg(BASE_FONT_PT + m_zoomLevel));
-    }
-}
 
-void MainWindow::onZoomReset()
-{
-    m_zoomLevel = 0;
-    applyZoom();
-    Log::info(QStringLiteral("视图缩放重置"));
-}
+
+
 
 void MainWindow::applyNetworkProxy()
 {
@@ -1258,7 +1203,7 @@ void MainWindow::onSettings()
     });
     if (dlg.exec() == QDialog::Accepted) {
         // SettingsDialog::accept() 内部已 save + applyToEngine，这里只需刷新主题
-        applyTheme();
+        m_appearanceController->applyTheme();
         applyNetworkProxy();   // 代理可能在设置中修改，同步到 Qt 网络栈
         m_webServerController->apply();      // 依据新设置启动/停止/更新 Web 管理界面
 

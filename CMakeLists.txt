@@ -116,6 +116,8 @@ set(APP_SOURCES
     src/app/traffic_mode_controller.h
     src/app/web_server_controller.cpp
     src/app/web_server_controller.h
+    src/app/appearance_controller.cpp
+    src/app/appearance_controller.h
 )
 
 set(CORE_WRAPPER_SOURCES
