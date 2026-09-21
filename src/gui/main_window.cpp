@@ -28,6 +28,7 @@
 #include "download_core.h"
 #include "network.h"   /* network_set_http2_enabled：启动时把持久设置注入 WinHTTP 引擎 */
 #include "history_store.h"
+#include "traffic_mode_controller.h"
 #include "logger.h"
 #include "auto_power.h"   // L2：下载完成自动关机/休眠（从本文件抽取）
 #include "ipc_server.h"   // L2：IPC 单实例通信（从本文件抽取）
@@ -187,6 +188,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_queueMgr, &QueueManager::queuesChanged, this, &MainWindow::rebuildQueueTree);
 
     setupCategoryTree();
+    m_trafficController = new TrafficModeController(this);
+    m_trafficController->setSettings(&m_settings);
+    m_trafficController->setWidgets(m_trafficCombo, m_taskModel);
+    m_trafficController->setMaxSpeedSink([this](qint64 bps) { m_manager->setMaxSpeed(bps); });
+    m_trafficController->setTorrentLimitSink([this](int kbps) { TorrentDownloader::setGlobalSpeedLimit(kbps); });
+    m_trafficController->attachCombo();
 
     // 系统托盘（L2 组件）：图标 + 右键菜单 + 双击恢复，菜单动作经回调解耦
     m_trayController = new TrayController(this);
@@ -197,10 +204,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_trayController->setNewTaskCallback([this] { onNewTask(); });
     m_trayController->setStartAllCallback([this] { onStartAll(); });
     m_trayController->setPauseAllCallback([this] { onPauseAll(); });
-    m_trayController->setTrafficModeCallback([this](int mode) { applyTrafficMode(mode); });
+    m_trayController->setTrafficModeCallback([this](int mode) { m_trafficController->applyMode(mode); });
     m_trayController->setup();
     m_trayController->syncTraffic(m_settings.trafficMode());
     m_trayIcon = m_trayController->trayIcon();
+    m_trafficController->setTraySyncSink([this](int mode) { m_trayController->syncTraffic(mode); });
 
     // 任务控制（L2 组件）：媒体后端实例表 + 任务 CRUD/分派。
     // 后台表与分派逻辑此前都在 MainWindow，连同引擎信号桥接的转发一并抽出。
@@ -261,7 +269,7 @@ MainWindow::MainWindow(QWidget* parent)
     // 把持久化的 HTTP/2 开关注入 WinHTTP 引擎（network_init 已用默认开启，这里按用户设置校正）
     network_set_http2_enabled(m_settings.http2Enabled());
     // 把持久化的流量档位/限速状态同步到任务列表「限速」列
-    updateTrafficIndicator();
+    m_trafficController->updateIndicator();
     // 恢复上次的任务列表分组模式。必须放在 m_settings.load() 之后：
     // 以前这行写在 setupToolBar() 里，那时设置还没读盘，取到的永远是默认值 0，
     // 「按类型/按队列」的选择存了盘却从来恢复不了。
@@ -538,26 +546,7 @@ void MainWindow::setupMenus()
     helpMenu->addAction(QStringLiteral("关于(&A)..."), this, &MainWindow::onAbout);
 }
 
-// 流量档位预设 → 限速值（KB/s）；对标 FDM 工具栏流量使用模式
 namespace {
-int trafficKbpsForMode(int mode) {
-    switch (mode) {
-        case 1:  return 512;    // 轻量：严格保留浏览带宽
-        case 2:  return 2048;   // 中等：平衡
-        case 3:  return 4096;   // 重量：接近全速，仍留余量
-        default: return 0;      // 自动/未知 → 不限速
-    }
-}
-QString trafficModeName(int mode) {
-    switch (mode) {
-        case 1:  return QStringLiteral("轻量");
-        case 2:  return QStringLiteral("中等");
-        case 3:  return QStringLiteral("重量");
-        case -1: return QStringLiteral("自定义");
-        default: return QStringLiteral("自动");
-    }
-}
-
 // 状态栏总速度文本。单位阈值与任务表 formatSpeed 保持一致（KB 一位、MB 两位小数），
 // 否则同一窗口里两处速度的精度不一样，看起来像两个不同的数。
 QString formatSpeedText(qint64 bps) {
@@ -616,60 +605,6 @@ void MainWindow::setupToolBar()
     m_toolBar->addWidget(more);
 }
 
-void MainWindow::onTrafficModeChanged(int index)
-{
-    if (!m_trafficCombo || index < 0) return;
-    int mode = m_trafficCombo->itemData(index).toInt();
-    // “自定义”项仅作显示态，不允许被选中（手动限速请在设置里改）
-    if (mode == -1) {
-        syncTrafficCombo();   // 复位回当前实际档位
-        return;
-    }
-    applyTrafficMode(mode);
-}
-
-// 统一应用流量档位：写设置 + 实时下发纯 C 引擎与 aria2 + 持久化 + 同步两处 UI
-void MainWindow::applyTrafficMode(int mode)
-{
-    int kbps = trafficKbpsForMode(mode);
-    m_settings.setTrafficMode(mode);
-    m_settings.setSpeedLimitKBps(kbps);
-    m_manager->setMaxSpeed(kbps * 1024);
-    TorrentDownloader::setGlobalSpeedLimit(kbps);
-    m_settings.save();
-    Log::info(QStringLiteral("流量档位切换为「%1」(%2 KB/s)")
-                  .arg(trafficModeName(mode)).arg(kbps));
-    syncTrafficCombo();
-    m_trayController->syncTraffic(m_settings.trafficMode());  // 同步托盘流量子菜单勾选
-    updateTrafficIndicator();   // 同步任务列表「限速」列
-}
-
-void MainWindow::syncTrafficCombo()
-{
-    if (!m_trafficCombo) return;
-    int idx = m_trafficCombo->findData(m_settings.trafficMode());
-    if (idx < 0) idx = m_trafficCombo->findData(-1);  // 落到“自定义”
-    m_trafficCombo->setCurrentIndex(idx);
-}
-
-// 把全局流量档位/限速状态文本同步到任务列表「限速」列（所有行共用该值）
-void MainWindow::updateTrafficIndicator()
-{
-    if (!m_taskModel) return;
-    int mode = m_settings.trafficMode();
-    QString text;
-    if (mode == 0)
-        text = QStringLiteral("自动");          // 自动 = 不限速
-    else if (mode == -1)
-        text = QStringLiteral("自定义 %1").arg(m_settings.speedLimitKBps());
-    else
-        text = QStringLiteral("%1 %2").arg(trafficModeName(mode)).arg(trafficKbpsForMode(mode));
-    m_taskModel->setGlobalTraffic(text);
-    // 状态栏下拉也要跟着走：它现在承担原来「限速胶囊」的职责——让人一眼看出
-    // 当前是不是在限速、限到哪一档。档位名与列的文本同源，不会说两套话。
-    syncTrafficCombo();
-}
-
 void MainWindow::setupStatusBar()
 {
     m_statusBar = statusBar();
@@ -695,9 +630,6 @@ void MainWindow::setupStatusBar()
     m_trafficCombo->addItem(QStringLiteral("自定义"), -1);
     m_trafficCombo->setToolTip(QStringLiteral(
         "流量使用模式：自动=不限速；轻量/中等/重量=限制下载速度以保留网络带宽；自定义=在设置中手动指定"));
-    syncTrafficCombo();
-    connect(m_trafficCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &MainWindow::onTrafficModeChanged);
 
     m_statusBar->addPermanentWidget(m_speedPill);
     m_statusBar->addPermanentWidget(m_taskCountLabel);
@@ -1313,9 +1245,9 @@ void MainWindow::onSettings()
 
         // #50：全局限速变更实时推送给正在运行的 BT/磁力/FTP（aria2）任务
         TorrentDownloader::setGlobalSpeedLimit(m_settings.speedLimitKBps());
-        syncTrafficCombo();   // 设置里改了限速值 → 同步工具栏档位下拉（显示“自定义”）
-        m_trayController->syncTraffic(m_settings.trafficMode());  // 同步托盘流量子菜单勾选（手动值 → 4 项全不勾）
-        updateTrafficIndicator();  // 同步任务列表「限速」列
+        m_trafficController->syncCombo();   // 设置里改了限速值 → 同步工具栏档位下拉（显示“自定义”）
+        m_trafficController->syncTray();  // 同步托盘流量子菜单勾选（手动值 → 4 项全不勾）
+        m_trafficController->updateIndicator();  // 同步任务列表「限速」列
     }
 }
 

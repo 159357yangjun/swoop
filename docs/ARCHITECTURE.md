@@ -11,7 +11,7 @@
 | 维度 | 数值/事实 |
 |---|---|
 | 源码总量 | `src/**` + `tools/**` 约 **20,766 行**，C 3.7k / C++ 16.9k |
-| 最大文件 | `src/gui/main_window.cpp` **2,883 行**（占 GUI 层 31%、全工程 14%） |
+| 最大文件 | `src/gui/main_window.cpp` **1,936 行**（Stage 3 抽 traffic 后；Stage 2 末 2,004，初始 2,883） |
 | 次大 | `core/download_core.c` 1,597 · `storage/html_parser.c` 901 · `core/network_curl.c` 573 |
 | 目录 | core 7 · gui 41 · utils 5 · storage 6 · protocols 23 · cli 1 · host 1 · tools 8 |
 | 死代码 | `core/network.c`（WinHTTP 874 行）**未编译**；`gui/glass_effect.cpp` 已停用但**仍在编译** |
@@ -181,9 +181,11 @@
 - **验收**：每个抽取后 engine 37/0 + 三探针 PASS + 走查出图一致
 
 ### 阶段 3 — MainWindow 瘦身（收口）
-- 阶段 2 抽干净后，`main_window.cpp` 应降至 ~900–1100 行（纯视图 + 信号桥）
+- 阶段 2 抽干净后，`main_window.cpp` 应降至 ~900–1100 行（纯视图 + 信号桥）；本机实际抽完 6 件后已 2,004 行，剩余主要为 UI 构建 + 信号桥 + 各 downloader 完成/进度桥槽。
 - 公开 API（`addTaskFromUrl`/`refreshFromEngine`/`enqueueUrl`）签名不变
-- **验收**：同上 + 同组回归用例再跑一遍
+- **验收**：每个抽取后 engine 37/0 + 三探针 PASS + A/B（worktree 取上一提交）01/04/05 逐字节一致
+- **已抽块 #1 — 流量档位应用 → `TrafficModeController`**：`onTrafficModeChanged`/`applyTrafficMode`/`syncTrafficCombo`/`updateTrafficIndicator` 四个方法 + 匿名命名空间 `trafficKbpsForMode`/`trafficModeName` 搬入 `src/app/traffic_mode_controller.{h,cpp}`。引擎/aria2/托盘动作经 sink 注入（`setMaxSpeedSink`/`setTorrentLimitSink`/`setTraySyncSink`），下拉框+任务模型经 `setWidgets` 注入，`attachCombo()` 接 `currentIndexChanged`。`main_window.cpp` 2,004 → **1,936 行**。验收全过（构建 + 引擎 37/0 + 三探针 + A/B 01/04/05 一致）。
+- **下一块候选**：`applyWebServer`（~71 行，可迁 `WebServerController`）；主题/zoom、category-tree/queue-tree 构建视爆炸半径再定。
 
 ### 阶段 4 — 协议层与基础设施强化（可选，按需求）
 - `protocols` 补 `FtpDownloader`/`BtDownloader`（需 vcpkg 依赖，见 REFACTOR_PLAN 务实调整）

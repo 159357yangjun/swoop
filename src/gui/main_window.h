@@ -11,6 +11,7 @@
 #include "idownloader.h"   // DownloadRequest：媒体任务延迟启动（队列调度）时缓存请求
 #include "task_controller.h"   // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）
 #include "notification_aggregator.h" // L2：下载完成/失败气泡聚合
+#include "traffic_mode_controller.h" // L2：流量档位应用（写设置+下发引擎/aria2/托盘+同步 UI）
 
 class DownloadManager;
 class TaskListModel;
@@ -98,9 +99,7 @@ private slots:
     void onSiteExplorer();       // 站点抓取器
     void onManageQueues();       // 下载队列管理
     void onShowHistory();        // 下载历史查看/清空对话框（#46 界面入口）
-    void onTrafficModeChanged(int index);  // 工具栏流量档位切换
-    void syncTrafficCombo();      // 把下拉选中项同步到当前 trafficMode
-    void applyTrafficMode(int mode);   // 统一应用流量档位（工具栏/托盘共用）
+    // 流量档位切换已抽到 L2 组件 TrafficModeController（见 src/app/traffic_mode_controller.*）
 
     // 任务列表分组（按类型 / 按队列）折叠
     void applyGroupMode(int mode);       // 统一应用分组模式（视图菜单 / 启动恢复共用）
@@ -159,7 +158,7 @@ private:
     void updateStatusBar();                 // O(1)：直接用缓存聚合值刷新状态栏
     void recomputeStatusAggregates();        // O(n)：由 m_speeds/m_states 权威重算缓存
     void syncStatus();                       // 重算缓存 + 刷新状态栏（结构/状态变更时调用）
-    void updateTrafficIndicator();  // 把全局流量档位/限速状态同步到任务列表「限速」列
+    // 流量档位/限速状态同步已抽到 L2 组件 TrafficModeController（见 src/app/traffic_mode_controller.*）
     void refreshSidebarCounts();    // 重算左侧树各节点的任务数，写进模型的 CountRole
     void applyTheme();       // 根据 m_settings.theme() 加载 QSS 样式表
     int  selectedTaskId() const;
@@ -212,6 +211,9 @@ private:
     TaskController*      m_taskController = nullptr;
     // 完成通知聚合（L2 组件，见 src/app/notification_aggregator.*）——750ms 窗口合并气泡 + 提示音
     NotificationAggregator* m_notificationAggregator = nullptr;
+
+    // 流量档位应用（L2 组件，见 src/app/traffic_mode_controller.*）——写设置+下发引擎/aria2/托盘+同步两处 UI
+    TrafficModeController* m_trafficController = nullptr;
 
     // IPC 单实例通信（L2 组件，见 src/app/ipc_server.*）
     IpcServer*            m_ipcServer = nullptr;

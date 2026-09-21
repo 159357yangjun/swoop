@@ -112,6 +112,8 @@ set(APP_SOURCES
     src/app/task_controller.h
     src/app/notification_aggregator.cpp
     src/app/notification_aggregator.h
+    src/app/traffic_mode_controller.cpp
+    src/app/traffic_mode_controller.h
 )
 
 set(CORE_WRAPPER_SOURCES
