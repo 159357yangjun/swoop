@@ -1,0 +1,17 @@
+# ---- 构建产物 ----
+build/
+dist/
+*.o
+*.res
+*.exe
+
+# ---- 运行时 / 自测产物 ----
+*_result.txt
+idm_tasks.dat
+*.bin
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

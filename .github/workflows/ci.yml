@@ -1,0 +1,42 @@
+name: ci
+
+# 每次推送 / PR 都跑一遍：编译 + 双自测 + IDM-parity 校验。
+# 任何一个红，提交就是不能要的。
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+
+      - name: Build
+        shell: msys2 {0}
+        run: make all CC=gcc WINDRES=windres
+
+      - name: Engine self-test
+        shell: msys2 {0}
+        run: ./idm_selftest.exe
+
+      - name: Native messaging host self-test
+        shell: msys2 {0}
+        run: ./idm_nmhost.exe --selftest
+
+      # IDM-parity：winhttp/winmm 必须动态加载，不得进静态导入表。
+      - name: Verify no static winhttp/winmm import
+        shell: msys2 {0}
+        run: |
+          objdump -p idm.exe | grep "DLL Name:"
+          if objdump -p idm.exe | grep -qiE "winhttp|winmm"; then
+            echo "::error::IDM-parity violated: winhttp/winmm statically imported"
+            exit 1
+          fi

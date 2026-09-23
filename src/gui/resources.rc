@@ -1,0 +1,113 @@
+#include <windows.h>
+#include "resources.h"
+#include "../common/version.h"
+
+IDI_APP  ICON  "app.ico"
+
+IDR_MAIN MENU DISCARDABLE
+BEGIN
+    POPUP "文件(&F)" BEGIN
+        MENUITEM "新建任务(&N)\tCtrl+N", IDM_NEW
+        MENUITEM SEPARATOR
+        MENUITEM "退出(&X)", IDM_TRAY_EXIT
+    END
+    POPUP "任务(&T)" BEGIN
+        MENUITEM "开始 / 续传(&S)", IDM_START
+        MENUITEM "暂停(&P)", IDM_PAUSE
+        MENUITEM "删除(&D)", IDM_DELETE
+    END
+    POPUP "选项(&O)" BEGIN
+        MENUITEM "设置(&S)...", IDM_SETTINGS
+    END
+    POPUP "帮助(&H)" BEGIN
+        MENUITEM "关于(&A)", IDM_ABOUT
+    END
+END
+
+IDR_TRAY MENU DISCARDABLE
+BEGIN
+    MENUITEM "显示 / 隐藏(&S)", IDM_TRAY_SHOW
+    MENUITEM "退出(&X)", IDM_TRAY_EXIT
+END
+
+IDD_NEW_TASK DIALOGEX 10, 10, 340, 130
+CAPTION "新建下载任务"
+STYLE DS_SHELLFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "下载链接 (URL):", -1, 12, 12, 200, 14
+    EDITTEXT IDC_URL, 12, 30, 316, 20, ES_AUTOHSCROLL
+    LTEXT "保存为:", -1, 12, 60, 200, 14
+    EDITTEXT IDC_SAVEAS, 12, 78, 316, 20, ES_AUTOHSCROLL
+    DEFPUSHBUTTON "确定", IDOK, 190, 106, 68, 20
+    PUSHBUTTON "取消", IDCANCEL, 262, 106, 68, 20
+END
+
+IDD_SETTINGS DIALOGEX 10, 10, 340, 366
+CAPTION "设置"
+STYLE DS_SHELLFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "每任务连接数 (1-16):", -1, 14, 12, 150, 14
+    EDITTEXT IDC_CONN, 14, 28, 70, 20, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT "同时下载上限 (1-16):", -1, 180, 12, 150, 14
+    EDITTEXT IDC_MAXCONC, 180, 28, 70, 20, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT "服务器不支持 Range 时单连接；超上限的任务排队等待。", -1, 14, 52, 312, 14
+
+    LTEXT "全局限速:", -1, 14, 74, 60, 14
+    COMBOBOX IDC_SPEED, 80, 72, 140, 120, CBS_DROPDOWNLIST | WS_VSCROLL
+
+    CHECKBOX "关闭窗口时最小化到托盘", IDC_CLOSETRAY, 14, 100, 312, 16
+    CHECKBOX "启动时隐藏到托盘", IDC_STARTHIDDEN, 14, 120, 312, 16
+    CHECKBOX "按文件类型保存到分类子目录", IDC_USECAT, 14, 140, 312, 16
+
+    LTEXT "下载目录:", -1, 14, 166, 60, 14
+    EDITTEXT IDC_BASEDIR, 80, 164, 246, 20, ES_AUTOHSCROLL
+
+    LTEXT "代理:", -1, 14, 192, 60, 14
+    COMBOBOX IDC_PROXY, 80, 190, 180, 80, CBS_DROPDOWNLIST | WS_VSCROLL
+
+    LTEXT "完成通知:", -1, 14, 218, 60, 14
+    CHECKBOX "气泡提示", IDC_NOTIFY_BALLOON, 80, 217, 90, 16
+    CHECKBOX "提示音", IDC_NOTIFY_SOUND, 180, 217, 80, 16
+
+    CHECKBOX "启用定时调度（到点自动开始 / 暂停全部）", IDC_SCHED_EN, 14, 242, 312, 16
+    LTEXT "开始时间 (HH:MM):", -1, 30, 264, 100, 14
+    EDITTEXT IDC_SCHED_START, 140, 262, 60, 20, ES_AUTOHSCROLL
+    LTEXT "暂停时间 (HH:MM):", -1, 30, 286, 100, 14
+    EDITTEXT IDC_SCHED_STOP, 140, 284, 60, 20, ES_AUTOHSCROLL
+
+    DEFPUSHBUTTON "确定", IDOK, 182, 344, 68, 20
+    PUSHBUTTON "取消", IDCANCEL, 258, 344, 68, 20
+END
+
+1 RT_MANIFEST "app.manifest"
+
+/* exe 属性页显示（右键 → 属性 → 详细信息）。取值全部来自 common/version.h。 */
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    IDM_VERSION_MAJOR,IDM_VERSION_MINOR,IDM_VERSION_PATCH,0
+ PRODUCTVERSION IDM_VERSION_MAJOR,IDM_VERSION_MINOR,IDM_VERSION_PATCH,0
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         0x40004L
+ FILETYPE       0x1L
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      IDM_APP_LABEL
+            VALUE "FileDescription",  "IDM Next 下载器"
+            VALUE "FileVersion",      IDM_VERSION_STR
+            VALUE "InternalName",     "idm"
+            VALUE "OriginalFilename", "idm.exe"
+            VALUE "ProductName",      IDM_APP_LABEL
+            VALUE "ProductVersion",   IDM_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

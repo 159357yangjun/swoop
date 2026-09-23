@@ -1,0 +1,71 @@
+name: release
+
+# 推一个 v* tag 就自动：编译 → 自测 → 打包 → 建 GitHub Release 并附 zip。
+#   改版本号：src/common/version.h
+#   发布：git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+
+      - name: Build
+        shell: msys2 {0}
+        run: make all CC=gcc WINDRES=windres
+
+      - name: Engine self-test
+        shell: msys2 {0}
+        run: ./idm_selftest.exe
+
+      - name: Native messaging host self-test
+        shell: msys2 {0}
+        run: ./idm_nmhost.exe --selftest
+
+      - name: Verify no static winhttp/winmm import
+        shell: msys2 {0}
+        run: |
+          objdump -p idm.exe | grep "DLL Name:"
+          if objdump -p idm.exe | grep -qiE "winhttp|winmm"; then
+            echo "::error::IDM-parity violated: winhttp/winmm statically imported"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Package
+        run: python packaging/make_release.py
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: idm-next-win64
+          path: dist/*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false

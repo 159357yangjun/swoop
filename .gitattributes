@@ -1,0 +1,14 @@
+# 统一行尾，避免 Windows/Linux 来回改出无意义 diff
+* text=auto
+
+# CI / 脚本按各自平台的行尾
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# 二进制资源
+*.ico   binary
+*.exe   binary
+*.res   binary
+*.zip   binary
