@@ -19,7 +19,10 @@ function sendToHost(payload, cb) {
         console.warn("[Swoop] 宿主不可用:", err.message,
                      "（请先运行 swoop_nmhost.exe --register-nmhost <扩展ID> 注册）");
       }
-      finish(!err, resp, err);
+      const rejected = !err && (!resp || resp.ok !== true)
+        ? new Error((resp && resp.error) || "宿主拒绝了请求")
+        : null;
+      finish(!err && !rejected, resp, err || rejected);
     });
   } catch (e) {
     console.warn("[Swoop]", e);

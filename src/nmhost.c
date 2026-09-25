@@ -49,23 +49,25 @@ static void write_frame(FILE *out, const char *s)
 
 /* ---------------- 转交主进程 ---------------- */
 
-static void launch_main_with_url(const char *url)
+static int launch_main_with_url(const char *url)
 {
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
     wchar_t *sl = wcsrchr(exe, L'\\'); if (sl) *(sl + 1) = 0;
     wcscat(exe, L"swoop.exe");
     wchar_t wurl[2048];
-    if (!MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048)) return;
+    if (!MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048)) return 0;
     wchar_t cmd[MAX_PATH + 2200];
     _snwprintf(cmd, MAX_PATH + 2200, L"\"%s\" \"%s\"", exe, wurl);
     STARTUPINFOW si; PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof si); si.cb = sizeof si;
     if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return 1;
     }
+    return 0;
 }
 
-static void launch_main(void)
+static int launch_main(void)
 {
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
     wchar_t *sl = wcsrchr(exe, L'\\'); if (sl) *(sl + 1) = 0;
@@ -76,7 +78,9 @@ static void launch_main(void)
     memset(&si, 0, sizeof si); si.cb = sizeof si;
     if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return 1;
     }
+    return 0;
 }
 
 static int forward_url(const char *url, const char *fn, const char *ref)
@@ -92,8 +96,7 @@ static int forward_url(const char *url, const char *fn, const char *ref)
         SendMessageW(w, WM_COPYDATA, 0, (LPARAM)&cds);
         return 1;
     }
-    launch_main_with_url(url);
-    return 0;
+    return launch_main_with_url(url) ? 2 : 0;
 }
 
 static void handle_message(const char *json, int dry)
@@ -114,8 +117,17 @@ static void handle_message(const char *json, int dry)
             write_frame(stdout, "{\"ok\":true,\"dry\":true}");
             return;
         }
-        write_frame(stdout, "{\"ok\":true,\"shown\":true}");
-        launch_main();
+        HWND w = FindWindowW(IDM_WINDOW_CLASS, NULL);
+        if (w) {
+            ShowWindow(w, SW_SHOW);
+            SetForegroundWindow(w);
+            write_frame(stdout, "{\"ok\":true,\"shown\":true,\"existing\":true}");
+            return;
+        }
+        if (launch_main())
+            write_frame(stdout, "{\"ok\":true,\"shown\":true,\"started\":true}");
+        else
+            write_frame(stdout, "{\"ok\":false,\"error\":\"failed to start swoop.exe\"}");
         return;
     }
     if (!url[0]) { write_frame(stdout, "{\"ok\":false,\"error\":\"missing url\"}"); return; }
@@ -127,10 +139,18 @@ static void handle_message(const char *json, int dry)
         write_frame(stdout, "{\"ok\":true,\"dry\":true}");
         return;
     }
-    /* 先给扩展回执（避免浏览器 waiting 超时），再转交主进程（可能弹模态对话框） */
-    write_frame(stdout, "{\"ok\":true,\"forwarded\":true}");
     int towin = forward_url(url, fn, ref);
-    fprintf(stderr, "nmhost: %s url=%s\n", towin ? "WM_COPYDATA->主进程" : "拉起 swoop.exe", url);
+    if (towin == 1) {
+        write_frame(stdout, "{\"ok\":true,\"forwarded\":true,\"existing\":true}");
+        fprintf(stderr, "nmhost: WM_COPYDATA->主进程 url=%s\n", url);
+    } else if (towin == 2) {
+        /* 只有确认 CreateProcessW 成功后才允许扩展取消浏览器原下载。 */
+        write_frame(stdout, "{\"ok\":true,\"forwarded\":true,\"started\":true}");
+        fprintf(stderr, "nmhost: 拉起 swoop.exe url=%s\n", url);
+    } else {
+        write_frame(stdout, "{\"ok\":false,\"error\":\"failed to start or reach swoop.exe\"}");
+        fprintf(stderr, "nmhost: 转交失败 url=%s\n", url);
+    }
 }
 
 /* ---------------- 注册 native messaging host ---------------- */

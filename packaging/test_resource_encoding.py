@@ -17,6 +17,12 @@ class ResourceEncodingTest(unittest.TestCase):
     def test_native_host_supports_show_action(self):
         text = (ROOT / "src" / "nmhost.c").read_text(encoding="utf-8")
         self.assertIn('strcmp(action, "show")', text)
+        self.assertIn('FindWindowW(IDM_WINDOW_CLASS, NULL)', text)
+        self.assertIn('failed to start or reach swoop.exe', text)
+
+    def test_extension_requires_explicit_native_host_success(self):
+        text = (ROOT / "extension" / "background.js").read_text(encoding="utf-8")
+        self.assertIn("resp.ok !== true", text)
 
 
 if __name__ == "__main__":
