@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swoop Radar</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div class="brand"><img src="icons/swoop.svg" alt=""> <span>Swoop</span></div>
+      <div id="connection" class="connection connection-pending" role="status">检查宿主…</div>
+    </header>
+
+    <section class="hero">
+      <p class="eyebrow">RADAR / 当前页面</p>
+      <h1>把可下载的东西<br><em>交给 Swoop。</em></h1>
+      <p id="page-label" class="page-label">准备扫描当前页面</p>
+      <button id="scan" class="primary" type="button">
+        <span class="button-mark">↘</span> 捕获当前页面
+      </button>
+    </section>
+
+    <section id="resource-section" class="panel hidden" aria-live="polite">
+      <div class="panel-heading"><span>发现的资源</span><span id="resource-count" class="count">0</span></div>
+      <div id="resource-list" class="resource-list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><span>最近接管</span><button id="open-main" class="text-button" type="button">打开主窗口 ↗</button></div>
+      <div id="recent-list" class="recent-list"><div class="empty">还没有接管记录</div></div>
+    </section>
+
+    <div id="message" class="message" role="alert" hidden></div>
+    <footer><span>右键链接也可以用 Swoop 下载</span><span class="version">RADAR 0.2</span></footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

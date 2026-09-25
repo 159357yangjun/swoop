@@ -83,7 +83,7 @@ build/main.o: src/main.c
 	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@
 
 build/resources.res: src/gui/resources.rc src/gui/app.ico src/gui/app.manifest src/common/version.h
-	mkdir -p build && $(WINDRES) --output-format=coff $< -o $@
+	mkdir -p build && $(WINDRES) --codepage=65001 --output-format=coff $< -o $@
 
 # 发行打包：产物 swoop.exe/swoop_nmhost.exe 已全静态，直接 zip 即可「下载即用」。
 # 产出 dist/$(IDM_APP_NAME)-<版本>-win64.zip + SHA256SUMS.txt

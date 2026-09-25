@@ -7,7 +7,7 @@ native messaging, BT/magnet delegated to aria2c.
 对标 Internet Download Manager 的 **Windows 原生 C 语言下载器**。
 纯 Win32 API + C11，不用 Qt / MFC / .NET / COM，全部静态链接，**下载即解压即用**。
 
-> 状态：v0.1.0，功能已跑通并通过自测；GUI 交互仍在打磨。
+> 状态：v0.2.0，功能已跑通并通过自测；GUI 交互仍在打磨。
 
 ### 名字
 
@@ -71,9 +71,10 @@ ADVAPI32  COMCTL32  KERNEL32  msvcrt  SHELL32  USER32  WS2_32
 ## 浏览器扩展
 
 1. 浏览器打开 `chrome://extensions`（Edge 是 `edge://extensions`），开启「开发者模式」。
-2. 「加载已解压的扩展程序」→ 选中解压目录里的 `extension` 文件夹。
-3. 复制扩展卡片上的 **ID**，运行目录里的 `register-nmhost.cmd <扩展ID>` 注册宿主。
-4. 重启浏览器。之后右键链接选「用 Swoop 下载」，或浏览器自带下载会被自动接管。
+2. 「加载已解压的扩展程序」→ 选中解压目录里的 `extension` 文件夹；工具栏上的 Swoop Radar 弹窗会显示宿主连接状态。
+3. 复制扩展卡片上的 **ID**，运行目录里的 `register-nmhost.cmd <扩展ID>` 注册宿主，然后重新加载扩展。
+4. 点击工具栏 Swoop 图标，在 Radar 中选择「捕获当前页面」扫描视频、音频、文档和压缩包；点击「接管」即可交给 Swoop。
+5. 右键链接仍可选「用 Swoop 下载」，浏览器自带下载也会自动接管。宿主不可用时，原浏览器下载不会被取消。
 
 ## 从源码构建
 

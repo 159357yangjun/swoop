@@ -27,6 +27,66 @@ function sendToHost(payload, cb) {
   }
 }
 
+function saveRecentTask(item) {
+  chrome.storage.local.get({ swoopRecent: [] }, (data) => {
+    const recent = [item].concat(data.swoopRecent || [])
+      .filter((task, index, all) => all.findIndex((x) => x.url === task.url) === index)
+      .slice(0, 5);
+    chrome.storage.local.set({ swoopRecent: recent });
+  });
+}
+
+function popupDownload(item, sendResponse) {
+  if (!item || !/^https?:/i.test(item.url || "")) {
+    sendResponse({ ok: false, error: "只支持 HTTP(S) 下载地址" });
+    return;
+  }
+  const payload = {
+    action: "download",
+    url: item.url,
+    filename: item.filename || "",
+    referer: item.referer || ""
+  };
+  sendToHost(payload, (ok, resp, err) => {
+    if (ok) {
+      saveRecentTask({
+        url: item.url,
+        filename: item.filename || item.url,
+        type: item.type || "file",
+        at: Date.now()
+      });
+    }
+    sendResponse({ ok, response: resp || null, error: err ? err.message : "宿主未连接" });
+  });
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message) return false;
+  if (message.type === "ping") {
+    sendToHost({ action: "ping" }, (ok, resp, err) => {
+      sendResponse({ ok, app: resp && resp.app, error: err ? err.message : "宿主未连接" });
+    });
+    return true;
+  }
+  if (message.type === "recent") {
+    chrome.storage.local.get({ swoopRecent: [] }, (data) => {
+      sendResponse({ ok: true, items: data.swoopRecent || [] });
+    });
+    return true;
+  }
+  if (message.type === "download") {
+    popupDownload(message.item, sendResponse);
+    return true;
+  }
+  if (message.type === "open-main") {
+    sendToHost({ action: "show" }, (ok, resp, err) => {
+      sendResponse({ ok, response: resp || null, error: err ? err.message : "宿主未连接" });
+    });
+    return true;
+  }
+  return false;
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   // 重装/更新时先清掉旧的，否则 create 会报 duplicate id
   chrome.contextMenus.removeAll(() => {

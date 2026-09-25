@@ -1,10 +1,27 @@
 {
   "manifest_version": 3,
-  "name": "Swoop 资源嗅探器",
-  "version": "1.0.0",
-  "description": "把浏览器下载交给 Swoop 原生下载管理器（native messaging）",
-  "permissions": ["downloads", "nativeMessaging", "contextMenus"],
+  "name": "Swoop Radar",
+  "version": "0.2.0",
+  "description": "用 Swoop 接管浏览器下载，并扫描当前页面的可下载资源",
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "contextMenus",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Swoop" }
+  "action": {
+    "default_title": "Swoop Radar",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }

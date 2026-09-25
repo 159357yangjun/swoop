@@ -65,6 +65,20 @@ static void launch_main_with_url(const char *url)
     }
 }
 
+static void launch_main(void)
+{
+    wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
+    wchar_t *sl = wcsrchr(exe, L'\\'); if (sl) *(sl + 1) = 0;
+    wcscat(exe, L"swoop.exe");
+    wchar_t cmd[MAX_PATH + 32];
+    _snwprintf(cmd, MAX_PATH + 32, L"\"%s\"", exe);
+    STARTUPINFOW si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si); si.cb = sizeof si;
+    if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
+}
+
 static int forward_url(const char *url, const char *fn, const char *ref)
 {
     char payload[4600];
@@ -93,6 +107,15 @@ static void handle_message(const char *json, int dry)
 
     if (!strcmp(action, "ping")) {
         write_frame(stdout, "{\"ok\":true,\"app\":\"SwoopNative\"}");
+        return;
+    }
+    if (!strcmp(action, "show")) {
+        if (dry) {
+            write_frame(stdout, "{\"ok\":true,\"dry\":true}");
+            return;
+        }
+        write_frame(stdout, "{\"ok\":true,\"shown\":true}");
+        launch_main();
         return;
     }
     if (!url[0]) { write_frame(stdout, "{\"ok\":false,\"error\":\"missing url\"}"); return; }

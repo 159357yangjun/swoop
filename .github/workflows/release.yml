@@ -2,7 +2,7 @@ name: release
 
 # 推一个 v* tag 就自动：编译 → 自测 → 打包 → 建 GitHub Release 并附 zip。
 #   改版本号：src/common/version.h
-#   发布：git tag v0.1.0 && git push origin v0.1.0
+#   发布：git tag v0.2.0 && git push origin v0.2.0
 on:
   push:
     tags: ['v*']

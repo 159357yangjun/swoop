@@ -1,0 +1,54 @@
+:root {
+  color-scheme: dark;
+  --ink: #f4f7f2;
+  --muted: #91a0b2;
+  --panel: #182538;
+  --line: rgba(217, 243, 107, .16);
+  --blue: #111c2d;
+  --lime: #d8f36b;
+  --lime-dark: #9fb73d;
+  --warn: #ffcf78;
+  --bad: #ff9d9d;
+}
+
+* { box-sizing: border-box; }
+body { width: 360px; min-height: 520px; margin: 0; background: var(--blue); color: var(--ink); font: 13px/1.45 "Segoe UI", "Microsoft YaHei", sans-serif; }
+button { font: inherit; }
+.shell { padding: 18px 17px 13px; background: radial-gradient(circle at 88% 0%, #29415a 0, transparent 37%), var(--blue); }
+.masthead, .panel-heading, footer { display: flex; align-items: center; justify-content: space-between; }
+.brand { display:flex; align-items:center; gap:8px; font-size:18px; font-weight:800; letter-spacing:-.04em; }
+.brand img { width:23px; height:23px; }
+.connection { border:1px solid transparent; border-radius:999px; padding:4px 8px; font-size:10px; letter-spacing:.03em; }
+.connection-pending { color:var(--muted); border-color:#405168; }
+.connection-ok { color:var(--lime); border-color:var(--lime-dark); background:rgba(216,243,107,.08); }
+.connection-bad { color:var(--bad); border-color:#a95663; background:rgba(255,157,157,.08); }
+.hero { padding: 30px 3px 22px; }
+.eyebrow { margin:0 0 8px; color:var(--lime); font-size:10px; font-weight:800; letter-spacing:.14em; }
+h1 { margin:0; font-size:30px; line-height:1.05; letter-spacing:-.07em; }
+h1 em { color:var(--lime); font-style:normal; }
+.page-label { min-height:20px; margin:12px 0 17px; color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.primary { width:100%; padding:12px 14px; border:0; border-radius:11px; background:var(--lime); color:#16202b; cursor:pointer; font-weight:800; box-shadow:0 5px 0 var(--lime-dark); transition:transform .15s, box-shadow .15s; }
+.primary:hover { transform:translateY(-1px); box-shadow:0 6px 0 var(--lime-dark); }
+.primary:active { transform:translateY(3px); box-shadow:0 2px 0 var(--lime-dark); }
+.primary:disabled { cursor:wait; opacity:.65; transform:none; box-shadow:0 3px 0 var(--lime-dark); }
+.button-mark { display:inline-grid; place-items:center; width:19px; height:19px; margin-right:5px; border:1px solid #53682a; border-radius:50%; }
+.panel { margin-top:14px; padding:12px; border:1px solid var(--line); border-radius:12px; background:rgba(24,37,56,.78); }
+.hidden { display:none; }
+.panel-heading { color:#dce5ee; font-size:11px; font-weight:800; }
+.count { display:inline-grid; place-items:center; min-width:19px; height:19px; border-radius:50%; background:rgba(216,243,107,.15); color:var(--lime); font-size:10px; }
+.text-button { padding:0; border:0; background:none; color:var(--lime); cursor:pointer; font-size:10px; }
+.resource-list, .recent-list { margin-top:9px; }
+.resource, .recent { display:flex; align-items:center; gap:9px; padding:9px 0; border-top:1px solid rgba(255,255,255,.08); }
+.resource:first-child, .recent:first-child { border-top:0; }
+.resource-icon { display:grid; place-items:center; width:28px; height:28px; border-radius:8px; background:#253850; color:var(--lime); font-size:11px; font-weight:800; }
+.resource-copy, .recent-copy { min-width:0; flex:1; }
+.resource-name, .recent-name { display:block; overflow:hidden; color:#eef4ee; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.resource-meta, .recent-meta { display:block; color:var(--muted); font-size:9px; }
+.take { padding:5px 8px; border:1px solid var(--lime-dark); border-radius:7px; background:transparent; color:var(--lime); cursor:pointer; font-size:10px; }
+.take:hover { background:rgba(216,243,107,.12); }
+.take:disabled { cursor:wait; opacity:.5; }
+.empty { padding:8px 0 2px; color:var(--muted); font-size:11px; }
+.message { margin-top:12px; padding:10px; border-radius:9px; background:rgba(255,207,120,.1); color:var(--warn); font-size:11px; }
+.message.bad { background:rgba(255,157,157,.1); color:var(--bad); }
+footer { margin-top:18px; color:#718095; font-size:9px; }
+.version { color:#536276; letter-spacing:.12em; }
