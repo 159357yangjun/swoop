@@ -57,7 +57,7 @@ int taskstore_save(const wchar_t *path, download_task_t *const *tasks, int n)
     FILE *f = _wfopen(path, L"wb");
     if (!f) return -1;
 
-    fputs("IDMNEXT|1\n", f);
+    fputs("SWOOP|1\n", f);
     int cnt = 0;
     for (int i = 0; i < n; i++) {
         download_task_t *t = tasks[i];

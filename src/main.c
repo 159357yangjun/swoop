@@ -88,12 +88,12 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
     int proxy_mode = settings_get_int("proxy_mode", 0);
     if (http_init(proxy_mode == 1 ? WINHTTP_ACCESS_TYPE_NO_PROXY
                                   : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY) != 0) {
-        MessageBoxW(NULL, L"无法加载 winhttp.dll", L"IDM Next", MB_ICONERROR);
+        MessageBoxW(NULL, L"无法加载 winhttp.dll", L"Swoop", MB_ICONERROR);
         return 1;
     }
 
     /* 日志与数据放同一目录：exe 目录可写就用它（便携），
-       否则（如装在 Program Files）退到 %LOCALAPPDATA%\IDMNext。 */
+       否则（如装在 Program Files）退到 %LOCALAPPDATA%\Swoop。 */
     wchar_t ddir[MAX_PATH];
     if (data_dir(ddir, MAX_PATH) == 0) {
         size_t L = wcslen(ddir);

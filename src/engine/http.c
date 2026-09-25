@@ -1,5 +1,6 @@
 #include "http.h"
 #include "common/util.h"
+#include "common/version.h"
 #include <winhttp.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,7 +86,7 @@ void http_cleanup(void)
 
 static HINTERNET make_session(void)
 {
-    HINTERNET s = W.Open(L"IDMNextNative/1.0", g_access, NULL, NULL, 0);
+    HINTERNET s = W.Open(L"Swoop/" IDM_VERSION_STR, g_access, NULL, NULL, 0);
     if (s) {
         /* 显式钉住重定向策略：跟随 301/302/307（网盘、CDN 直链很常见），
            但不允许 https→http 的降级跳转（安全）。

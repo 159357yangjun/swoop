@@ -66,7 +66,7 @@ void log_init(const wchar_t *exe_dir)
 {
     wchar_t path[MAX_PATH];
     wcscpy(path, exe_dir);
-    wcscat(path, L"\\idm.log");
+    wcscat(path, L"\\swoop.log");
     g_log = _wfopen(path, L"a");
 }
 
@@ -82,7 +82,7 @@ void log_msg(const char *fmt, ...)
 
 int settings_get_int(const char *key, int def)
 {
-    HKEY h; LONG r = RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\IDMNextNative", 0, KEY_READ, &h);
+    HKEY h; LONG r = RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\YangJun\\Swoop", 0, KEY_READ, &h);
     if (r != ERROR_SUCCESS) return def;
     DWORD v = 0, sz = sizeof(v);
     r = RegQueryValueExA(h, key, NULL, NULL, (LPBYTE)&v, &sz);
@@ -93,7 +93,7 @@ int settings_get_int(const char *key, int def)
 void settings_set_int(const char *key, int val)
 {
     HKEY h; DWORD disp;
-    LONG r = RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\IDMNextNative", 0, NULL,
+    LONG r = RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\YangJun\\Swoop", 0, NULL,
                              REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &h, &disp);
     if (r != ERROR_SUCCESS) return;
     RegSetValueExA(h, key, 0, REG_DWORD, (const BYTE *)&val, sizeof(val));
@@ -105,7 +105,7 @@ int settings_get_str(const char *key, wchar_t *out, int n)
     if (!out || n <= 0) return 0;
     out[0] = 0;
     HKEY h;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\IDMNextNative", 0,
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\YangJun\\Swoop", 0,
                       KEY_READ, &h) != ERROR_SUCCESS) return 0;
     wchar_t wkey[128];
     if (!MultiByteToWideChar(CP_UTF8, 0, key, -1, wkey, 128)) { RegCloseKey(h); return 0; }
@@ -121,7 +121,7 @@ void settings_set_str(const char *key, const wchar_t *val)
 {
     if (!val) return;
     HKEY h; DWORD disp;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\IDMNextNative", 0, NULL,
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\YangJun\\Swoop", 0, NULL,
                         REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &h, &disp) != ERROR_SUCCESS)
         return;
     wchar_t wkey[128];
@@ -160,7 +160,7 @@ void exe_dir(wchar_t *out, int n)
     else out[0] = 0;
 }
 
-/* exe 目录可写就用它（便携），否则退 %LOCALAPPDATA%\IDMNext。 */
+/* exe 目录可写就用它（便携），否则退 %LOCALAPPDATA%\Swoop。 */
 int data_dir(wchar_t *out, int n)
 {
     if (!out || n <= 0) return -1;
@@ -169,7 +169,7 @@ int data_dir(wchar_t *out, int n)
 
     /* 探针文件：能建就能删，说明目录可写 */
     wchar_t probe[MAX_PATH];
-    _snwprintf(probe, MAX_PATH, L"%s.idmwrite", d);
+    _snwprintf(probe, MAX_PATH, L"%s.swoopwrite", d);
     HANDLE h = CreateFileW(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_TEMPORARY, NULL);
     if (h != INVALID_HANDLE_VALUE) {
@@ -182,7 +182,7 @@ int data_dir(wchar_t *out, int n)
     wchar_t base[MAX_PATH];
     DWORD r = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
     if (r == 0 || r >= MAX_PATH) return -1;
-    _snwprintf(out, n, L"%s\\IDMNext", base);
+    _snwprintf(out, n, L"%s\\Swoop", base);
     SHCreateDirectoryExW(NULL, out, NULL);
     if (out[0] && out[wcslen(out) - 1] != L'\\') {
         size_t L = wcslen(out);

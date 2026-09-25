@@ -81,7 +81,7 @@ HWND create_main_window(HINSTANCE h)
     /* 必须把主菜单挂上：否则「设置 / 关于」等命令没有任何入口
        （菜单是 WM_COMMAND 的唯一来源，托盘菜单只有显示/退出两项）。 */
     HMENU menu = LoadMenuW(h, MAKEINTRESOURCEW(IDR_MAIN));
-    return CreateWindowExW(0, g_class_name, L"IDM Next — 原生下载管理器",
+    return CreateWindowExW(0, g_class_name, L"Swoop — 原生下载管理器",
                            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                            780, 500, NULL, menu, h, NULL);
 }
@@ -146,7 +146,7 @@ static INT_PTR CALLBACK new_task_dlg(HWND d, UINT m, WPARAM w, LPARAM l)
 
                 if (find_dup(curl, out) >= 0) {
                     MessageBoxW(d, L"相同链接或相同保存位置的任务已存在，未重复添加。",
-                                L"IDM Next", MB_OK | MB_ICONINFORMATION);
+                                L"Swoop", MB_OK | MB_ICONINFORMATION);
                     g_pending_url[0] = g_pending_file[0] = g_pending_ref[0] = 0;
                     EndDialog(d, 1);
                     return TRUE;
@@ -397,7 +397,7 @@ static void open_selected(int folder)
         open_path(p);
     } else if (GetFileAttributesW(t->outfile) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(g_hwnd, L"文件还不存在（任务未完成，或已被移动/删除）。",
-                    L"IDM Next", MB_OK | MB_ICONINFORMATION);
+                    L"Swoop", MB_OK | MB_ICONINFORMATION);
     } else {
         open_path(t->outfile);
     }
@@ -425,7 +425,7 @@ void ui_add_task(download_task_t *t)
     if (g_ntasks >= 64) {
         /* 静默丢弃会让用户「点了确定却什么都没发生」，必须明确告知 */
         MessageBoxW(g_hwnd, L"任务数量已达上限（64 个），本次未添加。\n请先删除一些任务。",
-                    L"IDM Next", MB_OK | MB_ICONWARNING);
+                    L"Swoop", MB_OK | MB_ICONWARNING);
         task_free(t);       /* 所有权已交到本函数，不能泄漏 */
         return;
     }
@@ -528,7 +528,7 @@ static void notify_complete(const wchar_t *name, int count)
     if (g_notify_balloon) {
         g_nid.uFlags = NIF_INFO;
         g_nid.dwInfoFlags = NIIF_INFO;
-        wcscpy(g_nid.szInfoTitle, L"IDM Next");
+        wcscpy(g_nid.szInfoTitle, L"Swoop");
         if (count <= 1) _snwprintf(g_nid.szInfo, 256, L"%s 下载完成", name ? name : L"");
         else            _snwprintf(g_nid.szInfo, 256, L"%d 个任务下载完成", count);
         Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -542,7 +542,7 @@ static void notify_failed(const wchar_t *name, int count)
     if (g_notify_balloon) {
         g_nid.uFlags = NIF_INFO;
         g_nid.dwInfoFlags = NIIF_WARNING;
-        wcscpy(g_nid.szInfoTitle, L"IDM Next — 有任务失败");
+        wcscpy(g_nid.szInfoTitle, L"Swoop — 有任务失败");
         if (count <= 1) _snwprintf(g_nid.szInfo, 256, L"%s 下载失败", name ? name : L"");
         else            _snwprintf(g_nid.szInfo, 256, L"%d 个任务下载失败", count);
         Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -553,11 +553,11 @@ static void notify_failed(const wchar_t *name, int count)
 /* ---- 任务持久化 ---- */
 static void init_tasks_path(void)
 {
-    /* 装到 Program Files 下时 exe 目录不可写 → 退到 %LOCALAPPDATA%\IDMNext。
+    /* 装到 Program Files 下时 exe 目录不可写 → 退到 %LOCALAPPDATA%\Swoop。
        否则 taskstore_save 静默失败，用户重启后整个任务列表消失且毫无提示。 */
     wchar_t d[MAX_PATH];
     if (data_dir(d, MAX_PATH) != 0) { g_tasks_path[0] = 0; return; }
-    _snwprintf(g_tasks_path, MAX_PATH, L"%sidm_tasks.dat", d);
+    _snwprintf(g_tasks_path, MAX_PATH, L"%sswoop_tasks.dat", d);
 }
 
 static void save_tasks(void)
@@ -708,7 +708,7 @@ LRESULT CALLBACK main_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_nid.uCallbackMessage = WM_TRAYICON;
         g_nid.hIcon = (HICON)LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_APP),
                                         IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
-        wcscpy(g_nid.szTip, L"IDM Next 原生下载管理器");
+        wcscpy(g_nid.szTip, L"Swoop 原生下载管理器");
         Shell_NotifyIconW(NIM_ADD, &g_nid);
 
         /* 设置：通知/调度/限速 */
@@ -813,7 +813,7 @@ LRESULT CALLBACK main_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 break;
             case IDM_TRAY_EXIT:DestroyWindow(hwnd); break;
             case IDM_SETTINGS: DialogBoxW(g_inst, MAKEINTRESOURCEW(IDD_SETTINGS), hwnd, settings_dlg); break;
-            case IDM_ABOUT:    MessageBoxW(hwnd, L"IDM Next 原生版\n纯 C / Win32，对标 IDM",
+            case IDM_ABOUT:    MessageBoxW(hwnd, L"Swoop 原生版\n纯 C / Win32，对标 IDM",
                                            L"关于", MB_OK); break;
         }
         return 0;

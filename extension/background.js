@@ -1,8 +1,8 @@
-// IDM Next 资源嗅探器（MV3 service worker）
-// 经 native messaging 把嗅探到的下载地址发给宿主进程 idm_nmhost.exe，
-// 宿主再转交给常驻的 idm.exe。对标 IDM 的浏览器捕获。
+// Swoop 资源嗅探器（MV3 service worker）
+// 经 native messaging 把嗅探到的下载地址发给宿主进程 swoop_nmhost.exe，
+// 宿主再转交给常驻的 swoop.exe。对标 IDM 的浏览器捕获。
 
-const HOST = "com.tencent.idm_next";
+const HOST = "com.yangjun.swoop";
 
 // 发消息给宿主。cb(ok, resp, err) —— ok=false 表示宿主不可用/未注册。
 function sendToHost(payload, cb) {
@@ -16,13 +16,13 @@ function sendToHost(payload, cb) {
     chrome.runtime.sendNativeMessage(HOST, payload, (resp) => {
       const err = chrome.runtime.lastError;
       if (err) {
-        console.warn("[IDM Next] 宿主不可用:", err.message,
-                     "（请先运行 idm_nmhost.exe --register-nmhost <扩展ID> 注册）");
+        console.warn("[Swoop] 宿主不可用:", err.message,
+                     "（请先运行 swoop_nmhost.exe --register-nmhost <扩展ID> 注册）");
       }
       finish(!err, resp, err);
     });
   } catch (e) {
-    console.warn("[IDM Next]", e);
+    console.warn("[Swoop]", e);
     finish(false, null, e);
   }
 }
@@ -31,8 +31,8 @@ chrome.runtime.onInstalled.addListener(() => {
   // 重装/更新时先清掉旧的，否则 create 会报 duplicate id
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
-      id: "idm-next-download",
-      title: "用 IDM Next 下载",
+      id: "swoop-download",
+      title: "用 Swoop 下载",
       contexts: ["link", "image", "video", "audio", "selection"]
     });
   });
@@ -48,11 +48,11 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   // 右键菜单是用户主动点的：转交失败就明确告知，不要静默吞掉
   sendToHost(
     { action: "download", url, filename: "", referer: (tab && tab.url) || "" },
-    (ok) => { if (!ok) console.warn("[IDM Next] 转交失败，未创建下载任务:", url); }
+    (ok) => { if (!ok) console.warn("[Swoop] 转交失败，未创建下载任务:", url); }
   );
 });
 
-// 捕获浏览器自带下载 → 转交 IDM Next，**成功后才**取消浏览器那份。
+// 捕获浏览器自带下载 → 转交 Swoop，**成功后才**取消浏览器那份。
 // ⚠️ 顺序很重要：宿主不可用时绝不能取消，否则浏览器下载被抹掉、
 //    新任务也没建 —— 用户点了一次下载，结果什么都没拿到。
 chrome.downloads.onCreated.addListener((item) => {
@@ -68,7 +68,7 @@ chrome.downloads.onCreated.addListener((item) => {
     },
     (ok) => {
       if (!ok) {
-        console.warn("[IDM Next] 未接住，保留浏览器下载。");
+        console.warn("[Swoop] 未接住，保留浏览器下载。");
         return;                       // 让浏览器继续原来的下载
       }
       chrome.downloads.cancel(item.id, () => {

@@ -112,9 +112,9 @@ IDM 会弹窗询问「是否同时删除文件」。默认不删更安全（防�
 **终态基线**
 ```
 make all                        EXIT=0（唯一警告：http.c 的 -Wcast-function-type）
-idm_selftest.exe                PASS 15/15
-idm_nmhost.exe --selftest       PASS fails=0
-objdump -p idm.exe              静态导入 = 7 个（IDM-parity 未破）
+swoop_selftest.exe                PASS 15/15
+swoop_nmhost.exe --selftest       PASS fails=0
+objdump -p swoop.exe              静态导入 = 7 个（IDM-parity 未破）
 残留进程                         无
 ```
 
@@ -128,7 +128,7 @@ objdump -p idm.exe              静态导入 = 7 个（IDM-parity 未破）
 | `res` | `LoadAccelerators(IDR_ACCEL)` / 两个菜单 / 两个对话框模板 / 图标都真的存在 |
 
 > `res` 这一项存在的原因：资源 ID 写错或 `.rc` 语法问题 **windres 不报错**，
-> 只在运行时静默失效。为此 `Makefile` 让 `idm_selftest.exe` 也链上 `build/resources.res`。
+> 只在运行时静默失效。为此 `Makefile` 让 `swoop_selftest.exe` 也链上 `build/resources.res`。
 
 **突变矩阵（注入 → 精确变红 → 还原复绿）**
 | 突变点 | 期望变红的字段 | 实测 |
@@ -149,5 +149,5 @@ objdump -p idm.exe              静态导入 = 7 个（IDM-parity 未破）
 2. 多选（框选 / Ctrl 点选）在真实列表上的手感与批量暂停/删除表现。
 3. Ctrl+N 快捷键在真实焦点下的行为（含对话框打开时的表现）。
 4. 设置对话框改样式后的控件边框与 Tab 顺序观感。
-5. BT/磁力：需把 `aria2c.exe` 放到 `idm.exe` 同目录（本机没有，程序会退回 PATH 查找）。
+5. BT/磁力：需把 `aria2c.exe` 放到 `swoop.exe` 同目录（本机没有，程序会退回 PATH 查找）。
 6. 定时调度到点触发（依赖系统时钟跨过设定分钟）。

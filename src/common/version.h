@@ -9,7 +9,7 @@
 #define IDM_VERSION_TAG   "v0.1.0"
 
 /* 发行包名（不含扩展名）。 */
-#define IDM_APP_NAME      "idm-next"
-#define IDM_APP_LABEL     "IDM Next"
+#define IDM_APP_NAME      "swoop"
+#define IDM_APP_LABEL     "Swoop"
 
 #endif

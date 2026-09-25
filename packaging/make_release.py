@@ -2,7 +2,7 @@
 """发行打包：把「下载即用」的文件集打成 zip 并算 SHA256。
 
 产物（dist/）:
-  idm-next-<版本>-win64.zip   主程序 + nmhost + 浏览器扩展 + 文档
+  swoop-<版本>-win64.zip   主程序 + nmhost + 浏览器扩展 + 文档
   SHA256SUMS.txt              校验和（给 GitHub Release 附件用）
 
 前提：先 make all。两个 exe 均为 -static 链接，只依赖 Windows 系统 DLL，
@@ -39,14 +39,14 @@ def sha256(path):
 
 def main():
     ver = read_version()
-    app = "idm-next"
+    app = "swoop"
     bundle = f"{app}-{ver}-win64"
     os.makedirs(DIST, exist_ok=True)
 
     # (源路径, zip 内相对路径) —— 按包内目录结构排好
     required = [
-        (os.path.join(ROOT, "idm.exe"), f"{bundle}/idm.exe"),
-        (os.path.join(ROOT, "idm_nmhost.exe"), f"{bundle}/idm_nmhost.exe"),
+        (os.path.join(ROOT, "swoop.exe"), f"{bundle}/swoop.exe"),
+        (os.path.join(ROOT, "swoop_nmhost.exe"), f"{bundle}/swoop_nmhost.exe"),
     ]
     optional = [
         (os.path.join(ROOT, "README.md"), f"{bundle}/README.md"),

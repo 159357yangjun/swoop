@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "IDM Next 资源嗅探器",
+  "name": "Swoop 资源嗅探器",
   "version": "1.0.0",
-  "description": "把浏览器下载交给 IDM Next 原生下载管理器（native messaging）",
+  "description": "把浏览器下载交给 Swoop 原生下载管理器（native messaging）",
   "permissions": ["downloads", "nativeMessaging", "contextMenus"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
-  "action": { "default_title": "IDM Next" }
+  "action": { "default_title": "Swoop" }
 }

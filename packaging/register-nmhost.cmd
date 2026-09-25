@@ -17,7 +17,7 @@ if "%~1"=="" (
     pause
     exit /b 1
 )
-"%~dp0idm_nmhost.exe" --register-nmhost %~1
+"%~dp0swoop_nmhost.exe" --register-nmhost %~1
 echo.
 echo Done. Restart the browser to pick up the native messaging host.
 pause

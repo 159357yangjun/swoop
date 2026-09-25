@@ -25,18 +25,18 @@ jobs:
 
       - name: Engine self-test
         shell: msys2 {0}
-        run: ./idm_selftest.exe
+        run: ./swoop_selftest.exe
 
       - name: Native messaging host self-test
         shell: msys2 {0}
-        run: ./idm_nmhost.exe --selftest
+        run: ./swoop_nmhost.exe --selftest
 
       # IDM-parity：winhttp/winmm 必须动态加载，不得进静态导入表。
       - name: Verify no static winhttp/winmm import
         shell: msys2 {0}
         run: |
-          objdump -p idm.exe | grep "DLL Name:"
-          if objdump -p idm.exe | grep -qiE "winhttp|winmm"; then
+          objdump -p swoop.exe | grep "DLL Name:"
+          if objdump -p swoop.exe | grep -qiE "winhttp|winmm"; then
             echo "::error::IDM-parity violated: winhttp/winmm statically imported"
             exit 1
           fi

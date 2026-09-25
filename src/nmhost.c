@@ -11,12 +11,12 @@
 #include "common/jsonlite.h"
 #include "common/ipcmsg.h"
 
-/* IDM Next 原生消息宿主 —— 对标 IDM 的 IDMMsgHost.exe。
+/* Swoop 原生消息宿主 —— 对标 IDM 的 IDMMsgHost.exe。
    浏览器(Chrome/Edge)按 native messaging 协议经 stdio 与本进程通信：
    每帧 = 4 字节小端长度 + UTF-8 JSON。本进程把嗅探到的下载 URL 经 WM_COPYDATA
-   转交给常驻的 idm.exe；若主进程未运行则直接拉起它。 */
+   转交给常驻的 swoop.exe；若主进程未运行则直接拉起它。 */
 
-#define HOST_NAME "com.tencent.idm_next"
+#define HOST_NAME "com.yangjun.swoop"
 
 /* ---------------- native messaging 帧 ---------------- */
 
@@ -53,7 +53,7 @@ static void launch_main_with_url(const char *url)
 {
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
     wchar_t *sl = wcsrchr(exe, L'\\'); if (sl) *(sl + 1) = 0;
-    wcscat(exe, L"idm.exe");
+    wcscat(exe, L"swoop.exe");
     wchar_t wurl[2048];
     if (!MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 2048)) return;
     wchar_t cmd[MAX_PATH + 2200];
@@ -92,7 +92,7 @@ static void handle_message(const char *json, int dry)
     if (!action[0]) strcpy(action, "download");
 
     if (!strcmp(action, "ping")) {
-        write_frame(stdout, "{\"ok\":true,\"app\":\"IDMNextNative\"}");
+        write_frame(stdout, "{\"ok\":true,\"app\":\"SwoopNative\"}");
         return;
     }
     if (!url[0]) { write_frame(stdout, "{\"ok\":false,\"error\":\"missing url\"}"); return; }
@@ -107,7 +107,7 @@ static void handle_message(const char *json, int dry)
     /* 先给扩展回执（避免浏览器 waiting 超时），再转交主进程（可能弹模态对话框） */
     write_frame(stdout, "{\"ok\":true,\"forwarded\":true}");
     int towin = forward_url(url, fn, ref);
-    fprintf(stderr, "nmhost: %s url=%s\n", towin ? "WM_COPYDATA->主进程" : "拉起 idm.exe", url);
+    fprintf(stderr, "nmhost: %s url=%s\n", towin ? "WM_COPYDATA->主进程" : "拉起 swoop.exe", url);
 }
 
 /* ---------------- 注册 native messaging host ---------------- */
@@ -154,7 +154,7 @@ static int register_host(int argc, char **argv)
     _snprintf(json, sizeof json,
         "{\n"
         "  \"name\": \"%s\",\n"
-        "  \"description\": \"IDM Next 原生消息宿主\",\n"
+        "  \"description\": \"Swoop 原生消息宿主\",\n"
         "  \"path\": \"%s\",\n"
         "  \"type\": \"stdio\",\n"
         "  \"allowed_origins\": [ \"chrome-extension://%s/\" ]\n"
@@ -188,7 +188,7 @@ static int register_host(int argc, char **argv)
     else printf("注册表: Chrome/Edge/Chromium 共 %d/3 写入\n", okc);
     if (!extid)
         printf("注意: 未提供扩展 ID，allowed_origins 为占位符。\n"
-               "      请用 `idm_nmhost.exe --register-nmhost <扩展ID>` 重跑（扩展ID 见 chrome://extensions）。\n");
+               "      请用 `swoop_nmhost.exe --register-nmhost <扩展ID>` 重跑（扩展ID 见 chrome://extensions）。\n");
     return manifest_only ? 0 : (okc > 0 ? 0 : 1);
 }
 
@@ -248,7 +248,7 @@ static int nm_selftest(void)
 
     char rf[MAX_PATH]; GetModuleFileNameA(NULL, rf, MAX_PATH);
     char *sl = strrchr(rf, '\\'); if (sl) *(sl + 1) = 0;
-    strcat(rf, "idm_nmhost_selftest_result.txt");
+    strcat(rf, "swoop_nmhost_selftest_result.txt");
     FILE *f = fopen(rf, "w");
     if (f) { fprintf(f, "nmhost selftest %s fails=%d\n", fails ? "FAIL" : "PASS", fails); fclose(f); }
 

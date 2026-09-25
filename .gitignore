@@ -7,7 +7,7 @@ dist/
 
 # ---- 运行时 / 自测产物 ----
 *_result.txt
-idm_tasks.dat
+swoop_tasks.dat
 *.bin
 
 # ---- 编辑器 / 系统 ----

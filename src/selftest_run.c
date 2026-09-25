@@ -147,7 +147,7 @@ static int verify_file(const wchar_t *path)
 static int test_whole(void)
 {
     char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/bigfile", TEST_PORT);
-    wchar_t out[MAX_PATH]; make_tmp(out, L"idm_selftest.bin");
+    wchar_t out[MAX_PATH]; make_tmp(out, L"swoop_selftest.bin");
     DeleteFileW(out);
     g_slow = 0;
 
@@ -171,7 +171,7 @@ static int test_whole(void)
 static int test_resume(void)
 {
     char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/bigfile", TEST_PORT);
-    wchar_t out[MAX_PATH]; make_tmp(out, L"idm_resume.bin");
+    wchar_t out[MAX_PATH]; make_tmp(out, L"swoop_resume.bin");
     DeleteFileW(out);
 
     download_task_t *t = task_create(curl, out, 8);
@@ -236,9 +236,9 @@ static int test_taskstore(void)
 {
     char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/a", TEST_PORT);
     wchar_t f1[MAX_PATH], f2[MAX_PATH], path[MAX_PATH];
-    make_tmp(f1, L"idm_ts1.bin");
-    make_tmp(f2, L"idm_ts2.bin");
-    make_tmp(path, L"idm_ts_store.dat");
+    make_tmp(f1, L"swoop_ts1.bin");
+    make_tmp(f2, L"swoop_ts2.bin");
+    make_tmp(path, L"swoop_ts_store.dat");
     create_sized(f1, 1048576);      /* 与 total 一致，verify_partial 才不会重置 */
     create_sized(f2, 500);
 
@@ -322,7 +322,7 @@ static int test_speedlimit(void)
 static int test_speedlimit_download(void)
 {
     char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/bigfile", TEST_PORT);
-    wchar_t out[MAX_PATH]; make_tmp(out, L"idm_sl.bin");
+    wchar_t out[MAX_PATH]; make_tmp(out, L"swoop_sl.bin");
     DeleteFileW(out);
     g_slow = 0;
     dl_set_speed_limit(524288);        /* 512 KB/s */
@@ -488,7 +488,7 @@ static int test_dir_missing(void)
     char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/bigfile", TEST_PORT);
     wchar_t tmp[MAX_PATH], root[MAX_PATH], sub1[MAX_PATH], sub2[MAX_PATH], out[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    _snwprintf(root, MAX_PATH, L"%sidm_dirprobe_%lu", tmp, (unsigned long)GetTickCount());
+    _snwprintf(root, MAX_PATH, L"%sswoop_dirprobe_%lu", tmp, (unsigned long)GetTickCount());
     _snwprintf(sub1, MAX_PATH, L"%s\\Videos", root);
     _snwprintf(sub2, MAX_PATH, L"%s\\sub", sub1);
     _snwprintf(out,  MAX_PATH, L"%s\\deep.bin", sub2);
@@ -521,7 +521,7 @@ static int test_dir_missing(void)
 static int test_http_404(void)
 {
     char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/404", TEST_PORT);
-    wchar_t out[MAX_PATH]; make_tmp(out, L"idm_404.bin");
+    wchar_t out[MAX_PATH]; make_tmp(out, L"swoop_404.bin");
     DeleteFileW(out);
     g_slow = 0;
 
@@ -643,7 +643,7 @@ int run_selftest(void)
 
     char rf[MAX_PATH]; GetModuleFileNameA(NULL, rf, MAX_PATH);
     char *sl = strrchr(rf, '\\'); if (sl) *(sl + 1) = 0;
-    strcat(rf, "idm_selftest_result.txt");
+    strcat(rf, "swoop_selftest_result.txt");
     FILE *f = fopen(rf, "w");
     if (f) {
         fprintf(f, "selftest %s rc=%d whole=%d resume=%d store=%d sched=%d speed=%d "
@@ -654,7 +654,7 @@ int run_selftest(void)
         fclose(f);
     }
 
-    printf("IDM selftest: %s (whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d "
+    printf("Swoop selftest: %s (whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d "
            "queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d segplan=%d paused=%d res=%d rc=%d)\n",
            rc == 0 ? "PASS" : "FAIL", rc1, rc2, rc3, rc4, rc5, rc6,
            rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc);

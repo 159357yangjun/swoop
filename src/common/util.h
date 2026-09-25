@@ -32,7 +32,7 @@ void exe_dir(wchar_t *out, int n);
 
 /* 取可写数据目录（数据/日志用）。
    优先 exe 目录（便携）；不可写（如装在 Program Files）则退到
-   %LOCALAPPDATA%\IDMNext，避免任务列表静默丢失。成功返回 0。 */
+   %LOCALAPPDATA%\Swoop，避免任务列表静默丢失。成功返回 0。 */
 int  data_dir(wchar_t *out, int n);
 
 /* 用系统默认程序打开文件或目录（资源管理器）。成功返回 0。 */
