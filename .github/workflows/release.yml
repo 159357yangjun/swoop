@@ -51,6 +51,9 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Test package output encoding
+        run: python packaging/test_make_release.py
+
       - name: Package
         run: python packaging/make_release.py
 

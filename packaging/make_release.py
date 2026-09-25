@@ -18,6 +18,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
 
 
+def configure_output_encoding():
+    """让 Windows 上的中文状态/错误信息不受系统代码页影响。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def read_version():
     """从 src/common/version.h 解出 (语义版本, tag)。"""
     path = os.path.join(ROOT, "src", "common", "version.h")
@@ -83,4 +91,5 @@ def main():
 
 
 if __name__ == "__main__":
+    configure_output_encoding()
     sys.exit(main())

@@ -13,5 +13,6 @@ swoop_tasks.dat
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
+__pycache__/
 Thumbs.db
 desktop.ini
