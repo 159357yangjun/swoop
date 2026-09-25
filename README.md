@@ -1,5 +1,9 @@
 # Swoop
 
+A lightweight native Windows download manager written in C (C11 + Win32).
+Multi-segment HTTP/HTTPS downloads, per-segment resume, browser extension via
+native messaging, BT/magnet delegated to aria2c.
+
 对标 Internet Download Manager 的 **Windows 原生 C 语言下载器**。
 纯 Win32 API + C11，不用 Qt / MFC / .NET / COM，全部静态链接，**下载即解压即用**。
 
