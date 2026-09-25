@@ -14,5 +14,6 @@ swoop_tasks.dat
 .vscode/
 .idea/
 __pycache__/
+.superpowers/
 Thumbs.db
 desktop.ini
