@@ -45,7 +45,9 @@ static DWORD WINAPI conn_thread(LPVOID p)
     LARGE_INTEGER off; off.QuadPart = a->start;
     SetFilePointerEx(a->fh, off, NULL, FILE_BEGIN);
 
-    http_download(t->url, a->start, a->len, task_write_cb, NULL, a);
+    long long got = http_download(t->url, t->referer, a->start, a->len,
+                                  task_write_cb, NULL, a);
+    if (got < 0) InterlockedIncrement(&t->io_errors);   /* 传输失败（含非 2xx）→ 整任务判错 */
 
     /* 先落盘本段进度，再报告线程结束 —— 保证 join 返回时 seg_written 一定准确 */
     t->seg_written[a->seg] = a->written;
@@ -91,6 +93,16 @@ void task_stop(download_task_t *t)
 void task_pause(download_task_t *t)
 {
     if (!t) return;
+
+    /* 排队中的任务还没起线程 —— 必须显式标成暂停。
+       以前这里直接 return，于是「暂停」对排队任务完全无效：
+       调度器下一个 250ms tick 又会把它拉起来（用户看到的是「点了暂停还在下」）。
+       定时调度的「暂停全部」同样会漏掉排队任务。 */
+    if (t->status == DL_QUEUED) {
+        t->status = DL_PAUSED;
+        t->speed = 0.0;
+        return;
+    }
     if (t->status != DL_DOWNLOADING) return;
 
     if (t->kind == IDM_KIND_TORRENT) {
@@ -144,6 +156,17 @@ static void split_segments(download_task_t *t, int supports_range)
     }
 }
 
+int task_seg_plan(long long seg_start, long long seg_len, long long already,
+                  long long *out_start, long long *out_len, long long *out_written0)
+{
+    if (already < 0) already = 0;
+    if (seg_len > 0 && already >= seg_len) return 0;   /* 本段已补齐 */
+    if (out_start)    *out_start    = seg_start + already;
+    if (out_len)      *out_len      = (seg_len > 0) ? (seg_len - already) : 0;
+    if (out_written0) *out_written0 = already;
+    return 1;
+}
+
 int task_start(download_task_t *t)
 {
     /* BT/磁力：交给同目录的 aria2c.exe 处理（outfile 作为下载目录） */
@@ -155,6 +178,7 @@ int task_start(download_task_t *t)
         t->running = 1;
         t->threads_done = 0;
         t->threads_expected = 0;
+        t->io_errors = 0;
         t->status = DL_DOWNLOADING;
         t->proc = torrent_start(t->url, t->outfile, dir);
         if (!t->proc) { t->status = DL_ERROR; return -1; }
@@ -166,8 +190,15 @@ int task_start(download_task_t *t)
     int resuming = (t->status == DL_PAUSED || t->status == DL_QUEUED)
                    && t->downloaded > 0 && t->total > 0;
 
+    /* http_probe 会返回 -2 表示服务端非 2xx（404/403/500…）。
+       这种情况必须直接失败，绝不能把错误页当内容下下来。 */
     http_resource_t res;
-    if (http_probe(t->url, &res) != 0) { t->status = DL_ERROR; return -1; }
+    int pr = http_probe(t->url, &res);
+    if (pr != 0) {
+        t->status = DL_ERROR;
+        log_msg("task_start: probe failed rc=%d http=%d %s", pr, res.status, t->url);
+        return -1;
+    }
 
     /* 续传前提：服务端仍支持 Range 且总大小未变；否则安全起见重下 */
     if (resuming && (!res.supports_range || res.content_length != t->total)) {
@@ -177,6 +208,15 @@ int task_start(download_task_t *t)
         t->downloaded = 0;
     }
     t->total = res.content_length;
+
+    /* 目标目录可能不存在（默认「按类型分类」会落到 Downloads\Videos 等子目录，
+       而标准 Windows 上这些子目录并不存在）→ 必须先建，否则 CreateFileW
+       报 ERROR_PATH_NOT_FOUND，用户看到的是「一新建就失败」。 */
+    if (ensure_dir_for_file(t->outfile) != 0) {
+        t->status = DL_ERROR;
+        log_msg("task_start: cannot create dir for %ls", t->outfile);
+        return -1;
+    }
 
     HANDLE fh;
     if (resuming) {
@@ -203,28 +243,33 @@ int task_start(download_task_t *t)
 
     t->running = 1;
     t->threads_done = 0;
+    t->io_errors = 0;
     t->last_downloaded = t->downloaded;
     t->last_tick = GetTickCount();
     t->status = DL_DOWNLOADING;
 
     int expected = 0;
     for (int i = 0; i < t->seg_count; i++) {
-        long long already = (LONGLONG)t->seg_written[i];
-        long long left;
-        if (t->seg_len[i] > 0) {
-            left = t->seg_len[i] - already;
-            if (left <= 0) continue;         /* 本段已补齐 */
-        } else {
-            left = 0;                        /* 未知长度：从 already 下到结束 */
-        }
+        long long a_start = 0, a_len = 0, a_written0 = 0;
+        if (!task_seg_plan(t->seg_start[i], t->seg_len[i],
+                           (long long)t->seg_written[i],
+                           &a_start, &a_len, &a_written0))
+            continue;                        /* 本段已补齐，不用起线程 */
         conn_arg_t *a = (conn_arg_t *)malloc(sizeof *a);
         a->task = t;
         a->seg = i;
-        a->start = t->seg_start[i] + already;
-        a->len = left;
-        a->written = 0;
-        t->threads[i] = CreateThread(NULL, 0, conn_thread, a, 0, NULL);
-        expected++;
+        a->start = a_start;
+        a->len = a_len;
+        a->written = a_written0;
+        /* CreateThread 可能失败：失败的段不计入 expected，
+           否则 threads_done 永远追不上 expected，任务会永久卡在「下载中」。 */
+        HANDLE th = CreateThread(NULL, 0, conn_thread, a, 0, NULL);
+        if (th) { t->threads[i] = th; expected++; }
+        else {
+            t->threads[i] = NULL;
+            free(a);
+            log_msg("task_start: CreateThread failed for seg %d", i);
+        }
     }
     t->threads_expected = expected;
 
@@ -232,6 +277,14 @@ int task_start(download_task_t *t)
     log_msg("task_start: %s segs=%d expected=%d total=%lld resume=%d",
             t->url, t->seg_count, expected, t->total, resuming);
     return 0;
+}
+
+int dl_verdict(long long total, long long downloaded, int io_errors)
+{
+    if (io_errors > 0)    return 0;                    /* 有段传输出错（含非 2xx） */
+    if (total > 0)        return downloaded >= total;  /* 已知大小：必须补齐 */
+    if (total == 0)       return 1;                    /* 服务端明确说这是空文件 */
+    return downloaded > 0;                             /* 长度未知：收到过数据才算成功 */
 }
 
 int task_tick(download_task_t *t, DWORD now_ms)
@@ -260,9 +313,10 @@ int task_tick(download_task_t *t, DWORD now_ms)
     t->last_tick = now_ms;
 
     if (t->threads_done >= t->threads_expected) {
-        int done = (t->total <= 0) ? 1 : (t->downloaded >= t->total);
+        int done = dl_verdict(t->total, t->downloaded, (int)t->io_errors);
         t->status = done ? DL_COMPLETE : DL_ERROR;
-        log_msg("task_done: status=%d got=%lld total=%lld", t->status, t->downloaded, t->total);
+        log_msg("task_done: status=%d got=%lld total=%lld err=%ld",
+                t->status, t->downloaded, t->total, (long)t->io_errors);
         return 1;
     }
     return 1; /* 速度变化也算变化，UI 重画 */

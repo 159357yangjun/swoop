@@ -23,4 +23,19 @@ void settings_set_int(const char *key, int val);
 int  settings_get_str(const char *key, wchar_t *out, int n);
 void settings_set_str(const char *key, const wchar_t *val);
 
+/* 确保文件路径的父目录存在（逐级创建）。返回 0 成功。
+   下载前必须调用：分类子目录（Downloads\Videos 等）默认并不存在。 */
+int ensure_dir_for_file(const wchar_t *filepath);
+
+/* 取 exe 所在目录（含结尾反斜杠）。 */
+void exe_dir(wchar_t *out, int n);
+
+/* 取可写数据目录（数据/日志用）。
+   优先 exe 目录（便携）；不可写（如装在 Program Files）则退到
+   %LOCALAPPDATA%\IDMNext，避免任务列表静默丢失。成功返回 0。 */
+int  data_dir(wchar_t *out, int n);
+
+/* 用系统默认程序打开文件或目录（资源管理器）。成功返回 0。 */
+int open_path(const wchar_t *path);
+
 #endif

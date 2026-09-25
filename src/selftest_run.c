@@ -21,6 +21,7 @@
 #include "engine/category.h"
 #include "engine/torrent.h"
 #include "common/util.h"
+#include "gui/resources.h"
 #include "selftest_run.h"
 
 /* 本地自测服务：内容为 (offset*31+7)&0xFF 的确定性模式，
@@ -52,6 +53,22 @@ static DWORD WINAPI srv_thread(LPVOID p)
             if (got >= 4 && memcmp(req + got - 4, "\r\n\r\n", 4) == 0) break;
         }
         req[got] = 0;
+
+        /* 让自测能拿到非 2xx 响应：路径含 /404 或 /missing 一律回 404。
+           这是 P0「错误页被当成下载完成」的验证手段。 */
+        if (strstr(req, "/404") || strstr(req, "/missing")) {
+            const char *body = "not found";
+            char h2[160];
+            int l2 = snprintf(h2, sizeof h2,
+                "HTTP/1.1 404 Not Found\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: %d\r\n"
+                "Connection: close\r\n\r\n", (int)strlen(body));
+            send(c, h2, l2, 0);
+            send(c, body, (int)strlen(body), 0);
+            closesocket(c);
+            continue;
+        }
 
         long long start = 0, end = TEST_SIZE - 1;
         char *rg = strstr(req, "Range: bytes=");
@@ -329,7 +346,7 @@ static int test_speedlimit_download(void)
     return rc;
 }
 
-/* 用例⑦：队列并发槽位（纯函数） */
+/* 用例⑦：队列并发槽位 + 挑选（纯函数） */
 static int test_queue(void)
 {
     struct { int running, max, want; } t[] = {
@@ -342,6 +359,27 @@ static int test_queue(void)
         int got = queue_slots(t[i].running, t[i].max);
         if (got != t[i].want) { rc = i + 1; break; }
     }
+    if (rc) { log_msg("test_queue slots rc=%d", rc); return rc; }
+
+    /* queue_pick：只挑「排队中且用户没暂停」的。
+       必须跳过 user_paused，否则用户点过暂停的任务会被调度器反复拉起来。 */
+    download_task_t a, b, c, d, e;
+    memset(&a, 0, sizeof a); memset(&b, 0, sizeof b); memset(&c, 0, sizeof c);
+    memset(&d, 0, sizeof d); memset(&e, 0, sizeof e);
+    a.status = DL_QUEUED;
+    b.status = DL_QUEUED;  b.user_paused = 1;   /* 用户暂停 → 不许拉起 */
+    c.status = DL_DOWNLOADING;                  /* 已在跑 → 不重复启动 */
+    d.status = DL_QUEUED;
+    e.status = DL_COMPLETE;                     /* 已完成 → 不重下 */
+    download_task_t *arr[5] = { &a, &b, &c, &d, &e };
+    int idx[8];
+
+    int n = queue_pick(arr, 5, 5, idx, 8);
+    if (n != 2 || idx[0] != 0 || idx[1] != 3) rc = 20;
+    else if (queue_pick(arr, 5, 1, idx, 8) != 1 || idx[0] != 0) rc = 21;
+    else if (queue_pick(arr, 5, 0, idx, 8) != 0) rc = 22;      /* 没空位 → 一个都不挑 */
+    else if (queue_pick(arr, 5, 5, idx, 0) != 0) rc = 23;      /* maxout 保护 */
+    else if (queue_pick(NULL, 5, 5, idx, 8) != 0) rc = 24;
     log_msg("test_queue rc=%d", rc);
     return rc;
 }
@@ -380,6 +418,19 @@ static int test_category(void)
     category_build_path(L"C:\\DL", L"movie.mkv", 1, out, MAX_PATH);
     if (wcscmp(out, L"C:\\DL\\Videos\\movie.mkv") != 0) { rc = 24; goto done; }
 
+    /* URL 里的 UTF-8 %XX 必须**整段**解回宽字符。
+       以前一个 %XX 塞进一个 wchar_t，%E4%B8%AD 变成 3 个乱码字符 → 中文文件名全乱。 */
+    category_filename_from_url(L"http://host/%E4%B8%AD%E6%96%87.mp4", out, MAX_PATH);
+    if (wcscmp(out, L"\u4E2D\u6587.mp4") != 0) { rc = 25; goto done; }
+    /* 中文名要能正确归类（后缀表依赖解出来的宽字符） */
+    category_build_path(L"C:\\DL", L"http://host/%E4%B8%AD%E6%96%87.mp4", 1, out, MAX_PATH);
+    if (wcscmp(out, L"C:\\DL\\Videos\\\u4E2D\u6587.mp4") != 0) { rc = 26; goto done; }
+    /* %20 空格 + 空名兜底 */
+    category_filename_from_url(L"http://host/a%20b.mp4", out, MAX_PATH);
+    if (wcscmp(out, L"a b.mp4") != 0) { rc = 27; goto done; }
+    category_filename_from_url(L"http://host/", out, MAX_PATH);
+    if (wcscmp(out, L"download") != 0) { rc = 28; goto done; }
+
 done:
     log_msg("test_category rc=%d out=%ls", rc, out);
     return rc;
@@ -408,6 +459,150 @@ static int test_torrent_kind(void)
     return rc;
 }
 
+/* 用例⑩：完成判定（纯函数）。
+   重点防「404 错误页被当成下载完成」以及「传输出错仍报成功」。 */
+static int test_verdict(void)
+{
+    struct { long long total, got; int err, want; } t[] = {
+        { 1000, 1000, 0, 1 },   /* 补齐 → 完成 */
+        { 1000,  999, 0, 0 },   /* 差一字节 → 不算完成 */
+        { 1000, 1000, 1, 0 },   /* 有段传输失败 → 即使字节数够也判失败 */
+        { 0,       0, 0, 1 },   /* 服务端明确返回空文件 → 完成 */
+        { -1,    100, 0, 1 },   /* 长度未知但收到数据 → 完成 */
+        { -1,      0, 0, 0 },   /* 长度未知且一字节没收到（典型 404 错误页）→ 失败 */
+    };
+    int rc = 0;
+    for (int i = 0; i < (int)(sizeof t / sizeof t[0]); i++) {
+        int got = dl_verdict(t[i].total, t[i].got, t[i].err);
+        if (got != t[i].want) { rc = i + 1; break; }
+    }
+    log_msg("test_verdict rc=%d", rc);
+    return rc;
+}
+
+/* 用例⑪：目标父目录不存在时仍要能下成。
+   默认「按类型分类」会写到 Downloads\Videos\... 而该子目录并不存在，
+   以前 CreateFileW 直接 ERROR_PATH_NOT_FOUND → 新建任务即失败。 */
+static int test_dir_missing(void)
+{
+    char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/bigfile", TEST_PORT);
+    wchar_t tmp[MAX_PATH], root[MAX_PATH], sub1[MAX_PATH], sub2[MAX_PATH], out[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    _snwprintf(root, MAX_PATH, L"%sidm_dirprobe_%lu", tmp, (unsigned long)GetTickCount());
+    _snwprintf(sub1, MAX_PATH, L"%s\\Videos", root);
+    _snwprintf(sub2, MAX_PATH, L"%s\\sub", sub1);
+    _snwprintf(out,  MAX_PATH, L"%s\\deep.bin", sub2);
+    DeleteFileW(out);
+    RemoveDirectoryW(sub2); RemoveDirectoryW(sub1); RemoveDirectoryW(root);
+
+    g_slow = 0;
+    int rc = 0;
+    download_task_t *t = task_create(curl, out, 4);
+    if (!t) return 1;
+    if (task_start(t) != 0) rc = 2;              /* 建目录失败 → 这里就会红 */
+    else {
+        for (int i = 0; i < 2000 && t->status == DL_DOWNLOADING; i++) {
+            task_tick(t, GetTickCount());
+            Sleep(10);
+        }
+        if (t->status != DL_COMPLETE) rc = 3;
+        else if (verify_file(out) != 0) rc = 4;
+    }
+    log_msg("test_dir_missing rc=%d status=%d path=%ls", rc, t->status, out);
+    task_free(t);
+
+    DeleteFileW(out);
+    RemoveDirectoryW(sub2); RemoveDirectoryW(sub1); RemoveDirectoryW(root);
+    return rc;
+}
+
+/* 用例⑫：服务端 404 必须判失败，且不能把错误页写成文件。
+   以前 http_probe 不看状态码，content_length=-1 → 任务显示「完成」。 */
+static int test_http_404(void)
+{
+    char curl[256]; snprintf(curl, sizeof curl, "http://127.0.0.1:%d/404", TEST_PORT);
+    wchar_t out[MAX_PATH]; make_tmp(out, L"idm_404.bin");
+    DeleteFileW(out);
+    g_slow = 0;
+
+    int rc = 0;
+    download_task_t *t = task_create(curl, out, 4);
+    if (!t) return 1;
+    if (task_start(t) == 0) rc = 2;                                  /* 404 竟然启动成功 */
+    else if (t->status != DL_ERROR) rc = 3;
+    else if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) rc = 4; /* 不该留下文件 */
+    log_msg("test_http_404 rc=%d status=%d", rc, t->status);
+    task_free(t);
+    DeleteFileW(out);
+    return rc;
+}
+
+/* 用例⑬：分段下发计划（纯函数）。
+   重点：续传时线程的计数起点必须接上「暂停前已写字节」（out_written0 = already），
+   否则线程退出时会把 seg_written 覆盖成只剩本轮的字节数 → 再续传时起点偏小、
+   downloaded 被重复累加，进度条出现 >100%。 */
+static int test_seg_plan(void)
+{
+    struct { long long st, len, already; int want; long long ws, wl, ww; } t[] = {
+        { 0, 1000,    0, 1,   0, 1000,   0 },   /* 全新单段 */
+        { 0, 1000,  400, 1, 400,  600, 400 },   /* 续传一半：计数起点必须 = 400 */
+        { 0, 1000, 1000, 0,   0,    0,   0 },   /* 已补齐 → 不起线程 */
+        { 500, 500,  300, 1, 800,  200, 300 },  /* 多段中的尾段续传 */
+        { 0,    0,  500, 1, 500,    0, 500 },   /* 长度未知：从已写处下到结束 */
+        { 0,  100,   -5, 1,   0,  100,   0 },   /* 负数已写按 0 */
+    };
+    int rc = 0;
+    for (int i = 0; i < (int)(sizeof t / sizeof t[0]); i++) {
+        long long s = -1, l = -1, w = -1;
+        int got = task_seg_plan(t[i].st, t[i].len, t[i].already, &s, &l, &w);
+        if (got != t[i].want) { rc = i + 1; break; }
+        if (got == 1 && (s != t[i].ws || l != t[i].wl || w != t[i].ww)) { rc = 100 + i; break; }
+    }
+    /* NULL 出参不应崩 */
+    task_seg_plan(0, 100, 0, NULL, NULL, NULL);
+    log_msg("test_seg_plan rc=%d", rc);
+    return rc;
+}
+
+/* 用例⑭：排队中的任务点「暂停」必须真的停下。
+   以前 task_pause 对非 DL_DOWNLOADING 直接 return，于是排队任务状态不变，
+   调度器下一个 250ms tick 又把它拉起来 —— 用户看到「点了暂停还在下」。
+   定时调度的「暂停全部」同样漏掉排队任务。 */
+static int test_pause_queued(void)
+{
+    download_task_t *t = task_create("http://127.0.0.1:1/never", L"never.bin", 4);
+    if (!t) return 1;
+    int rc = 0;
+    if (t->status != DL_QUEUED) rc = 2;          /* task_create 出厂即排队 */
+    else {
+        task_pause(t);
+        if (t->status != DL_PAUSED) rc = 3;      /* 必须变成已暂停 */
+    }
+    /* 暂停后再调一次不应改变状态（幂等） */
+    if (!rc) { task_pause(t); if (t->status != DL_PAUSED) rc = 4; }
+    log_msg("test_pause_queued rc=%d status=%d", rc, (int)t->status);
+    task_free(t);
+    return rc;
+}
+
+/* 用例⑮：资源表真的可用。
+   菜单上写着「新建任务 Ctrl+N」，就必须能 LoadAccelerators 拿到那张快捷键表；
+   两个对话框模板、两个菜单、图标也必须在。
+   （写错资源 ID 或 .rc 语法问题，windres 不报错，只在运行时静默失效。） */
+static int test_resources(void)
+{
+    HINSTANCE h = GetModuleHandleW(NULL);
+    int rc = 0;
+    if (!LoadAcceleratorsW(h, MAKEINTRESOURCEW(IDR_ACCEL)))       rc = 1;
+    else if (!LoadMenuW(h, MAKEINTRESOURCEW(IDR_MAIN)))           rc = 2;
+    else if (!LoadMenuW(h, MAKEINTRESOURCEW(IDR_TRAY)))           rc = 3;
+    else if (!FindResourceW(h, MAKEINTRESOURCEW(IDD_NEW_TASK), RT_DIALOG)) rc = 4;
+    else if (!FindResourceW(h, MAKEINTRESOURCEW(IDD_SETTINGS), RT_DIALOG)) rc = 5;
+    else if (!LoadIconW(h, MAKEINTRESOURCEW(IDI_APP)))            rc = 6;
+    log_msg("test_resources rc=%d", rc);
+    return rc;
+}
+
 int run_selftest(void)
 {
     int port = TEST_PORT;
@@ -429,10 +624,18 @@ int run_selftest(void)
     int rc7 = test_queue();
     int rc8 = test_category();
     int rc9 = test_torrent_kind();
+    int rc10 = test_verdict();
+    int rc11 = test_dir_missing();
+    int rc12 = test_http_404();
+    int rc13 = test_seg_plan();
+    int rc14 = test_pause_queued();
+    int rc15 = test_resources();
     int rc = 0;
     if (rc1) rc = rc1; else if (rc2) rc = rc2; else if (rc3) rc = rc3;
     else if (rc4) rc = rc4; else if (rc5) rc = rc5; else if (rc6) rc = rc6;
     else if (rc7) rc = rc7; else if (rc8) rc = rc8; else if (rc9) rc = rc9;
+    else if (rc10) rc = rc10; else if (rc11) rc = rc11; else if (rc12) rc = rc12;
+    else if (rc13) rc = rc13; else if (rc14) rc = rc14; else if (rc15) rc = rc15;
 
     http_cleanup();
     WaitForSingleObject(h, 1000);
@@ -443,12 +646,17 @@ int run_selftest(void)
     strcat(rf, "idm_selftest_result.txt");
     FILE *f = fopen(rf, "w");
     if (f) {
-        fprintf(f, "selftest %s rc=%d whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d queue=%d cat=%d torrent=%d\n",
-                rc == 0 ? "PASS" : "FAIL", rc, rc1, rc2, rc3, rc4, rc5, rc6, rc7, rc8, rc9);
+        fprintf(f, "selftest %s rc=%d whole=%d resume=%d store=%d sched=%d speed=%d "
+                   "speeddl=%d queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d "
+                   "segplan=%d paused=%d res=%d\n",
+                rc == 0 ? "PASS" : "FAIL", rc, rc1, rc2, rc3, rc4, rc5, rc6,
+                rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15);
         fclose(f);
     }
 
-    printf("IDM selftest: %s (whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d queue=%d cat=%d torrent=%d rc=%d)\n",
-           rc == 0 ? "PASS" : "FAIL", rc1, rc2, rc3, rc4, rc5, rc6, rc7, rc8, rc9, rc);
+    printf("IDM selftest: %s (whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d "
+           "queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d segplan=%d paused=%d res=%d rc=%d)\n",
+           rc == 0 ? "PASS" : "FAIL", rc1, rc2, rc3, rc4, rc5, rc6,
+           rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc);
     return rc;
 }

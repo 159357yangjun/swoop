@@ -1,8 +1,11 @@
 #include "util.h"
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <time.h>
 #include <stdio.h>
+#include <shlobj.h>      /* SHCreateDirectoryExW */
+#include <shellapi.h>    /* ShellExecuteW */
 
 static FILE *g_log = NULL;
 
@@ -126,4 +129,72 @@ void settings_set_str(const char *key, const wchar_t *val)
         RegSetValueExW(h, wkey, 0, REG_SZ, (const BYTE *)val,
                        (DWORD)((wcslen(val) + 1) * sizeof(wchar_t)));
     RegCloseKey(h);
+}
+
+/* ---- 路径工具 ---- */
+
+/* 逐级创建 filepath 的父目录。SHCreateDirectoryExW 会一路把中间层建齐，
+   并正确处理盘符 / UNC。返回 0 表示目录已存在或创建成功。 */
+int ensure_dir_for_file(const wchar_t *filepath)
+{
+    if (!filepath || !filepath[0]) return -1;
+    wchar_t dir[MAX_PATH];
+    wcsncpy(dir, filepath, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = 0;
+    wchar_t *sl = wcsrchr(dir, L'\\');
+    if (!sl) return 0;          /* 没有目录成分 → 当前目录 */
+    if (sl == dir) return 0;    /* 形如 "\file"，根目录必存在 */
+    *sl = 0;
+
+    int r = SHCreateDirectoryExW(NULL, dir, NULL);
+    if (r == ERROR_SUCCESS || r == ERROR_ALREADY_EXISTS || r == ERROR_FILE_EXISTS) return 0;
+    return -1;
+}
+
+void exe_dir(wchar_t *out, int n)
+{
+    if (!out || n <= 0) return;
+    GetModuleFileNameW(NULL, out, n);
+    wchar_t *sl = wcsrchr(out, L'\\');
+    if (sl) *(sl + 1) = 0;
+    else out[0] = 0;
+}
+
+/* exe 目录可写就用它（便携），否则退 %LOCALAPPDATA%\IDMNext。 */
+int data_dir(wchar_t *out, int n)
+{
+    if (!out || n <= 0) return -1;
+    wchar_t d[MAX_PATH];
+    exe_dir(d, MAX_PATH);
+
+    /* 探针文件：能建就能删，说明目录可写 */
+    wchar_t probe[MAX_PATH];
+    _snwprintf(probe, MAX_PATH, L"%s.idmwrite", d);
+    HANDLE h = CreateFileW(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+        DeleteFileW(probe);
+        _snwprintf(out, n, L"%s", d);
+        return 0;
+    }
+
+    wchar_t base[MAX_PATH];
+    DWORD r = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+    if (r == 0 || r >= MAX_PATH) return -1;
+    _snwprintf(out, n, L"%s\\IDMNext", base);
+    SHCreateDirectoryExW(NULL, out, NULL);
+    if (out[0] && out[wcslen(out) - 1] != L'\\') {
+        size_t L = wcslen(out);
+        if (L + 1 < (size_t)n) { out[L] = L'\\'; out[L + 1] = 0; }
+    }
+    return 0;
+}
+
+int open_path(const wchar_t *path)
+{
+    if (!path || !path[0]) return -1;
+    /* shell32 已在静态导入里（托盘图标），不新增依赖 */
+    HINSTANCE r = ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+    return ((INT_PTR)r > 32) ? 0 : -1;
 }

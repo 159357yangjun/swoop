@@ -66,13 +66,20 @@ int taskstore_save(const wchar_t *path, download_task_t *const *tasks, int n)
         u8[0] = 0;
         WideCharToMultiByte(CP_UTF8, 0, t->outfile, -1, u8, sizeof u8, NULL, NULL);
 
+        char ref8[4096];
+        ref8[0] = 0;
+        if (t->referer[0])
+            WideCharToMultiByte(CP_UTF8, 0, t->referer, -1, ref8, sizeof ref8, NULL, NULL);
+
         fputs("T\n", f);
         fprintf(f, "url=%s\n", t->url);
         fprintf(f, "file=%s\n", u8);
+        fprintf(f, "referer=%s\n", ref8);
         fprintf(f, "total=%lld\n", t->total);
         fprintf(f, "downloaded=%lld\n", (long long)t->downloaded);
         fprintf(f, "status=%d\n", (int)t->status);
         fprintf(f, "kind=%d\n", t->kind);
+        fprintf(f, "upaused=%d\n", t->user_paused ? 1 : 0);
         fprintf(f, "conn=%d\n", t->num_conn);
         fprintf(f, "segs=%d\n", t->seg_count);
         for (int s = 0; s < t->seg_count && s < 16; s++)
@@ -116,6 +123,10 @@ int taskstore_load(const wchar_t *path, download_task_t **tasks, int maxn, int *
             cur->url[sizeof cur->url - 1] = 0;
         } else if (strncmp(line, "file=", 5) == 0) {
             MultiByteToWideChar(CP_UTF8, 0, line + 5, -1, cur->outfile, MAX_PATH);
+        } else if (strncmp(line, "referer=", 8) == 0) {
+            MultiByteToWideChar(CP_UTF8, 0, line + 8, -1, cur->referer, 2048);
+        } else if (strncmp(line, "upaused=", 8) == 0) {
+            cur->user_paused = atoi(line + 8) ? 1 : 0;
         } else if (strncmp(line, "total=", 6) == 0) {
             cur->total = strtoll(line + 6, NULL, 10);
         } else if (strncmp(line, "downloaded=", 11) == 0) {

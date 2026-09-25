@@ -10,7 +10,14 @@ WINDRES = C:/Qt/Tools/mingw1310_64/bin/windres.exe
 endif
 PYTHON  ?= python
 CFLAGS  = -std=c11 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -Isrc
-LDFLAGS = -mwindows -static -lcomctl32 -lws2_32 -luser32 -lgdi32 -lkernel32 -ladvapi32
+LDFLAGS = -mwindows -static -lcomctl32 -lshell32 -lws2_32 -luser32 -lgdi32 -lkernel32 -ladvapi32
+
+# 交付给用户的 exe 加 -s（链接期 strip）：去掉符号表与 .debug_* 节。
+# 实测：idm.exe 227KB → 148KB，且 strings 再也搜不到 task_pause / dl_verdict
+# 这类内部函数名（未 strip 时是直接暴露的）。
+# 注意这是「瘦身 + 去符号」，不是加密 —— 原生 exe 无法真正加密。
+# 故意**不加**到 idm_selftest.exe：那是开发工具、不随包发布，留着符号便于崩栈定位。
+STRIP   = -s
 
 ENGINE = build/speedlimit.o build/sched.o build/taskstore.o build/queue.o build/category.o build/torrent.o
 
@@ -19,11 +26,11 @@ OBJS = build/util.o build/http.o build/download.o $(ENGINE) build/main_window.o 
 all: idm.exe idm_selftest.exe idm_nmhost.exe
 
 idm.exe: $(OBJS)
-	$(CC) -o idm.exe $(OBJS) $(LDFLAGS)
+	$(CC) -o idm.exe $(OBJS) $(LDFLAGS) $(STRIP)
 
 # 浏览器原生消息宿主（对标 IDM 的 IDMMsgHost.exe）：控制台子系统，走 stdio 帧
 idm_nmhost.exe: build/jsonlite.o build/nmhost.o
-	$(CC) -o idm_nmhost.exe build/jsonlite.o build/nmhost.o -mconsole -static -luser32 -lkernel32 -ladvapi32
+	$(CC) -o idm_nmhost.exe build/jsonlite.o build/nmhost.o -mconsole -static -luser32 -lkernel32 -ladvapi32 $(STRIP)
 
 build/jsonlite.o: src/common/jsonlite.c
 	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@
@@ -49,8 +56,10 @@ build/category.o: src/engine/category.c
 build/torrent.o: src/engine/torrent.c
 	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@
 
-idm_selftest.exe: build/util.o build/http.o build/download.o $(ENGINE) build/selftest.o build/selftest_run.o
-	$(CC) -o idm_selftest.exe build/util.o build/http.o build/download.o $(ENGINE) build/selftest.o build/selftest_run.o -mconsole -static -lws2_32 -luser32 -lgdi32 -lkernel32 -ladvapi32
+# 自测也要链上 resources.res：自测里要断言「菜单承诺的 Ctrl+N 快捷键 / 两个对话框
+# 模板真的存在」。windres 对写错的资源 ID 不报错，只在运行时静默失效。
+idm_selftest.exe: build/util.o build/http.o build/download.o $(ENGINE) build/selftest.o build/selftest_run.o build/resources.res
+	$(CC) -o idm_selftest.exe build/util.o build/http.o build/download.o $(ENGINE) build/selftest.o build/selftest_run.o build/resources.res -mconsole -static -lshell32 -lws2_32 -luser32 -lgdi32 -lkernel32 -ladvapi32
 
 build/selftest.o: src/selftest.c
 	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@

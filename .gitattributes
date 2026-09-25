@@ -1,6 +1,10 @@
 # 统一行尾，避免 Windows/Linux 来回改出无意义 diff
 * text=auto
 
+# Makefile 必须锁 LF：若是 CRLF，make 传给 shell 的 recipe 会带上 \r，
+# Windows runner 上会变成 "command not found"（第一次云端构建就炸，且现象难猜）。
+Makefile text eol=lf
+
 # CI / 脚本按各自平台的行尾
 *.sh    text eol=lf
 *.yml   text eol=lf

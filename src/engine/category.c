@@ -21,7 +21,15 @@ static int in_list(const wchar_t *ext, const wchar_t **list)
     return 0;
 }
 
-/* 取最后一个 '.' 之后的后缀（不含点）；没有则返回空。 */
+static int hexv(wchar_t c)
+{
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+    if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+    return -1;
+}
+
+/* 取最后一个 '/' 之后的后缀（不含点）；没有则返回空。 */
 static void ext_of(const wchar_t *name, wchar_t *out, int n)
 {
     out[0] = 0;
@@ -59,10 +67,22 @@ const wchar_t *category_dir_name(dl_category c)
     }
 }
 
+/* 从 p 起算的「宽字符单元」长度：1 = 普通 BMP 字符，2 = 代理项对（非 BMP）。 */
+static int wide_unit_len(const wchar_t *p)
+{
+    if (p[0] >= (wchar_t)0xD800 && p[0] <= (wchar_t)0xDBFF &&
+        p[1] >= (wchar_t)0xDC00 && p[1] <= (wchar_t)0xDFFF) return 2;
+    return 1;
+}
+
+/* 取 URL 末段作文件名，并做 %XX 解码。
+   关键：%XX 是**字节**，UTF-8 的多字节序列必须整段解回宽字符。
+   以前是「一个 %XX 直接塞进一个 wchar_t」，于是
+   %E4%B8%AD 变成 "ä¸" 三个乱码字符 —— 中文/日文文件名全乱。 */
 void category_filename_from_url(const wchar_t *url, wchar_t *out, int n)
 {
     out[0] = 0;
-    if (!url) return;
+    if (!url || n <= 0) return;
 
     /* 去掉 query / fragment */
     wchar_t tmp[2048];
@@ -75,26 +95,26 @@ void category_filename_from_url(const wchar_t *url, wchar_t *out, int n)
     for (const wchar_t *p = tmp; *p; p++)
         if (*p == L'/' || *p == L'\\') base = p + 1;
 
-    /* 基本 %XX 解码 */
+    char bytes[4096];
     int j = 0;
-    for (const wchar_t *p = base; *p && j < n - 1; p++) {
+    for (const wchar_t *p = base; *p && j < (int)sizeof bytes - 8; ) {
         if (*p == L'%' && p[1] && p[2]) {
-            int hi = 0, lo = 0, k;
-            for (k = 0; k < 2; k++) {
-                wchar_t ch = p[1 + k];
-                int v = -1;
-                if (ch >= L'0' && ch <= L'9') v = ch - L'0';
-                else if (ch >= L'a' && ch <= L'f') v = ch - L'a' + 10;
-                else if (ch >= L'A' && ch <= L'F') v = ch - L'A' + 10;
-                if (v < 0) break;
-                if (k == 0) hi = v; else lo = v;
-            }
-            if (k == 2) { out[j++] = (wchar_t)((hi << 4) | lo); p += 2; continue; }
+            int hi = hexv(p[1]), lo = hexv(p[2]);
+            if (hi >= 0 && lo >= 0) { bytes[j++] = (char)((hi << 4) | lo); p += 3; continue; }
         }
-        out[j++] = *p;
+        char u8[8];
+        int wl = wide_unit_len(p);
+        int k = WideCharToMultiByte(CP_UTF8, 0, p, wl, u8, 8, NULL, NULL);
+        if (k <= 0) { bytes[j++] = '?'; p++; continue; }   /* 非法代理项：占位，别死循环 */
+        for (int m = 0; m < k && j < (int)sizeof bytes - 1; m++) bytes[j++] = u8[m];
+        p += wl;
     }
-    out[j] = 0;
-    if (!out[0]) wcscpy(out, L"download");
+    bytes[j] = 0;
+
+    if (!MultiByteToWideChar(CP_UTF8, 0, bytes, -1, out, n)) out[0] = 0;
+    out[n - 1] = 0;
+    if (!out[0]) wcsncpy(out, L"download", n - 1);
+    out[n - 1] = 0;
 }
 
 void category_default_base(wchar_t *out, int n)

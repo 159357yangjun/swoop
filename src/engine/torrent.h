@@ -14,4 +14,7 @@ int torrent_build_args(const char *url, const wchar_t *dir, wchar_t *out, int n)
 /* 启动 aria2c（先在 exe_dir 下找 aria2c.exe，再退回 PATH）。成功返回进程句柄，失败 NULL。 */
 HANDLE torrent_start(const char *url, const wchar_t *dir, const wchar_t *exe_dir);
 
+/* 取一个可读的任务显示名：磁力链用 dn= 参数，.torrent 用去掉后缀的文件名。 */
+void torrent_display_name(const char *url, wchar_t *out, int n);
+
 #endif

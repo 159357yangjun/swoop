@@ -1,7 +1,7 @@
 # IDM Next
 
 对标 Internet Download Manager 的 **Windows 原生 C 语言下载器**。
-纯 Win32 API + C11，不用 Qt / MFC / .NET / COM，单文件 exe，**下载即用**。
+纯 Win32 API + C11，不用 Qt / MFC / .NET / COM，全部静态链接，**下载即解压即用**。
 
 > 状态：v0.1.0，功能已跑通并通过自测；GUI 交互仍在打磨。
 
@@ -31,6 +31,23 @@ ADVAPI32  COMCTL32  KERNEL32  msvcrt  SHELL32  USER32  WS2_32
 ```
 
 `idm_nmhost.exe` 更少（4 个）。全部 `-static` 链接，**不需要 MinGW 运行时 DLL**。
+
+### 为什么是两个 exe
+
+发布包含 `idm.exe`（主程序）与 `idm_nmhost.exe`（浏览器扩展的 native messaging 宿主）。
+
+`idm_nmhost.exe` 必须独立存在，原因是**硬约束**：Chrome/Edge 的 native messaging 靠
+**stdin/stdout 传长度前缀帧**，而「控制台子系统」还是「GUI 子系统」写在 PE 头里、运行期无法切换
+——GUI 子系统的 exe 没有 stdout。真实 IDM 同样是多进程结构（`IDMan.exe` + `IDMMsgHost.exe`
++ `IDMGrHlp.exe` + `idmBroker.exe` 等 8 个 exe）。
+
+两个文件请放在同一目录；少 `idm_nmhost.exe` 不会崩溃，只是浏览器扩展失效。
+另外宿主在注册表里存的是**绝对路径** —— 挪动目录或换机器后需重跑 `register-nmhost.cmd`，
+否则扩展会**静默失效**（不报错，只是点了没反应）。
+
+交付的 exe 在链接期带 `-s`（strip）：去掉符号表与调试节，`idm.exe` 227 KB → 148 KB，
+`idm_nmhost.exe` 89 KB → 45 KB。这属于**瘦身 + 去符号，不是加密**
+（原生 exe 无法真正加密 —— CPU 必须能执行明文机器码）。
 
 ## 快速开始
 
@@ -63,7 +80,7 @@ make all CC=gcc WINDRES=windres
 执行自测（无窗口，控制台直跑）：
 
 ```bash
-./idm_selftest.exe          # 期望 9/9 PASS，退出码 0
+./idm_selftest.exe          # 期望 15/15 PASS，退出码 0
 ./idm_nmhost.exe --selftest # 期望 PASS
 ```
 

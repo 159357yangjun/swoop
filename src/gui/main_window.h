@@ -19,7 +19,8 @@ HWND create_main_window(HINSTANCE h);
 void ui_add_task(download_task_t *t);
 void ui_refresh(void);
 
-/* 显示主窗口并弹出「新建任务」对话框，URL 已预填（供浏览器嗅探/命令行传入）。 */
-void ui_open_new_task_url(const wchar_t *url);
+/* 显示主窗口并弹出「新建任务」对话框，URL 已预填（供浏览器嗅探/命令行传入）。
+   filename / referer 可为 NULL：站点建议的文件名 + 来源页（防盗链站点需要）。 */
+void ui_open_new_task_url(const wchar_t *url, const wchar_t *filename, const wchar_t *referer);
 
 #endif
