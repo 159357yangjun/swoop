@@ -40,6 +40,7 @@ void Settings::load()
     m_closeToTray    = s.value(QStringLiteral("closeToTray"), false).toBool();
     m_autoDownloadYtDlp = s.value(QStringLiteral("autoDownloadYtDlp"), true).toBool();
     m_autoArchiveByType = s.value(QStringLiteral("autoArchiveByType"), false).toBool();
+    m_overwriteExisting = s.value(QStringLiteral("overwriteExisting"), false).toBool();
     m_ytDlpCustomPath   = s.value(QStringLiteral("ytDlpCustomPath"), QString()).toString();
     m_ffmpegCustomPath  = s.value(QStringLiteral("ffmpegCustomPath"), QString()).toString();
     m_aria2CustomPath   = s.value(QStringLiteral("aria2CustomPath"), QString()).toString();
@@ -109,6 +110,7 @@ void Settings::save() const
     s.setValue(QStringLiteral("closeToTray"), m_closeToTray);
     s.setValue(QStringLiteral("autoDownloadYtDlp"), m_autoDownloadYtDlp);
     s.setValue(QStringLiteral("autoArchiveByType"), m_autoArchiveByType);
+    s.setValue(QStringLiteral("overwriteExisting"), m_overwriteExisting);
     s.setValue(QStringLiteral("ytDlpCustomPath"), m_ytDlpCustomPath);
     s.setValue(QStringLiteral("ffmpegCustomPath"), m_ffmpegCustomPath);
     s.setValue(QStringLiteral("aria2CustomPath"), m_aria2CustomPath);
@@ -150,6 +152,8 @@ void Settings::applyToEngine() const
     cfg.speed_limit_global = (m_speedLimitKBps > 0) ? (m_speedLimitKBps * 1024) : 0;
     /* 每服务器连接数：作为每任务并发连接数的上限（引擎里与 thread_pool_size 取小） */
     cfg.max_conn_per_server = m_connectionsPerServer;
+    /* 同名文件：默认 0=自动重命名（引擎侧 pick_free_filename），勾选后 1=覆盖删除 */
+    cfg.overwrite_existing  = m_overwriteExisting ? 1 : 0;
 
     // 代理：将设置页的 "none"/"http"/"socks" 映射为引擎 ProxyType
     int ptype = 0;  // PROXY_NONE

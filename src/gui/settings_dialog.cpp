@@ -258,6 +258,14 @@ void SettingsDialog::buildDownloadsTab(QWidget* page)
     m_autoArchiveCheck->setChecked(m_settings.autoArchiveByType());
     form->addRow(QString(), m_autoArchiveCheck);
 
+    /* 同名文件：默认不勾 = 自动重命名。文案要把「默认行为」说清楚，
+     * 否则用户会以为不勾就什么都不做。 */
+    m_overwriteCheck = new QCheckBox(
+        QStringLiteral("覆盖同名文件（不勾选时自动重命名为「文件名 (1).ext」，不会删除已有文件）"),
+        page);
+    m_overwriteCheck->setChecked(m_settings.overwriteExisting());
+    form->addRow(QString(), m_overwriteCheck);
+
     m_autoYtDlpCheck = new QCheckBox(
         QStringLiteral("缺失时自动下载 yt-dlp（开箱即用，无需手动安装）"), page);
     m_autoYtDlpCheck->setChecked(m_settings.autoDownloadYtDlp());
@@ -581,6 +589,7 @@ void SettingsDialog::accept()
     m_settings.setRetryCount(m_retrySpin->value());
     m_settings.setUserAgent(m_uaEdit->text().trimmed());
     m_settings.setAutoArchiveByType(m_autoArchiveCheck->isChecked());
+    m_settings.setOverwriteExisting(m_overwriteCheck->isChecked());
     m_settings.setAutoDownloadYtDlp(m_autoYtDlpCheck->isChecked());
     m_settings.setYtDlpCustomPath(m_ytDlpPathEdit->text().trimmed());
     m_settings.setFfmpegCustomPath(m_ffmpegPathEdit->text().trimmed());

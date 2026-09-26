@@ -72,6 +72,7 @@ private:
     QSpinBox*  m_retrySpin      = nullptr;
     QLineEdit* m_uaEdit         = nullptr;
     QCheckBox* m_autoArchiveCheck = nullptr;
+    QCheckBox* m_overwriteCheck = nullptr;
     QCheckBox* m_autoYtDlpCheck   = nullptr;
     QLineEdit* m_ytDlpPathEdit    = nullptr;
     QPushButton* m_ytDlpBtn       = nullptr;

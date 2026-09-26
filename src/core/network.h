@@ -110,6 +110,8 @@ typedef struct {
     long    http_code;
     int     range_ignored;         /* 1 = 服务器无视 Range（要中段却回 200+整份），
                                     * 分段引擎据此降级为单连接续下，而不是产出错位文件 */
+    int     no_retry;              /* 1 = 确定性失败，重试无意义（磁盘满/权限/文件被占用）。
+                                    * 调用方应直接把 error_msg 抛给用户，不要白等重试间隔 */
     char    error_msg[256];
     char    http_version[16];      /* 实际协商到的协议版本："HTTP/1.1" / "HTTP/2" */
 } NetDownloadResult;

@@ -45,6 +45,12 @@ public:
     bool autoArchiveByType() const { return m_autoArchiveByType; }
     void setAutoArchiveByType(bool v) { m_autoArchiveByType = v; }
 
+    // ── 同名文件 ──
+    // true = 覆盖同名文件；false（默认）= 自动重命名为「名字 (1).ext」。
+    // 由 Settings::applyToEngine 下发到引擎的 cfg.overwrite_existing。
+    bool overwriteExisting() const { return m_overwriteExisting; }
+    void setOverwriteExisting(bool v) { m_overwriteExisting = v; }
+
     // ── 下载完成后电源动作 ──
     // 取值："none" | "shutdown" | "sleep"（休眠）
     const QString& shutdownAction() const { return m_shutdownAction; }
@@ -150,6 +156,7 @@ private:
     bool        m_clipboardMonitor = true;  // 剪贴板监听开关（默认开启）
     bool        m_autoDownloadYtDlp = true; // yt-dlp 缺失时自动下载（开箱即用）
     bool        m_autoArchiveByType = false;// 按文件类型归档到子目录
+    bool        m_overwriteExisting = false;// 同名文件：默认不覆盖，自动改名
     QString     m_ytDlpCustomPath;          // 用户指定的 yt-dlp 路径（空=自动）
     QString     m_ffmpegCustomPath;         // 用户指定的 ffmpeg 路径（空=自动）
     QString     m_aria2CustomPath;          // 用户指定的 aria2c 路径（空=自动）

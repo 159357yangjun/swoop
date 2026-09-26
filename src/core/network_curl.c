@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <windows.h>   /* Sleep（重试退避） */
 
@@ -129,7 +130,37 @@ static void mb_free(MemBuf *m) { free(m->data); m->data = NULL; m->len = m->cap 
 typedef struct {
     FILE   *fp;
     int64_t written;
+    int     err;       /* 写盘失败时的 errno（0=没失败） */
+    DWORD   winerr;    /* 写盘失败时的 GetLastError（0=没失败） */
 } RangeCtx;
+
+/* 把「写盘失败」翻译成用户能看懂的一句中文。
+ * libcurl 在这种情况下只回 CURLE_WRITE_ERROR，字符串是英文的
+ * "Failed writing received data to disk/application"，再往上被包成「网络错误: …」，
+ * 用户看到的是一句既不准确（不是网络问题）又看不懂（英文）的话。 */
+static const char *widefault_reason(DWORD winerr, int err) {
+    switch (winerr) {
+    case ERROR_DISK_FULL:            return "磁盘空间不足";
+    case ERROR_ACCESS_DENIED:        return "没有写入权限（或文件被其他程序占用）";
+    case ERROR_SHARING_VIOLATION:    return "文件被其他程序占用";
+    case ERROR_WRITE_PROTECT:        return "目标磁盘是只读的";
+    case ERROR_NOT_ENOUGH_QUOTA:     return "超出磁盘配额";
+    case ERROR_PATH_NOT_FOUND:
+    case ERROR_FILE_NOT_FOUND:       return "保存路径不存在";
+    case ERROR_FILENAME_EXCED_RANGE: return "文件路径过长";
+    case ERROR_HANDLE_DISK_FULL:     return "磁盘空间不足";
+    default: break;
+    }
+    switch (err) {
+    case ENOSPC: return "磁盘空间不足";
+    case EACCES: return "没有写入权限（或文件被其他程序占用）";
+    case ENOENT: return "保存路径不存在";
+    case EMFILE: return "打开的文件过多（句柄耗尽）";
+    case EBADF:  return "文件句柄不可写";
+    case EINVAL: return "文件名或路径非法";
+    default:     return "未知原因";
+    }
+}
 
 static size_t write_file_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     RangeCtx *c = (RangeCtx*)userdata;
@@ -137,7 +168,12 @@ static size_t write_file_cb(void *ptr, size_t size, size_t nmemb, void *userdata
     if (total > 0) {
         size_t w = fwrite(ptr, 1, total, c->fp);
         c->written += (int64_t)w;
-        if (w != total) return w;   /* 写盘失败，通知 libcurl 中止 */
+        if (w != total) {
+            /* 先把真实原因记下来：这里（回调内）errno/LastError 才是准的，
+             * 返回后被 libcurl 包装成 CURLE_WRITE_ERROR 就只剩一句英文了。 */
+            if (c->err == 0) { c->err = errno; c->winerr = GetLastError(); }
+            return w;   /* 写盘失败，通知 libcurl 中止 */
+        }
     }
     return total;
 }
@@ -340,7 +376,7 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
          * 注意：FAILONERROR 不影响 CURLINFO_RESPONSE_CODE，下面的 416 分支照旧可用。 */
         curl_easy_setopt(h, CURLOPT_FAILONERROR, 1L);
 
-        RangeCtx ctx; ctx.fp = fp; ctx.written = 0;
+        RangeCtx ctx; ctx.fp = fp; ctx.written = 0; ctx.err = 0; ctx.winerr = 0;
         curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_file_cb);
         curl_easy_setopt(h, CURLOPT_WRITEDATA, &ctx);
 
@@ -367,6 +403,19 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
             snprintf(res.error_msg, sizeof(res.error_msg),
                      "服务器忽略 Range 请求（返回 200 而非 206）");
             res.success = 0;
+            break;
+        }
+
+        /* 写盘失败必须优先于「成功」判定：libcurl 把它包成 CURLE_WRITE_ERROR，
+         * 而 http_code 往往仍是 200/206 —— 旧的判据只看到「有 code、写了几个字节」
+         * 就当成成功，于是① 报错时显示成毫无意义的「HTTP 错误: 206」，
+         * ② 磁盘满的确定性失败还会被当成可续传的临时故障反复重试。 */
+        if (ctx.err != 0 || ctx.winerr != 0 || rc == CURLE_WRITE_ERROR) {
+            snprintf(res.error_msg, sizeof(res.error_msg),
+                     "写入磁盘失败：%s", widefault_reason(ctx.winerr, ctx.err));
+            res.bytes_written = ctx.written;
+            res.success       = 0;
+            res.no_retry      = 1;
             break;
         }
 
@@ -414,7 +463,9 @@ NetDownloadResult network_download_range(const NetDownloadTask *task) {
     FILE *fp = utf8_fopen(task->save_path, "r+b");
     if (!fp) fp = utf8_fopen(task->save_path, "w+b");
     if (!fp) {
-        snprintf(res.error_msg, sizeof(res.error_msg), "无法打开文件: %s", task->save_path);
+        snprintf(res.error_msg, sizeof(res.error_msg), "无法打开文件：%s（%s）",
+                 widefault_reason(GetLastError(), errno), task->save_path);
+        res.no_retry = 1;   /* 打不开就是打不开，重试没意义 */
         return res;
     }
     res = range_write(task, fp);

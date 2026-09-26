@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <errno.h>
 #include <io.h>    /* _chsize */
 #include <sys/stat.h>  /* fstat, struct stat */
 
@@ -68,10 +69,11 @@ static const char *kDefaultUA = "IDM-Next/0.1 (Windows; libcurl)";
 static int             g_initialized = 0;
 static int             g_next_id     = 1;  /* 任务 ID 自增计数器 */
 
-/* 全局限速器（令牌桶风格，按 100ms 滑动窗口节流总带宽） */
+/* 全局限速器（虚拟时钟：累计放行字节 ÷ 限速 = 应耗时，实际超前就休眠补足） */
 static CRITICAL_SECTION g_throttle_lock;
-static int64_t          g_throttle_window_start = 0;
-static int64_t          g_throttle_bytes       = 0;
+static int64_t          g_throttle_window_start = 0;  /* 虚拟时钟基准时刻(ms)，0=未启动 */
+static int64_t          g_throttle_bytes       = 0;   /* 自基准起累计放行字节 */
+#define THROTTLE_IDLE_RESET_MS 5000                   /* 空闲超过此时长则重置信用，避免之后一次性突发 */
 
 /* ── 引擎行为追踪（默认关闭，零成本）──
  * 设 IDM_TRACE_ENGINE=1 后，把「设置是否真的下发到引擎」这类关键决策打到 stderr：
@@ -128,6 +130,160 @@ static int utf8_move(const char *src, const char *dst) {
 #endif
 }
 
+static int utf8_file_exists(const char *path) {
+#ifdef _WIN32
+    wchar_t wpath[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) <= 0) return 0;
+    DWORD a = GetFileAttributesW(wpath);
+    return (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+#else
+    struct stat st;
+    return (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 0;
+#endif
+}
+
+/* 目标名已存在时挑一个空闲名：`base (1).ext`、`base (2).ext` …最多试 999 次，
+ * 全被占则退到 `base (YYYYMMDD-HHMMSS).ext`。原地改写 filename，并输出完整路径。
+ * 返回 1 = 用了新名字，0 = 原名即可（或写入失败）。 */
+static int pick_free_filename(char *filename, int cap, const char *dir,
+                              char *out, int out_cap) {
+    if (!out || out_cap <= 0) return 0;
+    out[0] = '\0';                       /* 任何提前返回都留下一个可判定的空串 */
+    if (!dir || !dir[0]) return 0;
+    if (!filename) return 0;
+    if (!filename[0]) {
+        /* 兜底：状态文件里出现空 filename 时，绝不能让未初始化的路径进 MoveFileW */
+        snprintf(filename, (size_t)cap, "%s", "download.bin");
+    }
+
+    snprintf(out, (size_t)out_cap, "%s\\%s", dir, filename);
+    if (!utf8_file_exists(out)) return 0;
+
+    /* 拆主名与扩展名：以最后一个 '.' 为界；'.' 在首位（.bashrc 这类）视为无扩展名 */
+    char base[300], ext[64];
+    const char *dot = strrchr(filename, '.');
+    if (dot && dot != filename && strlen(dot) < sizeof(ext)) {
+        size_t bl = (size_t)(dot - filename);
+        if (bl >= sizeof(base)) bl = sizeof(base) - 1;
+        memcpy(base, filename, bl); base[bl] = '\0';
+        strcpy(ext, dot);
+    } else {
+        snprintf(base, sizeof(base), "%s", filename);
+        ext[0] = '\0';
+    }
+
+    char cand[400];
+    for (int n = 1; n <= 999; n++) {
+        snprintf(cand, sizeof(cand), "%s (%d)%s", base, n, ext);
+        snprintf(out, (size_t)out_cap, "%s\\%s", dir, cand);
+        if (!utf8_file_exists(out)) {
+            snprintf(filename, (size_t)cap, "%s", cand);
+            return 1;
+        }
+    }
+    /* 极端情况：同名副本已达 999 个，用时间戳保证唯一 */
+    time_t now = time(NULL);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &now);
+#else
+    tmv = *localtime(&now);
+#endif
+    snprintf(cand, sizeof(cand), "%s (%04d%02d%02d-%02d%02d%02d)%s",
+             base, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ext);
+    snprintf(out, (size_t)out_cap, "%s\\%s", dir, cand);
+    snprintf(filename, (size_t)cap, "%s", cand);
+    return 1;
+}
+
+/* 把「打开/重命名文件失败」翻译成用户能看懂的一句话，并保留路径。
+ *
+ * 以前全项目只有一句「无法打开文件: <路径>」：磁盘满、没有写入权限、保存目录被删、
+ * 文件名非法、文件被别的程序占着 —— 提示长得一模一样，用户只能看到一个路径，
+ * 根本不知道该做什么。失败原因（errno / GetLastError）在调用点还是准的，就在这里翻。
+ * 原因文字放**前面**：error_msg 只有 256 字节，长路径会把后半段挤掉。 */
+static void describe_file_error(const char *action, const char *path,
+                                char *out, size_t cap) {
+    int   e = errno;
+    DWORD w = GetLastError();
+    const char *why = NULL;
+
+#ifdef _WIN32
+    switch (w) {
+    case ERROR_DISK_FULL:            why = "磁盘空间不足"; break;
+    case ERROR_HANDLE_DISK_FULL:     why = "磁盘空间不足"; break;
+    case ERROR_ACCESS_DENIED:        why = "没有权限（或文件被其他程序占用）"; break;
+    case ERROR_SHARING_VIOLATION:    why = "文件被其他程序占用"; break;
+    case ERROR_WRITE_PROTECT:        why = "目标磁盘是只读的"; break;
+    case ERROR_NOT_ENOUGH_QUOTA:     why = "超出磁盘配额"; break;
+    case ERROR_PATH_NOT_FOUND:
+    case ERROR_FILE_NOT_FOUND:       why = "保存路径不存在（目录可能已被删除）"; break;
+    case ERROR_INVALID_NAME:
+    case ERROR_BAD_PATHNAME:         why = "文件名或路径含有非法字符"; break;
+    case ERROR_FILENAME_EXCED_RANGE: why = "文件路径过长（Windows 默认上限 260 字符）"; break;
+    default: break;
+    }
+#endif
+    if (!why) {
+        switch (e) {
+        case ENOSPC: why = "磁盘空间不足"; break;
+        case EACCES: why = "没有权限（或文件被其他程序占用）"; break;
+        case ENOENT: why = "保存路径不存在（目录可能已被删除）"; break;
+        case EMFILE: why = "打开的文件过多（句柄耗尽）"; break;
+        case EINVAL: why = "文件名或路径非法"; break;
+        default: break;
+        }
+    }
+    if (!why) why = "未知原因";
+
+    snprintf(out, cap, "%s失败：%s（%s）", action, why, path);
+}
+
+/* 逐级创建目录（UTF-8 路径）。CreateDirectoryW 一次只能建一级、父目录不存在就直接
+ * 失败，所以从卷标之后开始逐段建；目录已存在视为成功。
+ *
+ * 为什么放在引擎里、而不是只靠 GUI 的 mkpath：引擎还有别的入口 —— 从状态文件恢复的
+ * 任务（用户可能已经把那个目录删了）、CLI、以及把 download_core 当库直接用的调用方。
+ * 目录缺失时 utf8_fopen(tmp_path) 会立刻失败，用户只看到「任务失败」，根本看不出
+ * 是路径问题。引擎自己兜底，任何入口都不会因此失败。 */
+static int ensure_dir_utf8(const char *dir) {
+    if (!dir || !dir[0]) return 0;
+#ifdef _WIN32
+    wchar_t w[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, dir, -1, w, 1024) <= 0) return 0;
+
+    for (wchar_t *q = w; *q; q++) if (*q == L'/') *q = L'\\';
+
+    wchar_t *p = w;
+    if (p[0] && p[1] == L':')                p += 2;   /* "C:\..."：跳过卷标 */
+    else if (p[0] == L'\\' && p[1] == L'\\') p += 2;   /* UNC "\\server\..."：跳过前两斜杠 */
+
+    for (; *p; p++) {
+        if (*p != L'\\') continue;
+        *p = L'\0';
+        if (w[0]) CreateDirectoryW(w, NULL);   /* 中间级：失败也无妨，末级会给出结论 */
+        *p = L'\\';
+    }
+    if (CreateDirectoryW(w, NULL)) return 1;
+    return GetLastError() == ERROR_ALREADY_EXISTS;   /* 已存在就是我们要的结果 */
+#else
+    /* 非 Windows：逐级 mkdir，忽略「已存在」。当前目标平台只有 Windows，尽力而为。 */
+    char tmp[1024];
+    size_t n = strlen(dir);
+    if (n >= sizeof(tmp)) return 0;
+    memcpy(tmp, dir, n + 1);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        mkdir(tmp, 0755);
+        *p = '/';
+    }
+    mkdir(tmp, 0755);
+    return 1;
+#endif
+}
+
 /* ─────────────────────────────────────
  * 内部工具
  * ───────────────────────────────────── */
@@ -139,53 +295,158 @@ int64_t dl_time_ms(void) {
 #endif
 }
 
-void dl_infer_filename(const char *url, char *out, int max_len) {
-    if (!url || !out || max_len <= 0) return;
-    const char *p = url;
-    const char *q = strchr(p, '?');
-    size_t len;
-    if (q) len = (size_t)(q - p);
-    else  len = strlen(p);
+/* Windows 保留设备名：以这些名字（扩展名之前的部分）命名的文件即使语法合法
+ * 也创建不了 —— CON/PRN/AUX/NUL/COM1-9/LPT1-9。命中就加前缀 '_'。 */
+static int is_reserved_device_name(const char *name) {
+    static const char *kNames[] = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+    char base[8];
+    int  n = 0;
+    for (const char *p = name; *p && *p != '.' && n < 7; p++) {
+        unsigned char c = (unsigned char)*p;
+        base[n++] = (char)((c >= 'a' && c <= 'z') ? c - 32 : c);
+    }
+    base[n] = '\0';
+    if (!base[0]) return 0;
+    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); i++)
+        if (strcmp(base, kNames[i]) == 0) return 1;
+    return 0;
+}
 
-    const char *fname = p;
-    const char *slash = strrchr(p, '/');
-    if (slash) fname = slash + 1;
+/* 文件名清理（引擎层唯一入口）。
+ *
+ * 背景：`<>:"/\|?*` 和控制字符在 Windows 上会让 CreateFileW 直接返回
+ * ERROR_INVALID_NAME；尾随空格与点会被文件系统**静默吞掉**，表现为「任务显示
+ * 下载成功，但用户按列表里的名字去磁盘上找却找不到」。这两种失败以前都没有
+ * 任何处理 —— URL 带查询串（`?...`）时连 `?` 都会原样进文件名。
+ *
+ * 三处调用：用户显式文件名 / URL 推断名 / Content-Disposition 建议名。
+ * 注：按**字节**清理，UTF-8 多字节序列的每个字节都 >0x7F，不会命中 ':' 这类
+ * ASCII 保留字符，所以中文与 emoji 文件名原样保留。 */
+static void sanitize_filename_utf8(const char *in, char *out, int max_len) {
+    if (!out || max_len <= 0) return;
+    if (max_len < 2) { out[0] = '\0'; return; }
+    if (!in) in = "";
 
-    if (len == 0 || (int)len >= max_len) {
+    int n = 0;
+    for (const char *p = in; *p && n < max_len - 1; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7f) continue;              /* 控制字符直接丢弃 */
+        if (strchr("<>:\"/\\|?*", (int)c)) c = '_';
+        out[n++] = (char)c;
+    }
+    while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '.')) n--;  /* 尾随空格/点 */
+    out[n] = '\0';
+
+    if (n == 0) {                                          /* 全被清掉 → 兜底名 */
         strncpy(out, "download.bin", (size_t)(max_len - 1));
         out[max_len - 1] = '\0';
         return;
     }
-    strncpy(out, fname, len);
-    out[len] = '\00';
+    if (is_reserved_device_name(out)) {
+        char tmp[520];
+        snprintf(tmp, sizeof(tmp), "_%s", out);
+        strncpy(out, tmp, (size_t)(max_len - 1));
+        out[max_len - 1] = '\0';
+    }
+}
+
+/* 从 URL 推断文件名（供引擎内部与外部调用）。
+ * 修掉两个真实缺陷：
+ *   ① 长度按「URL 起点到 ?」算，却从路径最后一段起拷 —— 带查询串的 URL 会把
+ *      `?a=b` 一起当文件名（`a.txt?x=1`），CreateFile 必然失败；
+ *   ② 完全不做字符清理（见 sanitize_filename_utf8）。
+ * 另加 %XX 解码：`My%20File.zip` 以前会存成带 %20 的怪名字。 */
+void dl_infer_filename(const char *url, char *out, int max_len) {
+    if (!url || !out || max_len <= 0) return;
+    if (max_len < 2) { out[0] = '\0'; return; }
+
+    const char *q = strchr(url, '?');                     /* 砍查询串 */
+    size_t url_len = q ? (size_t)(q - url) : strlen(url);
+    const char *h = (const char *)memchr(url, '#', url_len);   /* 砍 fragment */
+    if (h) url_len = (size_t)(h - url);
+
+    const char *fname = url;
+    for (const char *p = url; (size_t)(p - url) < url_len; p++)
+        if (*p == '/') fname = p + 1;
+    size_t len = url_len - (size_t)(fname - url);
+
+    /* %XX 解码（只处理合法十六进制对，其余原样保留） */
+    char raw[512];
+    size_t rn = 0;
+    for (size_t i = 0; i < len && rn < sizeof(raw) - 1; i++) {
+        if (fname[i] == '%' && i + 2 < len) {
+            int hi = -1, lo = -1;
+            unsigned char a = (unsigned char)fname[i + 1];
+            unsigned char b = (unsigned char)fname[i + 2];
+            if (a >= '0' && a <= '9') hi = a - '0';
+            else if (a >= 'a' && a <= 'f') hi = a - 'a' + 10;
+            else if (a >= 'A' && a <= 'F') hi = a - 'A' + 10;
+            if (b >= '0' && b <= '9') lo = b - '0';
+            else if (b >= 'a' && b <= 'f') lo = b - 'a' + 10;
+            else if (b >= 'A' && b <= 'F') lo = b - 'A' + 10;
+            if (hi >= 0 && lo >= 0) {
+                raw[rn++] = (char)((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        raw[rn++] = fname[i];
+    }
+    raw[rn] = '\0';
+
+    /* 空名字（URL 以 / 结尾）交给清理函数走 download.bin 兜底 */
+    sanitize_filename_utf8(rn ? raw : "download.bin", out, max_len);
 }
 
 /* 全局限速节流：在分片线程（线程池 worker）每下载一块后调用。
- * 基于 100ms 滑动窗口：若本窗口内累计下载字节超过配额，
- * 则阻塞（Sleep）剩余时间，使全局总带宽不超过 speed_limit_global。 */
+ *
+ * 虚拟时钟模型：把「累计放行字节」换算成「应当消耗的时间」，实际耗时落后
+ * 于该值就休眠补足差额。与块大小无关 —— 单次写入是 64 KB 还是 4 MB，
+ * 长期速率都收敛到 speed_limit_global。
+ *
+ * 与旧的 100ms 滑动窗口实现相比，实测精度相当（1 MiB @ 256 KB/s：新 4188 ms /
+ * 旧 4140 ms，理论 4000 ms），真正的差别在**响应性**：旧实现算出的 sleep_ms 可以
+ * 到秒级且一次睡到底，暂停/取消要等它睡完才生效；这里切成不超过 250ms 的片，
+ * 暂停最迟 250ms 内响应。另外空闲超过 5 秒重置信用，长时间暂停后恢复不攒突发。 */
 static void throttle_limit(int64_t bytes) {
-    if (g_cfg.speed_limit_global <= 0) return;
+    if (g_cfg.speed_limit_global <= 0 || bytes <= 0) return;
+
+    int64_t sleep_ms = 0;
     EnterCriticalSection(&g_throttle_lock);
     int64_t now = dl_time_ms();
-    if (g_throttle_window_start == 0) {
+    if (g_throttle_window_start == 0) g_throttle_window_start = now;
+
+    int64_t used_ms = now - g_throttle_window_start;
+    /* 空闲过久（分片间隙、暂停）→ 重置信用，否则恢复后会一次性突发 */
+    if (used_ms > g_throttle_bytes * 1000 / g_cfg.speed_limit_global + THROTTLE_IDLE_RESET_MS) {
         g_throttle_window_start = now;
         g_throttle_bytes = 0;
+        used_ms = 0;
     }
-    int64_t elapsed = now - g_throttle_window_start;
-    if (elapsed >= 100) {
-        /* 新窗口：重置计数 */
-        g_throttle_window_start = now;
-        g_throttle_bytes = bytes;
-        LeaveCriticalSection(&g_throttle_lock);
-        return;
-    }
+
     g_throttle_bytes += bytes;
-    int64_t quota = g_cfg.speed_limit_global * elapsed / 1000;  /* 窗口内允许字节 */
-    int64_t sleep_ms = 0;
-    if (g_throttle_bytes > quota)
-        sleep_ms = (g_throttle_bytes - quota) * 1000 / g_cfg.speed_limit_global;
+    int64_t want_ms = g_throttle_bytes * 1000 / g_cfg.speed_limit_global;
+    sleep_ms = want_ms - used_ms;
     LeaveCriticalSection(&g_throttle_lock);
-    if (sleep_ms > 0) Sleep((DWORD)sleep_ms);
+
+    while (sleep_ms > 0) {
+        DWORD s = (sleep_ms > 250) ? 250 : (DWORD)sleep_ms;
+        Sleep(s);
+        sleep_ms -= s;
+    }
+}
+
+/* 限速值变更时重置虚拟时钟：否则会拿旧的累计字节按新速率去算应耗时，
+ * 表现为「刚调完限速的那一块要么不动、要么猛冲」。 */
+static void throttle_reset(void) {
+    EnterCriticalSection(&g_throttle_lock);
+    g_throttle_window_start = 0;
+    g_throttle_bytes = 0;
+    LeaveCriticalSection(&g_throttle_lock);
 }
 
 /* 任务数组始终按 task_id 升序排列（add 追加递增 id；remove 用 memmove 保序；
@@ -360,15 +621,18 @@ static int download_one_chunk(DownloadTask *t, int cid) {
     FILE *fp = utf8_fopen(t->tmp_path, "r+b");
     if (!fp) fp = utf8_fopen(t->tmp_path, "w+b");
     if (!fp) {
+        char why[320];
+        describe_file_error("打开临时文件", t->tmp_path, why, sizeof(why));
         EnterCriticalSection(&g_lock);
         t->status = TASK_FAILED;
-        snprintf(t->error_msg, sizeof(t->error_msg), "无法打开文件: %s", t->tmp_path);
+        snprintf(t->error_msg, sizeof(t->error_msg), "%s", why);
         LeaveCriticalSection(&g_lock);
         return 1;
     }
 
     for (int r = 0; r <= max_retry; r++) {
         int any_failure = 0;
+        int fatal_no_retry = 0;   /* 磁盘满/无权限这类确定性失败：重试不会变好 */
 
         /* 将整个分片拆成 DOWNLOAD_BLOCK_SIZE 的小块循环下载
          * 每块之间检查暂停/取消状态，实现优雅中断。
@@ -421,6 +685,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
                 TRACE("chunk %d: 块下载失败（range=%lld..%lld http=%ld）%s",
                       cid, (long long)block_start, (long long)block_end,
                       result.http_code, result.error_msg);
+                if (result.no_retry) fatal_no_retry = 1;
                 break;  /* 本块失败，跳出小块循环，触发外层重试 */
             }
 
@@ -502,6 +767,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
         }
 
         /* 小块失败后重试（从断点继续） */
+        if (fatal_no_retry) break;    /* 确定性失败（磁盘满/无权限）不再白等重试 */
         c->retry_count++;
         if (r < max_retry)
             Sleep(1000 * (DWORD)(r + 1));
@@ -566,6 +832,11 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
     t->worker_alive++;
     LeaveCriticalSection(&g_lock);
 
+    /* 保存目录兜底：不存在就逐级建出来。放在这里（而不是 dlmgr_add）是因为
+     * 从状态文件恢复的任务不经过 add，而所有下载都必然经过本函数。
+     * 取目录的规则必须与下面拼 tmp_path 的规则一致，否则建了 A 却往 B 里写。 */
+    ensure_dir_utf8(t->save_dir[0] ? t->save_dir : g_cfg.default_save_dir);
+
     /* 预分配临时文件大小 */
     FILE *fp = utf8_fopen(t->tmp_path, "r+b");
     if (!fp) fp = utf8_fopen(t->tmp_path, "w+b");
@@ -574,7 +845,12 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
          * 对 >2GB 的文件会把长度截断甚至变成负数，预分配失败后各分片按错误的文件长度写入，
          * 最终产出大小不对、内容错位的文件，而状态却是「已完成」。 */
         if (t->file_size > 0)
-            _chsize_s(_fileno(fp), (__int64)t->file_size);
+            if (_chsize_s(_fileno(fp), (__int64)t->file_size) != 0)
+                /* 预分配只是优化（无 sparse 支持的文件系统上会真占盘）。失败不在这里
+                 * 判死 —— 但必须留痕：磁盘满时后面的分片写入必然失败，靠这条 trace 才能
+                 * 把「写入磁盘失败」和「预分配就失败了」对上。 */
+                TRACE("预分配 %lld 字节失败（errno=%d），继续尝试写入",
+                      (long long)t->file_size, errno);
         fclose(fp);
     }
 
@@ -629,16 +905,31 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
             snprintf(t->error_msg, sizeof(t->error_msg),
                      "服务器未返回任何内容（可能被拒绝、需登录或链接无效）");
         } else {
-            char final_path[768];
-            snprintf(final_path, sizeof(final_path), "%s\\%s",
-                     t->save_dir, t->filename);
-            utf8_delete(final_path);
+            /* 同名策略：默认自动重命名（`名字 (1).ext`）——**绝不静默删掉用户已有的
+             * 同名文件**。旧实现是无条件 utf8_delete(final_path) 再 move，重新下载一个
+             * 同名文件就会把用户原来的那份直接抹掉，且界面上看不出任何提示。
+             * 只有用户在设置里显式勾了「覆盖同名文件」才走删除分支。
+             * 重命名后会同步 t->filename，所以列表里显示的就是真实落盘名。 */
+            char final_path[1024] = {0};
+            if (g_cfg.overwrite_existing) {
+                snprintf(final_path, sizeof(final_path), "%s\\%s",
+                         t->save_dir, t->filename);
+                utf8_delete(final_path);
+            } else {
+                pick_free_filename(t->filename, sizeof(t->filename),
+                                   t->save_dir, final_path, sizeof(final_path));
+                if (!final_path[0])   /* 兜底，理由同 pick_free_filename 内的注释 */
+                    snprintf(final_path, sizeof(final_path), "%s\\%s",
+                             t->save_dir, t->filename);
+            }
             if (utf8_move(t->tmp_path, final_path)) {
                 t->status     = TASK_COMPLETED;
                 t->downloaded = t->file_size > 0 ? t->file_size : t->downloaded;
             } else {
                 t->status = TASK_FAILED;
-                snprintf(t->error_msg, sizeof(t->error_msg), "文件重命名失败");
+                char why[320];
+                describe_file_error("保存文件（重命名）", final_path, why, sizeof(why));
+                snprintf(t->error_msg, sizeof(t->error_msg), "%s", why);
             }
         }
     }
@@ -701,6 +992,7 @@ int dlmgr_init(const DownloadConfig *cfg) {
         g_cfg.speed_limit_global = 0;
         /* 0 = 不额外封顶（GUI 启动后会经 applyToEngine 下发设置页的真实值） */
         g_cfg.max_conn_per_server = 0;
+        g_cfg.overwrite_existing  = 0;   /* 默认自动重命名，不删同名文件 */
         g_cfg.site_login_count    = 0;
         strncpy(g_cfg.default_save_dir, "C:\\Users\\Public\\Downloads",
                 sizeof(g_cfg.default_save_dir) - 1);
@@ -794,7 +1086,8 @@ int dlmgr_add(const char *url,
     strncpy(t->save_dir, dir, sizeof(t->save_dir) - 1);
 
     if (filename && filename[0]) {
-        strncpy(t->filename, filename, sizeof(t->filename) - 1);
+        /* 用户手填的名字也要过清理：冒号/星号之类会让 CreateFile 直接失败 */
+        sanitize_filename_utf8(filename, t->filename, sizeof(t->filename));
         t->filename_from_user = 1;
     } else {
         dl_infer_filename(url, t->filename, sizeof(t->filename));
@@ -870,8 +1163,9 @@ int dlmgr_start(int task_id) {
         /* 若用户未显式指定文件名，采用服务器建议的文件名（Content-Disposition）。
          * 这能修正大量动态下载链接 / API 下载 / 无扩展名 URL 的文件名错误问题。 */
         if (!t->filename_from_user && probe.suggested_filename[0]) {
-            strncpy(t->filename, probe.suggested_filename, sizeof(t->filename) - 1);
-            t->filename[sizeof(t->filename) - 1] = '\0';
+            /* 服务器给的名字同样不可信（Content-Disposition 里带 : * ? 的都有） */
+            sanitize_filename_utf8(probe.suggested_filename, t->filename,
+                                   sizeof(t->filename));
             snprintf(t->tmp_path, sizeof(t->tmp_path), "%s\\%s.idmtmp",
                      t->save_dir, t->filename);
         }
@@ -1100,6 +1394,7 @@ void dlmgr_set_speed_limit(int bytes_per_sec) {
     EnterCriticalSection(&g_lock);
     g_cfg.speed_limit_global = bytes_per_sec;
     LeaveCriticalSection(&g_lock);
+    throttle_reset();   /* 速率变了就重置虚拟时钟，避免拿旧累计字节按新速率误判 */
 }
 
 void dlmgr_set_proxy(int type, const char *host, int port,
@@ -1525,6 +1820,8 @@ void dlmgr_set_config(const DownloadConfig *cfg) {
     /* 每服务器连接数上限：负数视为无效（当 0 处理 = 不封顶） */
     g_cfg.max_conn_per_server = cfg->max_conn_per_server > 0
                                     ? cfg->max_conn_per_server : 0;
+    /* 同名文件：默认自动重命名；只有显式非 0 才覆盖删除 */
+    g_cfg.overwrite_existing = cfg->overwrite_existing ? 1 : 0;
     /* 站点登录凭据：整表下发，超上限的条目丢弃 */
     int sc = cfg->site_login_count;
     if (sc < 0) sc = 0;
@@ -1535,6 +1832,7 @@ void dlmgr_set_config(const DownloadConfig *cfg) {
         strncpy(g_cfg.default_save_dir, cfg->default_save_dir,
                 sizeof(g_cfg.default_save_dir) - 1);
     LeaveCriticalSection(&g_lock);
+    throttle_reset();   /* 限速可能随本次配置变更，重置虚拟时钟 */
     /* 代理同步到全局请求选项 */
     dlmgr_set_proxy(g_cfg.proxy_type, g_cfg.proxy_host, g_cfg.proxy_port,
                     g_cfg.proxy_user, g_cfg.proxy_pass);

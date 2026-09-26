@@ -8,10 +8,16 @@
 
 ## 1. 技术栈（以代码为准；README 标题句已修正为 WinHTTP + aria2c）
 
+> ⚠️ **网络层已于 2026-09 由 WinHTTP 换成 vendored libcurl**（`src/core/network_curl.c`，
+> curl 8.22.0；旧实现整体迁到 `src/core/legacy/network_winhttp.c`，**不参与编译**）。
+> 换的原因：保住 `core` 的跨平台能力（core 有 non-Windows 桩）。
+> 所以下文凡提到「WinHTTP」的表格行/清单项，请以 `docs/ARCHITECTURE.md` 为准。
+> 本文件其余章节（目录职责、扩展部署、构建）未受影响。
+
 | 层 | 技术 | 说明 |
 |---|---|---|
 | GUI | Qt 6 Widgets (C++17) | 非 QML；主题用 `resources/qss/{light,dark}.qss` |
-| HTTP/HTTPS | **自研纯 C 引擎**（WinHTTP，系统库） | 见 `src/core/network.c`，**不依赖 libcurl** |
+| HTTP/HTTPS | **自研纯 C 引擎**（传输层 libcurl） | 见 `src/core/network_curl.c`；libcurl 为 vendored `third_party/libcurl` |
 | FTP / BT / 磁力 | **aria2c 单守护进程**（JSON-RPC 托管） | 见 `src/protocols/aria2_daemon.cpp`；**不依赖 libtorrent** |
 | 视频流 | yt-dlp（＋ 内置 HLS 解析 + AES-128 纯 C++ 解密） | 见 `src/protocols/video_*`、`hls_downloader.cpp` |
 | 持久化 | SQLite（Qt6::Sql 自带 qsqlite 驱动） | 下载历史 `#46` |
@@ -19,8 +25,8 @@
 | 构建 | CMake（MinGW-w64，Qt6 自编译） | `find_package(Qt6 ...)`，无 vcpkg 依赖 |
 | 浏览器扩展 | Chrome/Edge MV3（纯 JavaScript） | 见 `browser-extension/` |
 
-**平台**：当前仅 Windows 构建可用（manifest 含 Win10/11 `supportedOS`，WinHTTP/aria2 均为 Windows 友好）。
-Qt6 本身跨平台，但纯 C 引擎与 Native Messaging Host 做了 Windows 特化。
+**平台**：当前仅 Windows 构建可用（manifest 含 Win10/11 `supportedOS`，aria2 为 Windows 友好）。
+Qt6 本身跨平台，网络层已是跨平台的 libcurl，但 Native Messaging Host 做了 Windows 特化。
 
 ---
 
@@ -34,7 +40,8 @@ idm-next/
 ├── 开发文档.md                  # 详细开发笔记
 ├── src/
 │   ├── core/                   # ★ 下载引擎核心（纯 C 复用，跨平台）
-│   │   ├── network.c/.h         #   WinHTTP 网络层：协议/Range/重定向/代理/HTTP-2 协商
+│   │   ├── network_curl.c/.h    #   libcurl 网络层：协议/Range/重定向/代理/HTTP-2 协商
+│   │   ├── legacy/network_winhttp.c  # 旧 WinHTTP 实现，仅存档，**不参与编译**
 │   │   ├── download_core.c/.h   #   分段分片调度、断点续传、限速、Content-Disposition 嗅探
 │   │   └── download_manager.cpp #   C 引擎的 C++ Wrapper（DownloadManager，Qt 信号回 GUI）
 │   ├── storage/                # 持久化 + HTML 解析（纯 C 复用）
@@ -100,7 +107,7 @@ idm-next/
 ### 3.1 前置条件
 - Windows 10/11 + MinGW-w64（GCC）或 MSVC
 - Qt 6（Core / Widgets / Network / Charts / Sql），CMake 3.16+
-- 无需 vcpkg；HTTP 走系统 WinHTTP，BT/FTP 走 aria2c（缺失时程序自动下载，见 §6）
+- 无需 vcpkg；HTTP/HTTPS 走 vendored libcurl，BT/FTP 走 aria2c（缺失时程序自动下载，见 §6）
 
 ### 3.2 配置 + 构建
 ```bash
@@ -196,13 +203,13 @@ Host 支持的 action：`add_download`（透传 url/filename/saveDir/queue/**for
   + aria2 `TorrentDownloader::setGlobalSpeedLimit` → 落盘 → 同步工具栏与托盘。
 - 在「设置」里手动改限速值 → 自动记为「自定义」档位。
 
-### 6.2 HTTP/2 协商（HTTPS / ALPN）
-- 引擎层：`src/core/network.c`
-  - 全局开关 `g_http2_enabled`（默认开）；`apply_http2_to_session()` 在 WinHTTP session 上
-    设 `WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL`（启用发 HTTP/2 标志，关闭发 0）。
-  - 老系统（< Win10 1607）不支持则自动回退 HTTP/1.1。
-  - `do_http_request` 在 HEAD 探测后查询 `WINHTTP_OPTION_HTTP_PROTOCOL_USED`，
-    协商成功时 `fprintf("[net] HTTP/2 协商成功: <host>")`（仅 HEAD，避免分片下载刷屏）。
+### 6.2 HTTP/2 协商（HTTPS / ALPN）—— 网络层已换 libcurl，下面是当前实现
+- 引擎层：`src/core/network_curl.c`
+  - 全局开关 `g_http2_enabled`（默认开）；对外接口 `network_set_http2_enabled()`
+  - 每请求设 `CURLOPT_HTTP_VERSION = CURL_HTTP_VERSION_2TLS`（关时用 `_1_1`）；
+    明文 HTTP 自动回退 1.1，服务端不支持则回退 1.1。
+  - 实际协商到的版本由 `CURLINFO_HTTP_VERSION` 回读，写进 `res.http_version`
+    （"HTTP/1.1" / "HTTP/2"），任务列表可直接显示。
   - 运行时开关：`network_set_http2_enabled(int)`（extern "C"），启动与设置变更即时应用。
 - 设置项：`Settings::http2Enabled`（默认 true），「连接」页复选框；`accept` 内实时应用。
 - 注意：**HTTP/2 仅在 HTTPS（ALPN）协商**；明文 HTTP 自动回退 1.1。**验证**：`--cli` 模式下

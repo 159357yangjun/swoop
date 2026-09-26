@@ -68,7 +68,7 @@ typedef struct {
     char        save_dir[ 512];   /* 保存目录 */
     char        filename[256];   /* 文件名（含扩展名） */
     int         filename_from_user; /* 1=用户显式指定，0=从URL自动推断（可被服务器 Content-Disposition 覆盖） */
-    char        tmp_path[768];   /* 临时下载路径 */
+    char        tmp_path[1024];  /* 临时下载路径（须容下 save_dir(512)+filename(256)+后缀） */
 
     int64_t     file_size;       /* 远程文件大小，-1=未知 */
     int64_t     downloaded;      /* 已下载总字节 */
@@ -147,6 +147,10 @@ typedef struct {
     /* 每服务器连接数上限：对单个任务并发到同一主机的连接数封顶。
      * 与「每任务最大线程数」取较小值生效（任一为 0/负数表示不限，用另一个）。 */
     int  max_conn_per_server;
+    /* 目标文件已存在时：0（默认）= 自动重命名为「名字 (1).ext」，1 = 覆盖删除。
+     * 默认不覆盖 —— 静默删除用户已有文件是不可接受的副作用，而重命名可以在
+     * 界面上直接看到真实落盘名。设置页「下载」→「同名文件」。 */
+    int  overwrite_existing;
     /* 站点登录凭据：命中 URL 的任务自动带 HTTP 认证（libcurl CURLAUTH_ANY） */
     SiteCredential site_logins[MAX_SITE_LOGINS];
     int  site_login_count;

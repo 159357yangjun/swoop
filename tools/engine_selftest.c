@@ -240,6 +240,11 @@ static void server_dump_stats(int port, const char *tag)
 
 int main(int argc, char **argv)
 {
+    /* 关掉 stdout 缓冲：自测若在收尾阶段崩掉，全缓冲会把最后一批输出整体丢掉，
+     * 现场只剩半句断言文字，完全看不出后面发生了什么。
+     * （真实踩过：输出停在「多级目录」，实际是缓冲未 flush。） */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     int port = (argc > 1) ? atoi(argv[1]) : 18080;
     const char *user = (argc > 2) ? argv[2] : "idmuser";
     const char *pass = (argc > 3) ? argv[3] : "idmpass";
@@ -819,6 +824,368 @@ int main(int argc, char **argv)
         dlmgr_remove(9102);
         dlmgr_remove(9103);
         utf8_delete(fp);
+    }
+
+    /* ── 12. 全局限速：节流必须真的作用在吞吐上 ──
+     * 1 MiB 文件 + 256 KB/s，理论耗时 4000 ms，断言 >= 2400 ms；再配一条不限速对照，
+     * 防止「机器就是慢」蒙混过关。
+     *
+     * 实测（本机）：新虚拟时钟 4188 ms、旧 100ms 滑窗 4140 ms —— 两者精度相当，
+     * 所以本项**不是**用来区分新旧实现的，而是「限速器被改坏」的回归闸门：
+     * 把 throttle_limit 改成直接 return（模拟限速失效）后实测 109 ms，
+     * 本项立刻变红（40 通过变 38 通过、2 失败，退出码 0 变 2）。 */
+    printf("\n[12] 全局限速 256 KB/s：耗时必须接近理论值\n");
+    {
+        char small[512], d[240];
+        snprintf(small, sizeof(small), "http://127.0.0.1:%d/small.bin", port);
+
+        const int     LIMIT   = 256 * 1024;                              /* 256 KB/s */
+        const int64_t WANT_MS = (int64_t)(1024 * 1024) * 1000 / LIMIT;   /* 1 MiB ⇒ 4000 ms */
+
+        dlmgr_set_speed_limit(LIMIT);
+        int64_t t0 = dl_time_ms();
+        int id = dlmgr_add(small, outdir, "throttle_limited.bin", 2, NULL, NULL, NULL, NULL);
+        check("限速任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            int64_t dt = dl_time_ms() - t0;
+
+            snprintf(d, sizeof(d),
+                     "256 KB/s 下 1 MiB 耗时 %lld ms（理论 %lld ms，判定下限 %lld ms）",
+                     (long long)dt, (long long)WANT_MS, (long long)(WANT_MS * 6 / 10));
+            printf("    · 实测 %lld ms / 理论 %lld ms（%d%%）\n",
+                   (long long)dt, (long long)WANT_MS,
+                   (int)(WANT_MS > 0 ? dt * 100 / WANT_MS : 0));
+            check("限速下载完成且耗时 ≥ 理论值 60%（未走块放行的空子）",
+                  st == 3 && dt >= WANT_MS * 6 / 10, d);
+
+            /* 不限速对照：同样的文件必须明显更快，否则上面的「慢」可能另有原因 */
+            dlmgr_set_speed_limit(0);
+            int64_t t1 = dl_time_ms();
+            int id2 = dlmgr_add(small, outdir, "throttle_free.bin", 2, NULL, NULL, NULL, NULL);
+            if (id2 >= 0) {
+                dlmgr_start(id2);
+                int st2 = 0; int64_t dl2 = 0;
+                wait_task(id2, 60000, &st2, &dl2);
+                int64_t dt2 = dl_time_ms() - t1;
+                snprintf(d, sizeof(d), "不限速 %lld ms vs 限速 %lld ms",
+                         (long long)dt2, (long long)dt);
+                check("取消限速后明显更快（证明限速确实在起作用）",
+                      st2 == 3 && dt2 * 2 < dt, d);
+                dlmgr_remove(id2);
+            }
+            dlmgr_remove(id);
+        }
+        dlmgr_set_speed_limit(0);
+    }
+
+    /* ── 13. 保存目录不存在（多级）→ 引擎必须自己建出来 ──
+     * 真实场景：用户删掉了「下载/视频」这类归档子目录，或从状态文件恢复的任务指向
+     * 一个已被删掉的目录。目录缺失时 utf8_fopen(tmp_path) 直接失败，用户只看到
+     * 「任务失败」，完全看不出是路径问题。
+     * GUI 的 task_controller 会 mkpath，但引擎不能依赖调用方 —— 恢复路径、CLI、
+     * 以及把 download_core 当库用的调用方全都绕过它。所以引擎自己在
+     * start_task_threads 里兜底。
+     * 这里特意用**两级**目录：CreateDirectoryW 一次只能建一级，父目录不存在就失败，
+     * 只写单级目录的实现在本项会红。 */
+    printf("\n[13] 保存目录不存在（多级）→ 必须自动创建并下载成功\n");
+    {
+        char d1[MAX_PATH + 64], d2[MAX_PATH + 64], got_path[MAX_PATH + 128], d[260];
+        char small2[512];
+        snprintf(small2, sizeof(small2), "http://127.0.0.1:%d/small.bin", port);
+        snprintf(d1, sizeof(d1), "%s\\dirfix_missing", outdir);
+        snprintf(d2, sizeof(d2), "%s\\sub", d1);
+        snprintf(got_path, sizeof(got_path), "%s\\dirfix.bin", d2);
+
+        /* 清掉上次残留，保证目标目录**真的**不存在（否则本项什么都没验证） */
+        utf8_delete(got_path);
+        RemoveDirectoryA(d2);
+        RemoveDirectoryA(d1);
+        snprintf(d, sizeof(d), "目标目录 = %s", d2);
+        check("目标多级目录预先确实不存在",
+              GetFileAttributesA(d2) == INVALID_FILE_ATTRIBUTES, d);
+
+        int id = dlmgr_add(small2, d2, "dirfix.bin", 2, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            snprintf(d, sizeof(d), "status=%d downloaded=%lld", st, (long long)dl);
+            check("保存目录不存在时下载仍然成功（status=3）", st == 3, d);
+
+            long fsz = file_size_of(got_path);
+            snprintf(d, sizeof(d), "落盘 %s = %ld 字节", got_path, fsz);
+            check("文件确实落在被自动创建的多级目录里", fsz > 0, d);
+
+            dlmgr_remove(id);
+            utf8_delete(got_path);
+        }
+    }
+
+    /* ── 14. 文件名含 Windows 非法字符 → 必须清理后下载成功 ──
+     * 三个真实来源：URL 路径里带冒号（老站点很常见）、服务器 Content-Disposition
+     * 给出 "re:port?.pdf"、用户手输带 '*' 的名字。CreateFileW 碰到这些字符直接失败，
+     * 用户只看到「任务失败」，根本看不出是文件名的问题。
+     * 断言不绑定具体替换规则，只要求两件事：下载成功 + 最终文件名不含非法字符。 */
+    printf("\n[14] 文件名含 Windows 非法字符（: ? * | < > \"）→ 清理后仍成功\n");
+    {
+        char d[400], small3[512];
+        snprintf(small3, sizeof(small3), "http://127.0.0.1:%d/small.bin", port);
+
+        int id = dlmgr_add(small3, outdir, "bad:na*me?.bin", 2, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+
+            TaskInfo ti;
+            memset(&ti, 0, sizeof(ti));
+            dlmgr_get_task_info(id, &ti);
+
+            int bad = 0;
+            for (const char *p = ti.filename; *p; p++)
+                if (strchr("<>:\"/\\|?*", *p) || (unsigned char)*p < 0x20) { bad = 1; break; }
+
+            snprintf(d, sizeof(d), "status=%d 最终文件名=\"%s\"", st, ti.filename);
+            check("含非法字符的文件名被清理且下载成功",
+                  st == 3 && ti.filename[0] != '\0' && !bad, d);
+
+            char fpath[MAX_PATH + 320];
+            snprintf(fpath, sizeof(fpath), "%s\\%s", outdir, ti.filename);
+            long fsz = file_size_of(fpath);
+            snprintf(d, sizeof(d), "%s = %ld 字节", fpath, fsz);
+            check("清理后的文件确实落盘（不是只改了个名字）", fsz > 0, d);
+
+            dlmgr_remove(id);
+            utf8_delete(fpath);
+        }
+    }
+
+    /* ── [15] dl_infer_filename 纯函数单元测试（不需要网络）──
+     * 这里钉的是两个曾经真实存在的行为：
+     *   ① 带查询串的 URL 以前会把 "?x=1" 一起当文件名（长度按 URL 起点算，
+     *      却从路径最后一段起拷）；
+     *   ② 任何非法字符以前原样落盘。 */
+    printf("\n[15] dl_infer_filename 纯函数：查询串/%%XX/保留设备名\n");
+    {
+        struct { const char *url; const char *want; } cases[] = {
+            { "http://h/a/file.zip",            "file.zip" },
+            { "http://h/a/file.zip?token=1&x=2","file.zip" },   /* ← ①：不得含 ? */
+            { "http://h/a/file.zip#frag",       "file.zip" },   /* ← fragment */
+            { "http://h/My%20Big%20File.zip",   "My Big File.zip" },
+            { "http://h/a/",                    "download.bin" },
+            { "http://h/dl?name=x",             "dl" },
+            { "http://h/a/t:es*t|.bin",         "t_es_t_.bin" },
+            { "http://h/a/CON.txt",             "_CON.txt" },   /* ← 保留设备名 */
+            { "http://h/a/尾部空格 .bin ",      "尾部空格 .bin" },
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char got[300];
+            dl_infer_filename(cases[i].url, got, (int)sizeof(got));
+            char d[600];
+            snprintf(d, sizeof(d), "url=\"%s\" → \"%s\"（期望 \"%s\"）",
+                     cases[i].url, got, cases[i].want);
+            check("推断名正确", strcmp(got, cases[i].want) == 0, d);
+        }
+    }
+
+    /* ── [16] 同名文件策略：默认自动重命名，绝不静默删除 ──
+     * 旧实现是无条件 utf8_delete(final_path) 再 move：用户磁盘上已有的同名文件
+     * 会被直接抹掉，界面上毫无提示。这里用一个「内容可辨认」的占位文件来验：
+     * 下载同名文件后，原来那个文件必须还在、内容一字不变。 */
+    printf("\n[16] 同名文件：默认自动重命名（不覆盖、不删除）\n");
+    {
+        char url2[512];
+        snprintf(url2, sizeof(url2), "http://127.0.0.1:%d/small.bin", port);
+
+        /* 造一个「用户已有文件」：固定内容 */
+        char exist_path[MAX_PATH + 320];
+        snprintf(exist_path, sizeof(exist_path), "%s\\same.bin", outdir);
+        const char *kKeep = "USER-ORIGINAL-DATA-KEEP-ME";   /* 26 字节 */
+        {
+            long w = utf8_write_file(exist_path, kKeep);
+            char d[600];
+            snprintf(d, sizeof(d), "%s = %ld 字节", exist_path, w);
+            check("占位文件写入成功", w == (long)strlen(kKeep), d);
+        }
+
+        int id = dlmgr_add(url2, outdir, "same.bin", 2, NULL, NULL, NULL, NULL);
+        check("同名任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            TaskInfo ti; memset(&ti, 0, sizeof(ti));
+            dlmgr_get_task_info(id, &ti);
+
+            char d[600];
+            snprintf(d, sizeof(d), "status=%d 落盘名=\"%s\"", st, ti.filename);
+            check("同名下载仍然成功", st == 3, d);
+
+            snprintf(d, sizeof(d), "\"%s\"（期望含 \"(1)\"）", ti.filename);
+            check("落盘名被自动改成「名字 (1).ext」", strstr(ti.filename, "(1)") != NULL, d);
+
+            /* 命门：原文件必须在，且内容一字未改 */
+            long keep_sz = file_size_of(exist_path);
+            snprintf(d, sizeof(d), "\"%s\" = %ld 字节（期望 %zu）",
+                     exist_path, keep_sz, strlen(kKeep));
+            check("原来那个同名文件仍然存在", keep_sz == (long)strlen(kKeep), d);
+
+            char buf[64]; memset(buf, 0, sizeof(buf));
+            long rd = utf8_read_file(exist_path, buf, sizeof(buf) - 1);
+            snprintf(d, sizeof(d), "读回 \"%s\"（%ld 字节）", buf, rd);
+            check("原文件内容一字未改（没有被覆盖/截断）",
+                  rd == (long)strlen(kKeep) && strcmp(buf, kKeep) == 0, d);
+
+            /* 新文件确实落在 (1) 上 */
+            char new_path[MAX_PATH + 320];
+            snprintf(new_path, sizeof(new_path), "%s\\%s", outdir, ti.filename);
+            snprintf(d, sizeof(d), "%s = %ld 字节", new_path, file_size_of(new_path));
+            check("新文件落在改名后的路径上", file_size_of(new_path) > 0, d);
+
+            dlmgr_remove(id);
+            utf8_delete(new_path);
+        }
+
+        /* 反向：显式开启 overwrite_existing 时才允许覆盖 */
+        {
+            DownloadConfig c = dlmgr_get_config();
+            c.overwrite_existing = 1;
+            dlmgr_set_config(&c);
+            int id = dlmgr_add(url2, outdir, "same.bin", 2, NULL, NULL, NULL, NULL);
+            if (id >= 0) {
+                dlmgr_start(id);
+                int st = 0; int64_t dl = 0;
+                wait_task(id, 60000, &st, &dl);
+                TaskInfo ti; memset(&ti, 0, sizeof(ti));
+                dlmgr_get_task_info(id, &ti);
+                char d[600];
+                snprintf(d, sizeof(d), "status=%d 落盘名=\"%s\"", st, ti.filename);
+                check("勾选「覆盖同名文件」后按原名覆盖",
+                      st == 3 && strcmp(ti.filename, "same.bin") == 0, d);
+                dlmgr_remove(id);
+            }
+            c.overwrite_existing = 0;      /* 还原，别影响后续用例 */
+            dlmgr_set_config(&c);
+        }
+        utf8_delete(exist_path);
+    }
+
+    /* ── [17] 打开失败必须说人话（以前只有一句「无法打开文件: <路径>」）──
+     * 两个确定性场景：
+     *   ① 保存目录其实是个**普通文件** → 路径不成立；
+     *   ② 临时文件被设成**只读** → 没有写入权限。
+     * 断言点不是「任务失败」（那本来就该失败），而是**错误文案里有没有原因**。 */
+    printf("\n[17] 打开失败的错误文案必须带原因\n");
+    {
+        char u[512];
+        snprintf(u, sizeof(u), "http://127.0.0.1:%d/small.bin", port);
+
+        /* ① 保存目录是一个普通文件 */
+        char fake_dir[MAX_PATH + 320];
+        snprintf(fake_dir, sizeof(fake_dir), "%s\\not_a_dir", outdir);
+        utf8_write_file(fake_dir, "x");           /* 建一个同名普通文件 */
+        int id = dlmgr_add(u, fake_dir, "a.bin", 2, NULL, NULL, NULL, NULL);
+        check("路径不成立时任务仍能创建（错误在启动后暴露）", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            TaskInfo ti; memset(&ti, 0, sizeof(ti));
+            dlmgr_get_task_info(id, &ti);
+            char d[600];
+            snprintf(d, sizeof(d), "status=%d msg=\"%s\"", st, ti.error_msg);
+            check("保存目录是文件 → 任务失败", st == 4, d);
+            check("文案带「打开临时文件失败」前缀（不是光一个路径）",
+                  strstr(ti.error_msg, "打开临时文件失败") != NULL, d);
+            check("文案给出了具体原因（没落到「未知原因」）",
+                  strstr(ti.error_msg, "未知原因") == NULL
+                  && strstr(ti.error_msg, "失败：") != NULL, d);
+            check("不再是旧的无信息量文案", strncmp(ti.error_msg, "无法打开文件: ", 13) != 0, d);
+            dlmgr_remove(id);
+        }
+        utf8_delete(fake_dir);
+
+        /* ② 临时文件只读 */
+        char ro_tmp[MAX_PATH + 320];
+        snprintf(ro_tmp, sizeof(ro_tmp), "%s\\rofile.bin.idmtmp", outdir);
+        utf8_write_file(ro_tmp, "seed");
+        {
+            wchar_t w[1024];
+            int attrSet = 0;
+            if (MultiByteToWideChar(CP_UTF8, 0, ro_tmp, -1, w, 1024) > 0)
+                attrSet = SetFileAttributesW(w, FILE_ATTRIBUTE_READONLY) ? 1 : 0;
+            check("临时文件已设为只读", attrSet == 1, ro_tmp);
+        }
+        id = dlmgr_add(u, outdir, "rofile.bin", 2, NULL, NULL, NULL, NULL);
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+            TaskInfo ti; memset(&ti, 0, sizeof(ti));
+            dlmgr_get_task_info(id, &ti);
+            char d[600];
+            snprintf(d, sizeof(d), "status=%d msg=\"%s\"", st, ti.error_msg);
+            check("只读临时文件 → 任务失败", st == 4, d);
+            check("文案指出是权限/占用问题",
+                  strstr(ti.error_msg, "权限") != NULL
+                  || strstr(ti.error_msg, "占用") != NULL
+                  || strstr(ti.error_msg, "只读") != NULL, d);
+            dlmgr_remove(id);
+        }
+        {   /* 清只读属性再删，否则删不掉 */
+            wchar_t w[1024];
+            if (MultiByteToWideChar(CP_UTF8, 0, ro_tmp, -1, w, 1024) > 0)
+                SetFileAttributesW(w, FILE_ATTRIBUTE_NORMAL);
+        }
+        utf8_delete(ro_tmp);
+    }
+
+    /* ── [18] 写盘失败不得伪装成「网络错误」/「HTTP 错误: 206」──
+     * 直接把一个**只读句柄**交给分片下载函数（这是公开 API 允许的用法），
+     * fwrite 必然短写 → libcurl 回 CURLE_WRITE_ERROR。修好之前这里会返回
+     * success=1（只看到 code=206 与少量已写字节），或者报英文
+     * "网络错误: Failed writing received data to disk/application"。 */
+    printf("\n[18] 写盘失败 → 必须是「写入磁盘失败：<中文原因>」\n");
+    {
+        char u[512];
+        snprintf(u, sizeof(u), "http://127.0.0.1:%d/small.bin", port);
+
+        char seed[MAX_PATH + 320];
+        snprintf(seed, sizeof(seed), "%s\\ro_handle.bin", outdir);
+        utf8_write_file(seed, "seed");
+
+        FILE *ro = utf8_fopen_rb(seed);      /* 只读打开 */
+        check("只读句柄打开成功", ro != NULL, seed);
+        if (ro) {
+            NetOptions opt = network_default_options();
+            /* 本地自测服务器对 /small.bin 要求 Basic 认证；不带上会先拿 401，
+             * 根本走不到写盘那一步。 */
+            opt.auth_user = user;
+            opt.auth_pass = pass;
+            NetDownloadTask nd; memset(&nd, 0, sizeof(nd));
+            nd.url = u; nd.save_path = seed;
+            nd.range_start = 0; nd.range_end = -1;
+            nd.opt = &opt;
+
+            NetDownloadResult r = network_download_range_fp(&nd, ro);
+            fclose(ro);
+
+            char d[600];
+            snprintf(d, sizeof(d), "success=%d no_retry=%d http=%ld msg=\"%s\"",
+                     r.success, r.no_retry, r.http_code, r.error_msg);
+            check("写盘失败必须判为失败", r.success == 0, d);
+            check("标记为不可重试（磁盘/权限问题重试没意义）", r.no_retry == 1, d);
+            check("文案是「写入磁盘失败：<原因>」", strstr(r.error_msg, "写入磁盘失败") != NULL, d);
+            check("不再暴露英文的 Failed writing / CURLE 文案",
+                  strstr(r.error_msg, "Failed writing") == NULL
+                  && strstr(r.error_msg, "网络错误") == NULL, d);
+        }
+        utf8_delete(seed);
     }
 
     dlmgr_destroy();

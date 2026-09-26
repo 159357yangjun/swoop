@@ -34,6 +34,7 @@
 #include <QStatusBar>
 #include <QToolButton>
 #include <QSpinBox>
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QPushButton>
 #include <QNetworkProxy>
@@ -421,6 +422,43 @@ int main(int argc, char** argv) {
                spinFound ? (changedMarked ? "已记为自定义(-1)" : "★没记成自定义")
                          : "★没定位到限速输入框（SKIP）");
 
+        /* ③ 同名文件策略：走完整链路「设置页勾选 → Settings → 引擎 cfg.overwrite_existing」。
+         *    只验 QSettings 存盘是不够的 —— 本项目反复栽在「存了盘但没人读」。所以这里
+         *    在两个方向上都点一次「确定」，再直接读引擎的运行时配置。 */
+        bool owFound = false, owDefaultOff = false, owOnWorks = false;
+        {
+            auto findOwBox = [](SettingsDialog& dlg) -> QCheckBox* {
+                QCheckBox* hit = nullptr; int n = 0;
+                for (QCheckBox* cb : dlg.findChildren<QCheckBox*>())
+                    if (cb->text().contains(QStringLiteral("覆盖同名文件"))) { hit = cb; n++; }
+                return (n == 1) ? hit : nullptr;      /* 命中不唯一 = 定位方式失效 */
+            };
+            /* 默认方向：不勾 → 引擎必须收到 0（自动重命名） */
+            { Settings s; s.load(); SettingsDialog dlg(s);
+              QCheckBox* box = findOwBox(dlg);
+              owFound = (box != nullptr);
+              if (owFound) {
+                  printf("[settings] 同名文件复选框默认状态 = %d（期望 0=自动重命名）\n",
+                         box->isChecked() ? 1 : 0);
+                  pressOk(dlg);
+                  owDefaultOff = (dlmgr_get_config().overwrite_existing == 0);
+              } }
+            /* 反向：勾上 → 引擎必须收到 1（覆盖） */
+            { Settings s; s.load(); SettingsDialog dlg(s);
+              QCheckBox* box = findOwBox(dlg);
+              if (box) {
+                  box->setChecked(true);
+                  pressOk(dlg);
+                  owOnWorks = (dlmgr_get_config().overwrite_existing == 1);
+              } }
+            /* 还原默认，别把「覆盖」留在配置里 */
+            { Settings s; s.load(); s.setOverwriteExisting(false); s.save(); s.applyToEngine(); }
+            printf("[settings] 同名文件下发到引擎: %s\n",
+                   owFound ? (owDefaultOff && owOnWorks ? "勾选/不勾选 两个方向都对"
+                                                        : "★引擎收到的值与界面不一致")
+                           : "★没定位到同名文件复选框（SKIP）");
+        }
+
         /* ② 代理凭据：存一套代理设置，建 MainWindow（构造里会 applyNetworkProxy），
          *    读 Qt 的应用级代理配置。 */
         const QNetworkProxy prevProxy = QNetworkProxy::applicationProxy();
@@ -448,10 +486,12 @@ int main(int argc, char** argv) {
         printf("%s 未改限速时档位保持原样（不被误标为自定义）\n", modeKept     ? "[PASS]" : "[FAIL]");
         printf("%s 真改限速时档位记为自定义\n",                changedMarked ? "[PASS]" : "[FAIL]");
         printf("%s 代理用户名密码已下发到 Qt 网络栈\n",        proxyOk       ? "[PASS]" : "[FAIL]");
+        printf("%s 同名文件策略下发到引擎（默认不覆盖 + 勾选后覆盖）\n",
+               (owDefaultOff && owOnWorks) ? "[PASS]" : "[FAIL]");
 
         QFile::remove(iniPath);
         if (createdMark) QFile::remove(markPath);
-        return (modeKept && changedMarked && proxyOk) ? 0 : 1;
+        return (modeKept && changedMarked && proxyOk && owDefaultOff && owOnWorks) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_CONCURRENCY_PROBE=1 ──
