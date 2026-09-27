@@ -1,7 +1,12 @@
 name: ci
 
-# 每次推送 / PR 都执行：编译、自测、依赖约束、发行包测试与可下载 CI artifact。
-on: [push, pull_request, workflow_dispatch]
+# main 直接提交与面向 main 的 PR 执行完整验证；避免 feature 分支 push + PR 重复跑两次。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
