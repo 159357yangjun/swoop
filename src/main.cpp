@@ -29,18 +29,23 @@
 // 避免重复 dlmgr_init 和第二个实例抢占 IPC server。
 static const char* IPC_SERVER_NAME = "idm-next-ipc";
 
+enum class ForwardResult {
+    NotConnected,
+    Success,
+    Failure
+};
+
 /**
- * 尝试连接正在运行的 GUI 实例
- * @param cliArgs 要转发的命令参数
- * @param printResponse 是否把 GUI 返回消息打印到 stdout（GUI 启动转发时关闭）
- * @return true=已连接并转发成功（应直接退出），false=无 GUI 在运行（继续当前实例）
+ * 尝试连接正在运行的 GUI 实例。
+ * NotConnected 表示当前没有 GUI，可继续启动本实例；Success/Failure 都表示已存在 GUI，
+ * 调用方不应再启动第二套引擎。CLI 可据 Success/Failure 返回正确进程退出码。
  */
-static bool tryForwardToGui(const QStringList& cliArgs, bool printResponse = true)
+static ForwardResult tryForwardToGui(const QStringList& cliArgs, bool printResponse = true)
 {
     QLocalSocket socket;
     socket.connectToServer(QLatin1String(IPC_SERVER_NAME));
     if (!socket.waitForConnected(500))
-        return false;  // 无 GUI 在运行
+        return ForwardResult::NotConnected;
 
     // 构造 JSON 消息
     QJsonObject obj;
@@ -50,7 +55,7 @@ static bool tryForwardToGui(const QStringList& cliArgs, bool printResponse = tru
     for (int i = 0; i < cliArgs.size(); ++i) {
         const QString& a = cliArgs[i];
         if (a == QStringLiteral("add"))
-            continue;  // 跳过 add 命令本身
+            continue;
         if (a == QStringLiteral("--dir") && i + 1 < cliArgs.size())
             obj["dir"] = cliArgs[++i];
         else if (a == QStringLiteral("--name") && i + 1 < cliArgs.size())
@@ -58,14 +63,14 @@ static bool tryForwardToGui(const QStringList& cliArgs, bool printResponse = tru
         else if (a == QStringLiteral("--threads") && i + 1 < cliArgs.size())
             obj["threads"] = cliArgs[++i].toInt();
         else if (a == QStringLiteral("--format") && i + 1 < cliArgs.size())
-            obj["format"] = cliArgs[++i];   // 视频画质（yt-dlp -f 选择串）
+            obj["format"] = cliArgs[++i];
         else if (a == QStringLiteral("--no-wait"))
             obj["no_wait"] = true;
         else if (!a.startsWith(QLatin1String("--")))
-            obj["url"] = a;  // 非 flag 的参数 = URL
+            obj["url"] = a;
     }
 
-    // 如果命令不是 add（比如 list/activate），直接按首参数转发
+    // 如果命令不是 add（比如 list/start/pause/activate），直接按首参数转发
     if (!cliArgs.isEmpty() && cliArgs.first() != QStringLiteral("add")) {
         obj["command"] = cliArgs.first();
         if (cliArgs.size() > 1)
@@ -75,25 +80,28 @@ static bool tryForwardToGui(const QStringList& cliArgs, bool printResponse = tru
     QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
     socket.write(data);
     socket.flush();
-    socket.waitForBytesWritten(2000);
+    if (!socket.waitForBytesWritten(2000)) {
+        socket.disconnectFromServer();
+        return ForwardResult::Failure;
+    }
 
-    // 读取 GUI 的响应
     if (socket.waitForReadyRead(3000)) {
         QByteArray response = socket.readAll();
         QJsonDocument doc = QJsonDocument::fromJson(response);
         QJsonObject respObj = doc.object();
+        const bool success = respObj.value("success").toBool(false);
         QString message = respObj.value("message").toString();
         if (printResponse && !message.isEmpty()) {
-            QTextStream out(stdout);
-            out << message << "\n";
-            out.flush();
+            QTextStream stream(success ? stdout : stderr);
+            stream << message << "\n";
+            stream.flush();
         }
         socket.disconnectFromServer();
-        return true;
+        return success ? ForwardResult::Success : ForwardResult::Failure;
     }
 
     socket.disconnectFromServer();
-    return true;  // 即使没收到响应也算转发成功（GUI 可能正在处理）
+    return ForwardResult::Failure;
 }
 
 // WIN32 子系统下（GUI 可执行文件）无默认控制台；CLI 模式需用 AllocConsole 分配一个，
@@ -104,7 +112,6 @@ static void ensureConsole()
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
         AllocConsole();
     }
-    // 释放并重新绑定标准流到控制台设备
     if (freopen("CONOUT$", "w", stdout) == nullptr) { /* 忽略 */ }
     if (freopen("CONOUT$", "w", stderr) == nullptr) { /* 忽略 */ }
     if (freopen("CONIN$",  "r", stdin)  == nullptr) { /* 忽略 */ }
@@ -113,7 +120,6 @@ static void ensureConsole()
 
 int main(int argc, char* argv[])
 {
-    // ── 解析运行模式 ──
     bool cliMode = false;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
@@ -124,11 +130,9 @@ int main(int argc, char* argv[])
     }
 
     if (cliMode) {
-        // WIN32 子系统不会自动得到 C runtime 控制台；必须在“尝试 IPC 转发”之前就绑定，
-        // 否则 GUI 已运行时的 list/help 等转发结果会写到不可见的 stdout。
+        // WIN32 子系统不会自动得到 C runtime 控制台；必须在“尝试 IPC 转发”之前就绑定。
         ensureConsole();
 
-        // 提取 CLI 实际参数（去掉 --cli/-c 标志）
         QStringList cliArgs;
         for (int i = 1; i < argc; ++i) {
             QString a = QString::fromLocal8Bit(argv[i]);
@@ -137,11 +141,9 @@ int main(int argc, char* argv[])
             cliArgs.append(a);
         }
 
-        // 尝试转发到正在运行的 GUI 实例
-        // 如果是 list/start/pause 等查询命令，也转发
-        if (tryForwardToGui(cliArgs)) {
-            return 0;  // 已转发给 GUI，无需启动引擎
-        }
+        ForwardResult forwarded = tryForwardToGui(cliArgs);
+        if (forwarded != ForwardResult::NotConnected)
+            return forwarded == ForwardResult::Success ? 0 : 1;
 
         // 无 GUI 在运行，独立 CLI 模式
         dlmgr_init(nullptr);
@@ -153,7 +155,7 @@ int main(int argc, char* argv[])
         QCoreApplication::setApplicationName(QStringLiteral("IDM Next"));
         QCoreApplication::setApplicationVersion(QString::fromLatin1(IDM_NEXT_VERSION));
 
-        cliArgs.prepend(QString::fromLocal8Bit(argv[0]));  // 保留程序名
+        cliArgs.prepend(QString::fromLocal8Bit(argv[0]));
 
         CliApp cli;
         int rc = cli.run(cliArgs);
@@ -162,7 +164,6 @@ int main(int argc, char* argv[])
     }
 
     // ── GUI 模式 ──
-    // 收集位置参数中的 URL（供 magnet / 浏览器协议关联、文件拖拽等）
     QString extUrl;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
@@ -178,14 +179,12 @@ int main(int argc, char* argv[])
     }
 
     // 已存在 GUI：带 URL 时转发添加任务；普通二次启动则只激活已有窗口。
-    // 这样不会出现两个 GUI 同时运行、后启动实例 removeServer() 抢掉 IPC 的情况。
-    if (!extUrl.isEmpty()) {
-        if (tryForwardToGui(QStringList() << QStringLiteral("add") << extUrl, false))
-            return 0;
-    } else {
-        if (tryForwardToGui(QStringList() << QStringLiteral("activate"), false))
-            return 0;
-    }
+    // Success/Failure 都必须退出，避免命令失败时反而启动第二套引擎并抢 IPC。
+    ForwardResult forwarded = !extUrl.isEmpty()
+        ? tryForwardToGui(QStringList() << QStringLiteral("add") << extUrl, false)
+        : tryForwardToGui(QStringList() << QStringLiteral("activate"), false);
+    if (forwarded != ForwardResult::NotConnected)
+        return forwarded == ForwardResult::Success ? 0 : 1;
 
     dlmgr_init(nullptr);
     Settings settings;
@@ -196,7 +195,6 @@ int main(int argc, char* argv[])
     QApplication::setApplicationName(QStringLiteral("IDM Next"));
     QApplication::setApplicationVersion(QString::fromLatin1(IDM_NEXT_VERSION));
 
-    // 安装简体中文按钮翻译（OK→确定、Cancel→取消…），保持界面语言一致
     installZhCnTranslator();
 
     Log::info(QStringLiteral("IDM Next 启动（GUI 模式）"));
@@ -204,7 +202,6 @@ int main(int argc, char* argv[])
     MainWindow window;
     window.show();
 
-    // 本实例直接处理位置参数中的 URL（magnet / 直链 / 本地种子）
     if (!extUrl.isEmpty())
         window.enqueueUrl(extUrl);
 
