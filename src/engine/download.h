@@ -37,7 +37,10 @@ typedef struct {
     volatile LONG io_errors;
 } download_task_t;
 
+/* 用户新建任务：HTTP 目标若已存在会自动选择 file (1).ext 等安全路径。 */
 download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn);
+/* 恢复/测试已有任务：必须保留持久化记录里的原始路径，不做磁盘冲突改名。 */
+download_task_t *task_create_preserve_path(const char *url, const wchar_t *outfile, int num_conn);
 void  task_free(download_task_t *t);
 int   task_start(download_task_t *t);   /* 全新下载，或 DL_PAUSED 时续传 */
 void  task_stop(download_task_t *t);    /* 仅发停止信号（running=0），不回收线程 */
