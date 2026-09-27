@@ -19,6 +19,10 @@
 #include "logger.h"
 #include "button_translator.h"   // 简体中文标准按钮翻译（与截图工具共用，见该头文件注释）
 
+#ifndef IDM_NEXT_VERSION
+#  define IDM_NEXT_VERSION "0.0.0"
+#endif
+
 // ── IPC 单实例通信 ──────────────────────────────
 // 当 GUI 已在运行时，CLI 通过 local socket 把命令转发给 GUI，
 // 避免重复 dlmgr_init 导致引擎状态冲突。
@@ -48,7 +52,7 @@ static bool tryForwardToGui(const QStringList& cliArgs)
             obj["dir"] = cliArgs[++i];
         else if (a == QStringLiteral("--name") && i + 1 < cliArgs.size())
             obj["filename"] = cliArgs[++i];
-        else         if (a == QStringLiteral("--threads") && i + 1 < cliArgs.size())
+        else if (a == QStringLiteral("--threads") && i + 1 < cliArgs.size())
             obj["threads"] = cliArgs[++i].toInt();
         else if (a == QStringLiteral("--format") && i + 1 < cliArgs.size())
             obj["format"] = cliArgs[++i];   // 视频画质（yt-dlp -f 选择串）
@@ -140,7 +144,7 @@ int main(int argc, char* argv[])
 
         QCoreApplication app(argc, argv);
         QCoreApplication::setApplicationName(QStringLiteral("IDM Next"));
-        QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+        QCoreApplication::setApplicationVersion(QString::fromLatin1(IDM_NEXT_VERSION));
 
         cliArgs.prepend(QString::fromLocal8Bit(argv[0]));  // 保留程序名
 
@@ -179,7 +183,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("IDM Next"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QString::fromLatin1(IDM_NEXT_VERSION));
 
     // 安装简体中文按钮翻译（OK→确定、Cancel→取消…），保持界面语言一致
     installZhCnTranslator();
