@@ -1,11 +1,10 @@
-name: release
+name: release-swoop
 
-# 推一个 v* tag 就自动：编译 → 自测 → 打包 → 建 GitHub Release 并附 zip。
-#   改版本号：src/common/version.h
-#   发布：git tag v0.2.0 && git push origin v0.2.0
+# Swoop 原生 Win32 版发布：使用独立 tag 前缀，避免和 master 分支的 IDM Next 混发。
+# 发布示例：git tag swoop-v0.2.1 && git push origin swoop-v0.2.1
 on:
   push:
-    tags: ['v*']
+    tags: ['swoop-v*']
   workflow_dispatch:
 
 permissions:
@@ -16,6 +15,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate tag matches source version
+        if: startsWith(github.ref, 'refs/tags/swoop-v')
+        shell: pwsh
+        run: |
+          $header = Get-Content src/common/version.h -Raw -Encoding UTF8
+          $match = [regex]::Match($header, 'IDM_VERSION_STR\s+"([^"]+)"')
+          if (-not $match.Success) { throw 'cannot read IDM_VERSION_STR' }
+          $expected = "swoop-v$($match.Groups[1].Value)"
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "release tag mismatch: expected $expected, got $env:GITHUB_REF_NAME"
+          }
 
       - name: Set up MinGW (MSYS2)
         uses: msys2/setup-msys2@v2
@@ -51,20 +62,29 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Test package output encoding
-        run: python packaging/test_make_release.py
+      - name: Test release packaging
+        run: python -m unittest packaging/test_make_release.py packaging/test_resource_encoding.py
 
       - name: Package
         run: python packaging/make_release.py
+
+      - name: Verify checksum file
+        shell: pwsh
+        run: |
+          $line = Get-Content dist/SHA256SUMS.txt
+          if ($line -notmatch '^([0-9a-f]{64})  (.+\.zip)$') { throw 'Invalid SHA256SUMS.txt' }
+          $actual = (Get-FileHash (Join-Path 'dist' $Matches[2]) -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $Matches[1]) { throw 'SHA256 mismatch' }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: swoop-win64
           path: dist/*
+          if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/swoop-v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
