@@ -13,6 +13,7 @@
 !define EXECUTABLE   "idm-next.exe"
 !define HOSTEXE      "idm-next-host.exe"
 !define UNINST_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
+!define NM_HOST      "com.tencent.idm_next"
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
@@ -58,6 +59,13 @@ Section "Main" SecMain
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" "$0"
+
+  ; 注册浏览器 Native Messaging Host。核心程序安装不因浏览器注册失败而回滚，
+  ; 但安装日志会明确记录返回码，便于排查。
+  IfFileExists "$INSTDIR\browser-extension\native-messaging-host\install_host.ps1" 0 nmhost_done
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\browser-extension\native-messaging-host\install_host.ps1"' $0
+    DetailPrint "Native Messaging Host 注册返回码: $0"
+  nmhost_done:
 SectionEnd
 
 Section "Uninstall"
@@ -66,14 +74,10 @@ Section "Uninstall"
   RMDir  "$SMPROGRAMS\${APPNAME}"
   Delete "$DESKTOP\${APPNAME}.lnk"
 
-  ; 先清理注册表，再删除安装目录。
+  ; 只清理由本项目创建的注册表项，不碰其他软件的 magnet/http 等协议关联。
+  DeleteRegKey HKCU "Software\Google\Chrome\NativeMessagingHosts\${NM_HOST}"
+  DeleteRegKey HKCU "Software\Microsoft\Edge\NativeMessagingHosts\${NM_HOST}"
   DeleteRegKey HKLM "${UNINST_KEY}"
-  DeleteRegKey HKCR "magnet"
+
   RMDir /r "$INSTDIR"
 SectionEnd
-
-Function RegisterMagnetProtocol
-  WriteRegStr HKCR "magnet" "" "URL:magnet protocol"
-  WriteRegStr HKCR "magnet" "URL Protocol" ""
-  WriteRegStr HKCR "magnet\shell\open\command" "" '"$INSTDIR\${EXECUTABLE}" "%1"'
-FunctionEnd
