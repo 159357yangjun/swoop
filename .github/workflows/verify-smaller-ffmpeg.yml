@@ -1,0 +1,95 @@
+name: verify-idm-next-smaller-ffmpeg
+
+on:
+  push:
+    branches: ['verify/idm-next-smaller-ffmpeg-full']
+
+jobs:
+  full-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 + Qt 6 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-charts
+            mingw-w64-x86_64-curl
+
+      - name: Detect Qt bin directory
+        shell: msys2 {0}
+        run: |
+          QT_BIN_WIN="$(cygpath -w "$(dirname "$(command -v windeployqt)")")"
+          echo "QT_BIN=$QT_BIN_WIN" >> "$GITHUB_ENV"
+
+      - name: Configure and build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel 2
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Build full release payload
+        shell: pwsh
+        run: ./installer/package.ps1
+
+      - name: Verify trimmed helper payload and runtime
+        shell: pwsh
+        run: |
+          foreach ($required in @(
+            'installer/dist/idm-next.exe',
+            'installer/dist/idm-next-host.exe',
+            'installer/dist/aria2/aria2c.exe',
+            'installer/dist/ffmpeg/ffmpeg.exe',
+            'installer/dist/yt-dlp/yt-dlp.exe',
+            'installer/out/idm-next-0.1.0-win64-portable.zip',
+            'installer/out/idm-next-0.1.0-setup-x64.exe',
+            'installer/out/SHA256SUMS.txt'
+          )) {
+            if (-not (Test-Path $required)) { throw "required release file missing: $required" }
+          }
+
+          foreach ($unexpected in @(
+            'installer/dist/ffmpeg/ffplay.exe',
+            'installer/dist/ffmpeg/ffprobe.exe'
+          )) {
+            if (Test-Path $unexpected) { throw "unused FFmpeg tool leaked into release: $unexpected" }
+          }
+
+          $aria = Start-Process -FilePath (Resolve-Path 'installer/dist/aria2/aria2c.exe') -ArgumentList '--version' -PassThru -Wait
+          if ($aria.ExitCode -ne 0) { throw "aria2c failed with exit code $($aria.ExitCode)" }
+          $ffmpeg = Start-Process -FilePath (Resolve-Path 'installer/dist/ffmpeg/ffmpeg.exe') -ArgumentList '-version' -PassThru -Wait
+          if ($ffmpeg.ExitCode -ne 0) { throw "ffmpeg failed with exit code $($ffmpeg.ExitCode)" }
+          $ytdlp = Start-Process -FilePath (Resolve-Path 'installer/dist/yt-dlp/yt-dlp.exe') -ArgumentList '--version' -PassThru -Wait
+          if ($ytdlp.ExitCode -ne 0) { throw "yt-dlp failed with exit code $($ytdlp.ExitCode)" }
+          $idm = Start-Process -FilePath (Resolve-Path 'installer/dist/idm-next.exe') -ArgumentList '--cli','help' -WorkingDirectory (Resolve-Path 'installer/dist') -PassThru -Wait
+          if ($idm.ExitCode -ne 0) { throw "IDM Next packaged CLI failed with exit code $($idm.ExitCode)" }
+
+          $zip = Get-Item 'installer/out/idm-next-0.1.0-win64-portable.zip'
+          $setup = Get-Item 'installer/out/idm-next-0.1.0-setup-x64.exe'
+          Write-Host "portable_bytes=$($zip.Length)"
+          Write-Host "setup_bytes=$($setup.Length)"
+          if ($zip.Length -ge 130MB) { throw "portable is still unexpectedly large: $($zip.Length) bytes" }
+          if ($setup.Length -ge 100MB) { throw "setup is still unexpectedly large: $($setup.Length) bytes" }
+
+          $sum = Get-Content 'installer/out/SHA256SUMS.txt'
+          if ($sum -notmatch '^([0-9a-f]{64})  (.+\.zip)$') { throw 'invalid checksum manifest' }
+          $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $Matches[1]) { throw 'portable checksum mismatch' }
+
+      - name: Upload optimized full release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: idm-next-0.1.0-smaller-ffmpeg-full
+          path: installer/out/*
+          if-no-files-found: error
