@@ -35,6 +35,43 @@ jobs:
         shell: msys2 {0}
         run: ./swoop_nmhost.exe --selftest
 
+      - name: Single-instance launch smoke test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path './swoop.exe').Path
+          $first = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 250
+              if ($first.HasExited) {
+                throw "primary Swoop instance exited early with code $($first.ExitCode)"
+              }
+              $first.Refresh()
+              if ($first.MainWindowHandle -ne 0) {
+                $ready = $true
+                break
+              }
+            }
+            if (-not $ready) { throw 'primary Swoop window did not become ready' }
+
+            $second = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+            try {
+              if (-not $second.WaitForExit(5000)) {
+                throw 'second Swoop launch did not reuse the existing instance'
+              }
+              if ($second.ExitCode -ne 0) {
+                throw "second Swoop launch exited with code $($second.ExitCode)"
+              }
+            }
+            finally {
+              if (-not $second.HasExited) { Stop-Process -Id $second.Id -Force -ErrorAction SilentlyContinue }
+            }
+          }
+          finally {
+            if (-not $first.HasExited) { Stop-Process -Id $first.Id -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: Verify no static winhttp/winmm import
         shell: msys2 {0}
         run: |
