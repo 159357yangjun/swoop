@@ -39,7 +39,8 @@ SetCompressor /SOLID lzma
 
 Section "Main" SecMain
   SetOutPath "$INSTDIR"
-  File /r "installer\dist\*.*"
+  ; makensis 可能从任意工作目录启动，必须以本 .nsi 文件所在目录定位 dist。
+  File /r "${__FILEDIR__}\dist\*.*"
 
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
   CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\${EXECUTABLE}"
