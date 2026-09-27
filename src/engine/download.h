@@ -39,8 +39,8 @@ typedef struct {
 
 /* 用户新建任务：HTTP 目标若已存在/已被其他任务预留，会自动选择 file (1).ext 等安全路径。 */
 download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn);
-/* 仅供自测夹具：保留指定路径且不进入生产预留表。真实持久化恢复由 taskstore_load()
-   直接解析对象，并在完成解析后调用 task_register_outfile()。 */
+/* 内部精确路径构造：不自动改名，但仍登记预留；目标已被其他任务登记时返回 NULL。
+   当前真实持久化恢复由 taskstore_load() 直接解析对象后调用 task_register_outfile()。 */
 download_task_t *task_create_preserve_path(const char *url, const wchar_t *outfile, int num_conn);
 /* taskstore_load() 对直接 calloc 出来的恢复任务调用，让新任务也能避开这些尚未落盘的目标。 */
 int   task_register_outfile(download_task_t *t);
