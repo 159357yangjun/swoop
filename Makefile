@@ -64,8 +64,10 @@ swoop_selftest.exe: build/util.o build/http.o build/download.o $(ENGINE) build/s
 build/selftest.o: src/selftest.c
 	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@
 
+# 旧回归用例里 task_create() 既承担“构造持久化夹具”又承担“新建任务”。
+# 夹具会先创建部分文件，必须保留原路径；新的真实防覆盖行为由 selftest.c 单独验证。
 build/selftest_run.o: src/selftest_run.c
-	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@
+	mkdir -p build && $(CC) $(CFLAGS) -Dtask_create=task_create_preserve_path -c $< -o $@
 
 build/util.o: src/common/util.c
 	mkdir -p build && $(CC) $(CFLAGS) -c $< -o $@
