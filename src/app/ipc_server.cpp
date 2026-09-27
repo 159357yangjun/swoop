@@ -1,5 +1,9 @@
 #include "ipc_server.h"
 #include "logger.h"
+#include "task_controller.h"
+#include "task_list_model.h"
+#include "download_manager.h"
+#include "torrent_downloader.h"
 
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -8,6 +12,26 @@
 #include <QWidget>
 
 static const char* IPC_SERVER_NAME = "idm-next-ipc";
+
+namespace {
+const TaskRow* findTask(const QVector<TaskRow>& tasks, int id)
+{
+    for (const TaskRow& row : tasks) {
+        if (row.id == id)
+            return &row;
+    }
+    return nullptr;
+}
+
+QString taskLine(const TaskRow& row)
+{
+    return QStringLiteral("#%1\t%2\t%3\t%4")
+        .arg(row.id)
+        .arg(TaskListModel::stateText(row.state))
+        .arg(row.fileName.isEmpty() ? QStringLiteral("-") : row.fileName)
+        .arg(row.url.isEmpty() ? QStringLiteral("-") : row.url);
+}
+}
 
 IpcServer::IpcServer(QObject* parent)
     : QObject(parent)
@@ -78,8 +102,17 @@ void IpcServer::handleClient(QLocalSocket* client)
     QJsonDocument doc = QJsonDocument::fromJson(data);
     QJsonObject msg = doc.object();
 
-    QString command = msg.value("command").toString();
+    QString command = msg.value("command").toString().trimmed().toLower();
+    QString args = msg.value("args").toString().trimmed();
     QJsonObject response;
+
+    // TaskController / TaskListModel / DownloadManager 都是 MainWindow 的 QObject 子对象。
+    // 对 CLI 控制命令直接查找现有运行实例的对象，确保操作的是 GUI 正在展示的同一批任务，
+    // 而不是启动第二套独立下载引擎。
+    QObject* root = parent();
+    TaskController* controller = root ? root->findChild<TaskController*>() : nullptr;
+    TaskListModel* model = root ? root->findChild<TaskListModel*>() : nullptr;
+    DownloadManager* manager = root ? root->findChild<DownloadManager*>() : nullptr;
 
     if (command == "add") {
         QString url      = msg.value("url").toString();
@@ -92,16 +125,140 @@ void IpcServer::handleClient(QLocalSocket* client)
         if (url.isEmpty()) {
             response["success"] = false;
             response["message"] = QStringLiteral("URL 为空");
+        } else if (!m_addTask) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("下载任务入口尚未初始化");
         } else {
-            if (m_addTask) m_addTask(url, filename, dir, threads, queue, format);
+            m_addTask(url, filename, dir, threads, queue, format);
             response["success"] = true;
             response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
         }
     } else if (command == "list") {
-        // 简化：返回任务数量
-        const int n = m_taskCount ? m_taskCount() : 0;
+        if (model) {
+            const QVector<TaskRow> tasks = model->tasks();
+            QStringList lines;
+            lines << QStringLiteral("当前 %1 个任务").arg(tasks.size());
+            for (const TaskRow& row : tasks)
+                lines << taskLine(row);
+            response["success"] = true;
+            response["message"] = lines.join(QLatin1Char('\n'));
+        } else {
+            const int n = m_taskCount ? m_taskCount() : 0;
+            response["success"] = true;
+            response["message"] = QStringLiteral("当前 %1 个任务").arg(n);
+        }
+    } else if (command == "start" || command == "pause") {
+        if (!controller || !model) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("任务控制器尚未初始化");
+        } else if (args.compare(QStringLiteral("all"), Qt::CaseInsensitive) == 0) {
+            const QVector<TaskRow> tasks = model->tasks();
+            int changed = 0;
+            for (const TaskRow& row : tasks) {
+                if (command == "start" && (row.state == 0 || row.state == 2)) {
+                    if (row.state == 2)
+                        controller->resumeTaskById(row.id);
+                    else
+                        controller->startTaskById(row.id);
+                    changed++;
+                } else if (command == "pause" && row.state == 1) {
+                    controller->pauseTaskById(row.id);
+                    changed++;
+                }
+            }
+            response["success"] = true;
+            response["message"] = command == "start"
+                ? QStringLiteral("已启动/恢复 %1 个任务").arg(changed)
+                : QStringLiteral("已暂停 %1 个任务").arg(changed);
+        } else {
+            bool ok = false;
+            int id = args.toInt(&ok);
+            const QVector<TaskRow> tasks = model->tasks();
+            const TaskRow* row = ok ? findTask(tasks, id) : nullptr;
+            if (!row) {
+                response["success"] = false;
+                response["message"] = QStringLiteral("任务不存在: %1").arg(args);
+            } else {
+                if (command == "start") {
+                    if (row->state == 2)
+                        controller->resumeTaskById(id);
+                    else
+                        controller->startTaskById(id);
+                    response["message"] = QStringLiteral("已启动/恢复任务 #%1").arg(id);
+                } else {
+                    controller->pauseTaskById(id);
+                    response["message"] = QStringLiteral("已暂停任务 #%1").arg(id);
+                }
+                response["success"] = true;
+            }
+        }
+    } else if (command == "cancel" || command == "remove") {
+        bool ok = false;
+        int id = args.toInt(&ok);
+        const QVector<TaskRow> tasks = model ? model->tasks() : QVector<TaskRow>();
+        if (!controller || !model) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("任务控制器尚未初始化");
+        } else if (!ok || !findTask(tasks, id)) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("任务不存在: %1").arg(args);
+        } else {
+            if (command == "cancel")
+                controller->cancelTaskById(id);
+            else
+                controller->removeTaskById(id);
+            response["success"] = true;
+            response["message"] = command == "cancel"
+                ? QStringLiteral("已取消任务 #%1").arg(id)
+                : QStringLiteral("已移除任务 #%1").arg(id);
+        }
+    } else if (command == "info") {
+        bool ok = false;
+        int id = args.toInt(&ok);
+        const QVector<TaskRow> tasks = model ? model->tasks() : QVector<TaskRow>();
+        const TaskRow* row = ok ? findTask(tasks, id) : nullptr;
+        if (!row) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("任务不存在: %1").arg(args);
+        } else {
+            response["success"] = true;
+            response["message"] = QStringLiteral(
+                "ID: %1\n状态: %2\n文件: %3\n已下载: %4 B\n总大小: %5 B\n速度: %6 B/s\nURL: %7")
+                .arg(row->id)
+                .arg(TaskListModel::stateText(row->state))
+                .arg(row->fileName)
+                .arg(row->downloaded)
+                .arg(row->fileSize)
+                .arg(row->speedBps)
+                .arg(row->url);
+        }
+    } else if (command == "set-limit") {
+        bool ok = false;
+        int kbps = args.toInt(&ok);
+        if (!ok || kbps < 0 || !manager) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("用法: set-limit <KBPS>（0=不限速）");
+        } else {
+            manager->setMaxSpeed(kbps > 0 ? kbps * 1024 : 0);
+            TorrentDownloader::setGlobalSpeedLimit(kbps);
+            response["success"] = true;
+            response["message"] = kbps == 0
+                ? QStringLiteral("全局限速: 不限速")
+                : QStringLiteral("全局限速: %1 KB/s").arg(kbps);
+        }
+    } else if (command == "help" || command == "?") {
         response["success"] = true;
-        response["message"] = QStringLiteral("当前 %1 个任务").arg(n);
+        response["message"] = QStringLiteral(
+            "命令:\n"
+            "  add <url> [--dir DIR] [--name NAME] [--threads N] [--no-wait]\n"
+            "  list\n"
+            "  start <id|all>\n"
+            "  pause <id|all>\n"
+            "  cancel <id>\n"
+            "  remove <id>\n"
+            "  info <id>\n"
+            "  set-limit <KBPS>\n"
+            "  help");
     } else if (command == "activate") {
         // 第二次启动程序时不再创建另一套下载引擎/IPC server，而是把现有主窗口恢复到前台。
         // IpcServer 的 parent 在 MainWindow 中创建，因此这里可安全恢复其顶层窗口。
