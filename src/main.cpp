@@ -28,6 +28,9 @@
 // 当 GUI 已在运行时，CLI/第二个 GUI 实例通过 local socket 把命令转发给现有 GUI，
 // 避免重复 dlmgr_init 和第二个实例抢占 IPC server。
 static const char* IPC_SERVER_NAME = "idm-next-ipc";
+#ifdef Q_OS_WIN
+static const wchar_t* GUI_MUTEX_NAME = L"Local\\IDMNext.Gui.SingleInstance.v1";
+#endif
 
 enum class ForwardResult {
     NotConnected,
@@ -47,7 +50,6 @@ static ForwardResult tryForwardToGui(const QStringList& cliArgs, bool printRespo
     if (!socket.waitForConnected(500))
         return ForwardResult::NotConnected;
 
-    // 构造 JSON 消息
     QJsonObject obj;
     obj["command"] = "add";
 
@@ -104,6 +106,34 @@ static ForwardResult tryForwardToGui(const QStringList& cliArgs, bool printRespo
     return ForwardResult::Failure;
 }
 
+#ifdef Q_OS_WIN
+// 已拿到命名 mutex 的另一个 GUI 可能还在 MainWindow 构造前，IPC server 尚未 listen。
+// 第二实例/CLI 此时只能等待，不能把“暂时连不上”误判成“没有 GUI”再初始化第二套引擎。
+static ForwardResult waitForGui(const QStringList& args, bool printResponse, DWORD timeoutMs)
+{
+    const DWORD stepMs = 100;
+    DWORD waited = 0;
+    for (;;) {
+        ForwardResult r = tryForwardToGui(args, printResponse);
+        if (r != ForwardResult::NotConnected)
+            return r;
+        if (waited >= timeoutMs)
+            return ForwardResult::NotConnected;
+        Sleep(stepMs);
+        waited += stepMs;
+    }
+}
+
+static bool guiMutexExists()
+{
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, GUI_MUTEX_NAME);
+    if (!h)
+        return false;
+    CloseHandle(h);
+    return true;
+}
+#endif
+
 // WIN32 子系统下（GUI 可执行文件）无默认控制台；CLI 模式需用 AllocConsole 分配一个，
 // 并把标准流重定向到该控制台，使 CliApp / IPC 转发结果的 stdout 输出可见。
 static void ensureConsole()
@@ -145,6 +175,18 @@ int main(int argc, char* argv[])
         if (forwarded != ForwardResult::NotConnected)
             return forwarded == ForwardResult::Success ? 0 : 1;
 
+#ifdef Q_OS_WIN
+        // GUI 可能刚拿到 mutex、尚未建立 local socket。此时等待它就绪，不能启动独立引擎
+        // 与正在启动的 GUI 同时读写任务状态。
+        if (guiMutexExists()) {
+            forwarded = waitForGui(cliArgs, true, 10000);
+            if (forwarded != ForwardResult::NotConnected)
+                return forwarded == ForwardResult::Success ? 0 : 1;
+            QTextStream(stderr) << QStringLiteral("IDM Next GUI 正在启动，但 IPC 未能就绪。\n");
+            return 1;
+        }
+#endif
+
         // 无 GUI 在运行，独立 CLI 模式
         dlmgr_init(nullptr);
         Settings settings;
@@ -178,13 +220,41 @@ int main(int argc, char* argv[])
             extUrl = a;
     }
 
-    // 已存在 GUI：带 URL 时转发添加任务；普通二次启动则只激活已有窗口。
-    // Success/Failure 都必须退出，避免命令失败时反而启动第二套引擎并抢 IPC。
-    ForwardResult forwarded = !extUrl.isEmpty()
-        ? tryForwardToGui(QStringList() << QStringLiteral("add") << extUrl, false)
-        : tryForwardToGui(QStringList() << QStringLiteral("activate"), false);
-    if (forwarded != ForwardResult::NotConnected)
+    const QStringList forwardArgs = !extUrl.isEmpty()
+        ? (QStringList() << QStringLiteral("add") << extUrl)
+        : (QStringList() << QStringLiteral("activate"));
+
+#ifdef Q_OS_WIN
+    // 真正的原子单实例门闩必须在 dlmgr_init / QApplication / MainWindow 之前建立。
+    // 仅靠“先连一次 QLocalSocket”存在双进程同时连不上、随后都初始化 GUI 的竞态。
+    HANDLE guiMutex = CreateMutexW(nullptr, FALSE, GUI_MUTEX_NAME);
+    if (!guiMutex) {
+        MessageBoxW(nullptr, L"无法创建 IDM Next 单实例锁。", L"IDM Next", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    const bool anotherGuiStarting = (GetLastError() == ERROR_ALREADY_EXISTS);
+
+    if (anotherGuiStarting) {
+        ForwardResult forwarded = waitForGui(forwardArgs, false, 10000);
+        CloseHandle(guiMutex);
+        if (forwarded != ForwardResult::NotConnected)
+            return forwarded == ForwardResult::Success ? 0 : 1;
+        MessageBoxW(nullptr, L"已有 IDM Next 正在启动，但 IPC 未能就绪。",
+                    L"IDM Next", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+#else
+    void* guiMutex = nullptr;
+#endif
+
+    // 兼容升级场景：旧版本 GUI 可能已运行但没有上述命名 mutex。
+    ForwardResult forwarded = tryForwardToGui(forwardArgs, false);
+    if (forwarded != ForwardResult::NotConnected) {
+#ifdef Q_OS_WIN
+        CloseHandle(guiMutex);
+#endif
         return forwarded == ForwardResult::Success ? 0 : 1;
+    }
 
     dlmgr_init(nullptr);
     Settings settings;
@@ -207,5 +277,8 @@ int main(int argc, char* argv[])
 
     int rc = app.exec();
     dlmgr_destroy();
+#ifdef Q_OS_WIN
+    CloseHandle(guiMutex);
+#endif
     return rc;
 }
