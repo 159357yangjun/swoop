@@ -89,6 +89,57 @@ jobs:
             throw "packaged CLI smoke test failed with exit code $($process.ExitCode)"
           }
 
+      - name: Single-instance and IPC smoke test
+        shell: pwsh
+        run: |
+          $dist = (Resolve-Path 'installer/dist').Path
+          $exe = (Resolve-Path 'installer/dist/idm-next.exe').Path
+          $first = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Milliseconds 250
+              if ($first.HasExited) {
+                throw "primary IDM Next instance exited early with code $($first.ExitCode)"
+              }
+              $first.Refresh()
+              if ($first.MainWindowHandle -ne 0) {
+                $ready = $true
+                break
+              }
+            }
+            if (-not $ready) { throw 'primary IDM Next window did not become ready' }
+
+            # 普通二次启动必须激活已有窗口并迅速退出，而不是创建第二套下载引擎。
+            $second = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
+            try {
+              if (-not $second.WaitForExit(5000)) {
+                throw 'second IDM Next launch did not reuse the existing GUI instance'
+              }
+              if ($second.ExitCode -ne 0) {
+                throw "second IDM Next launch exited with code $($second.ExitCode)"
+              }
+            }
+            finally {
+              if (-not $second.HasExited) { Stop-Process -Id $second.Id -Force -ErrorAction SilentlyContinue }
+            }
+
+            # GUI 已运行时 CLI 必须通过 IPC，而不是另起独立引擎。
+            $remoteHelp = Start-Process -FilePath $exe -ArgumentList '--cli','help' -WorkingDirectory $dist -PassThru -Wait
+            if ($remoteHelp.ExitCode -ne 0) {
+              throw "remote CLI help failed with exit code $($remoteHelp.ExitCode)"
+            }
+
+            # 远端业务错误要传播为非 0 退出码，不能“连接成功就一律 exit 0”。
+            $remoteMissing = Start-Process -FilePath $exe -ArgumentList '--cli','info','2147483647' -WorkingDirectory $dist -PassThru -Wait
+            if ($remoteMissing.ExitCode -ne 1) {
+              throw "remote CLI failure exit code was $($remoteMissing.ExitCode), expected 1"
+            }
+          }
+          finally {
+            if (-not $first.HasExited) { Stop-Process -Id $first.Id -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
