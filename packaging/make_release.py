@@ -2,7 +2,7 @@
 """发行打包：生成可直接解压使用的 Windows x64 便携包并计算 SHA256。
 
 产物（dist/）:
-  swoop-<版本>-win64.zip   主程序 + nmhost + 完整浏览器扩展 + 文档
+  swoop-<版本>-win64.zip   主程序 + nmhost + 浏览器扩展生产文件 + 文档
   SHA256SUMS.txt          校验和（给 GitHub Release 附件用）
 
 前提：先 make all。两个 exe 均为 -static 链接，只依赖 Windows 系统 DLL，
@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import sys
 import zipfile
@@ -20,6 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+EXTENSION_EXCLUDED_DIRS = {"__pycache__", ".pytest_cache", ".git", "node_modules"}
+EXTENSION_EXCLUDED_SUFFIXES = {".py", ".pyc", ".pyo"}
 
 
 def configure_output_encoding() -> None:
@@ -48,8 +49,22 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def is_release_extension_file(path: Path, extension_dir: Path) -> bool:
+    """只收录浏览器实际运行需要的扩展文件，排除测试/缓存/开发文件。"""
+    rel = path.relative_to(extension_dir)
+    if any(part in EXTENSION_EXCLUDED_DIRS for part in rel.parts):
+        return False
+    if any(part.startswith(".") for part in rel.parts):
+        return False
+    if path.name.lower().startswith("test_"):
+        return False
+    if path.suffix.lower() in EXTENSION_EXCLUDED_SUFFIXES:
+        return False
+    return True
+
+
 def collect_release_files(bundle: str) -> list[tuple[Path, str]]:
-    """收集发布文件。扩展目录递归收录，避免新增资源后漏打包。"""
+    """收集发布文件；扩展目录递归收录生产资源，避免新增资源后漏包。"""
     required = [
         (ROOT / "swoop.exe", f"{bundle}/swoop.exe"),
         (ROOT / "swoop_nmhost.exe", f"{bundle}/swoop_nmhost.exe"),
@@ -65,9 +80,17 @@ def collect_release_files(bundle: str) -> list[tuple[Path, str]]:
 
     entries: list[tuple[Path, str]] = list(required[:-1])
     extension_dir = ROOT / "extension"
-    extension_files = sorted(path for path in extension_dir.rglob("*") if path.is_file())
+    extension_files = sorted(
+        path
+        for path in extension_dir.rglob("*")
+        if path.is_file() and is_release_extension_file(path, extension_dir)
+    )
     if not extension_files:
-        sys.exit("extension/ 为空，无法生成完整浏览器扩展发行包")
+        sys.exit("extension/ 没有可发行文件，无法生成浏览器扩展包")
+
+    manifest = extension_dir / "manifest.json"
+    if manifest not in extension_files:
+        sys.exit("extension/manifest.json 被意外排除，无法生成浏览器扩展包")
 
     for src in extension_files:
         rel = src.relative_to(extension_dir).as_posix()
@@ -80,12 +103,19 @@ def collect_release_files(bundle: str) -> list[tuple[Path, str]]:
 
 def write_reproducible_zip(zip_path: Path, entries: list[tuple[Path, str]]) -> None:
     """写固定时间戳的 ZIP，减少 CI/本地打包产生的无意义差异。"""
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with zipfile.ZipFile(
+        zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
         for src, arc in entries:
             info = zipfile.ZipInfo(arc, date_time=FIXED_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
-            archive.writestr(info, src.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+            archive.writestr(
+                info,
+                src.read_bytes(),
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
 
 
 def main() -> int:
@@ -107,7 +137,7 @@ def main() -> int:
 
     print(f"打包完成: dist/{zip_path.name}  ({size_kb:.1f} KB)")
     print(f"  SHA256  {digest}")
-    print(f"  收录 {len(entries)} 个文件（extension/ 递归完整收录）")
+    print(f"  收录 {len(entries)} 个生产文件（扩展测试/缓存文件已排除）")
     return 0
 
 
