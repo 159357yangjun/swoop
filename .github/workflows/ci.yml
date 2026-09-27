@@ -51,6 +51,29 @@ jobs:
         shell: pwsh
         run: ./installer/package.ps1 -SkipTools
 
+      - name: Smoke test packaged runtime
+        shell: pwsh
+        run: |
+          foreach ($required in @(
+            'installer/dist/idm-next.exe',
+            'installer/dist/idm-next-host.exe',
+            'installer/dist/sqldrivers/qsqlite.dll',
+            'installer/dist/browser-extension/manifest.json',
+            'installer/dist/browser-extension/native-messaging-host/com.tencent.idm_next.json',
+            'installer/dist/browser-extension/native-messaging-host/install_host.ps1'
+          )) {
+            if (-not (Test-Path $required)) { throw "packaged runtime missing: $required" }
+          }
+
+          $process = Start-Process `
+            -FilePath (Resolve-Path 'installer/dist/idm-next.exe') `
+            -ArgumentList '--cli','help' `
+            -WorkingDirectory (Resolve-Path 'installer/dist') `
+            -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "packaged CLI smoke test failed with exit code $($process.ExitCode)"
+          }
+
       - name: Verify portable package
         shell: pwsh
         run: |
