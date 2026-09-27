@@ -5,6 +5,7 @@
 #include <QLocalSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QWidget>
 
 static const char* IPC_SERVER_NAME = "idm-next-ipc";
 
@@ -28,7 +29,9 @@ bool IpcServer::start()
 {
     m_server = new QLocalServer(this);
 
-    // 如果有残留的旧服务端（上次崩溃），先移除
+    // 如果有残留的旧服务端（上次崩溃），先移除。
+    // 正常的第二个 GUI 实例会在 main() 中先通过 activate 命令退出，不会走到这里，
+    // 因而不会误删仍在运行实例的 IPC endpoint。
     QLocalServer::removeServer(QLatin1String(IPC_SERVER_NAME));
 
     if (!m_server->listen(QLatin1String(IPC_SERVER_NAME))) {
@@ -45,20 +48,24 @@ bool IpcServer::start()
 
 void IpcServer::onNewConnection()
 {
-    QLocalSocket* client = m_server->nextPendingConnection();
-    if (!client) return;
-    handleClient(client);
+    // newConnection 可能一次积累多个客户端；全部取出，避免短时间浏览器/CLI 连发时
+    // 有连接滞留到下一次信号才被处理。
+    while (m_server && m_server->hasPendingConnections()) {
+        QLocalSocket* client = m_server->nextPendingConnection();
+        if (client)
+            handleClient(client);
+    }
 }
 
 void IpcServer::handleClient(QLocalSocket* client)
 {
     // 读取客户端发来的 JSON 命令：原生消息以单次写入整体送达，但可能跨多次
     // readyRead 分片到达；此处用有界循环累积，直到得到可解析的完整 JSON 对象，
-    // 避免单次 readAll 截断导致命令解析失败（原实现会退化成「不支持的操作」）。
+    // 避免单次 readAll 截断导致命令解析失败。
     QByteArray data;
     for (int i = 0; i < 10; ++i) {
         if (client->bytesAvailable() == 0)
-            client->waitForReadyRead(200);   // 最多 ~2s，正常情况首轮即有数据
+            client->waitForReadyRead(100);   // 最多约 1s，正常情况首轮即有数据
         QByteArray chunk = client->readAll();
         if (!chunk.isEmpty())
             data.append(chunk);
@@ -95,6 +102,20 @@ void IpcServer::handleClient(QLocalSocket* client)
         const int n = m_taskCount ? m_taskCount() : 0;
         response["success"] = true;
         response["message"] = QStringLiteral("当前 %1 个任务").arg(n);
+    } else if (command == "activate") {
+        // 第二次启动程序时不再创建另一套下载引擎/IPC server，而是把现有主窗口恢复到前台。
+        // IpcServer 的 parent 在 MainWindow 中创建，因此这里可安全恢复其顶层窗口。
+        QWidget* window = qobject_cast<QWidget*>(parent());
+        if (window) {
+            window->showNormal();
+            window->raise();
+            window->activateWindow();
+            response["success"] = true;
+            response["message"] = QStringLiteral("已激活 IDM Next");
+        } else {
+            response["success"] = false;
+            response["message"] = QStringLiteral("无法定位主窗口");
+        }
     } else {
         response["success"] = false;
         response["message"] = QStringLiteral("不支持的操作: %1").arg(command);
@@ -106,6 +127,7 @@ void IpcServer::handleClient(QLocalSocket* client)
     client->flush();
     client->waitForBytesWritten(2000);
     client->disconnectFromServer();
+    client->deleteLater();
 
     Log::info(QStringLiteral("IPC 请求: %1 → %2")
                   .arg(command, response.value("success").toBool() ? "成功" : "失败"));
