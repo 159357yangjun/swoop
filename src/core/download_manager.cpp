@@ -5,14 +5,23 @@
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
-#include <QPair>
 #include <QTimer>
+
+namespace {
+struct ProgressSample {
+    qint64 downloaded = 0;
+    qint64 total = 0;
+    int speed = 0;
+};
+}
 
 class DownloadManager::Impl {
 public:
     DownloadManager* q;
-    // 进度聚合缓冲：taskId -> (已下字节, 速度)。只保留每个任务的最新一帧。
-    QHash<int, QPair<qint64, int>> pendingProgress;
+    // 进度聚合缓冲：taskId -> 最新 (已下载, 总大小, 速度)。
+    // total 不能在节流时丢掉：上层用它区分真实字节进度与百分比进度，
+    // 且新任务刚探测到 Content-Length 时需要立即得到正确总大小。
+    QHash<int, ProgressSample> pendingProgress;
     /* ⚠️ 这个哈希是被两个线程同时碰的：写入来自引擎的 worker 线程
      * （progressCb → forwardProgress），读出/清空来自 GUI 线程的 QTimer
      * （flushProgress）。QHash 不是线程安全的容器，无锁读写会直接破坏它的桶数组
@@ -147,13 +156,13 @@ void DownloadManager::forwardProgress(int task_id, int64_t downloaded, int64_t t
 {
     // 由 worker 线程调用：与 flushProgress() 争同一个哈希，必须持锁
     QMutexLocker locker(&d->progressMutex);
-    // 只保留每个任务的最新一帧，丢弃中间的冗余帧（sampling：以最新值代表窗口）
-    d->pendingProgress[task_id] = qMakePair(downloaded, speed);
+    // 只保留每个任务的最新一帧，丢弃中间冗余帧；但一帧的全部语义都要保留。
+    d->pendingProgress[task_id] = ProgressSample{downloaded, total, speed};
 }
 
 void DownloadManager::flushProgress()
 {
-    QHash<int, QPair<qint64, int>> batch;
+    QHash<int, ProgressSample> batch;
     {
         // 快照后清空，避免在 emit 过程中被 worker 线程再次写入造成重入
         QMutexLocker locker(&d->progressMutex);
@@ -164,7 +173,8 @@ void DownloadManager::flushProgress()
     }
 
     for (auto it = batch.constBegin(); it != batch.constEnd(); ++it) {
-        emit taskProgress(it.key(), it.value().first, 0, it.value().second);
+        const ProgressSample& sample = it.value();
+        emit taskProgress(it.key(), sample.downloaded, sample.total, sample.speed);
     }
 }
 
