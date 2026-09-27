@@ -1,10 +1,32 @@
 #include "selftest_run.h"
 #include "engine/category.h"
 #include "engine/download.h"
+#include "engine/torrent.h"
 #include <windows.h>
 #include <wchar.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* 仅供 selftest_run.c 的旧持久化夹具（Makefile 用宏把它的 task_create 映射到这里）。
+   夹具经常先创建“部分下载文件”再构造任务，因此既不能自动改名，也不能占用
+   生产预留表；真正应用恢复由 taskstore_load() 负责登记。 */
+download_task_t *task_create_test_fixture(const char *url, const wchar_t *outfile, int num_conn)
+{
+    if (!url || !url[0] || !outfile || !outfile[0]) return NULL;
+    download_task_t *t = (download_task_t *)calloc(1, sizeof *t);
+    if (!t) return NULL;
+    strncpy(t->url, url, sizeof t->url - 1);
+    t->url[sizeof t->url - 1] = 0;
+    wcsncpy(t->outfile, outfile, MAX_PATH - 1);
+    t->outfile[MAX_PATH - 1] = 0;
+    t->kind = torrent_kind_for_url(url);
+    t->num_conn = num_conn;
+    if (t->num_conn < 1) t->num_conn = 1;
+    if (t->num_conn > 16) t->num_conn = 16;
+    t->status = DL_QUEUED;
+    return t;
+}
 
 static int test_safe_derived_filenames(void)
 {
