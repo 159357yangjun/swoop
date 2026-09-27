@@ -72,8 +72,7 @@ void TrafficModeController::applyMode(int mode)
     Log::info(QStringLiteral("流量档位切换为「%1」(%2 KB/s)")
                   .arg(trafficModeName(mode)).arg(kbps));
     syncCombo();
-    if (m_traySink) m_traySink(m_settings->trafficMode());  // 同步托盘流量子菜单勾选
-    updateIndicator();   // 同步任务列表「限速」列
+    updateIndicator();   // 同步任务列表、状态栏和托盘
 }
 
 void TrafficModeController::syncCombo()
@@ -106,9 +105,10 @@ void TrafficModeController::updateIndicator()
         text = QStringLiteral("%1 %2").arg(trafficModeName(mode)).arg(kbps);
     m_model->setGlobalTraffic(text);
 
-    // 状态栏下拉也要跟着走：它现在承担原来「限速胶囊」的职责——让人一眼看出
-    // 当前是不是在限速、限到哪一档。档位名与列的文本同源，不会说两套话。
+    // MainWindow 构造早期就创建了状态栏/托盘，此时 Settings 还没 load；因此启动恢复时
+    // 这里必须同时刷新 combo 和托盘菜单，否则主界面显示持久化档位，托盘仍勾默认“自动”。
     syncCombo();
+    syncTray();
 }
 
 void TrafficModeController::syncTray()
