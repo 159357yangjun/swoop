@@ -29,6 +29,69 @@ static int hexv(wchar_t c)
     return -1;
 }
 
+/* Windows 文件名不能包含这些字符；控制字符 0..31 同样禁止。
+   URL 的 %2F/%5C 必须在解码后再过滤，否则会变成路径分隔符。 */
+static int bad_filename_char(wchar_t c)
+{
+    if (c < 32) return 1;
+    return wcschr(L"<>:\"/\\|?*", c) != NULL;
+}
+
+/* Windows 设备名即使带扩展名仍然保留，例如 CON.txt / LPT1.log。 */
+static int reserved_windows_name(const wchar_t *name)
+{
+    wchar_t stem[16];
+    int n = 0;
+    if (!name) return 0;
+    while (*name && *name != L'.' && n < (int)(sizeof stem / sizeof stem[0]) - 1)
+        stem[n++] = *name++;
+    while (n > 0 && stem[n - 1] == L' ') n--;
+    stem[n] = 0;
+
+    if (_wcsicmp(stem, L"CON") == 0 || _wcsicmp(stem, L"PRN") == 0 ||
+        _wcsicmp(stem, L"AUX") == 0 || _wcsicmp(stem, L"NUL") == 0)
+        return 1;
+    if (n == 4 &&
+        ((_wcsnicmp(stem, L"COM", 3) == 0) || (_wcsnicmp(stem, L"LPT", 3) == 0)) &&
+        stem[3] >= L'1' && stem[3] <= L'9')
+        return 1;
+    return 0;
+}
+
+/* 把不可信的 URL/站点建议名收敛成“单个 Windows 文件名”。
+   目标：不能产生路径穿越、不能因为非法字符直接 CreateFile 失败，也不能落到设备名。 */
+static void sanitize_filename(wchar_t *name, int n)
+{
+    if (!name || n <= 0) return;
+
+    int w = 0;
+    for (int r = 0; name[r] && w + 1 < n; r++) {
+        wchar_t c = name[r];
+        name[w++] = bad_filename_char(c) ? L'_' : c;
+    }
+
+    /* Win32 会忽略/拒绝文件名末尾的空格和点；主动去掉，避免“看着存在实际打不开”。 */
+    while (w > 0 && (name[w - 1] == L' ' || name[w - 1] == L'.')) w--;
+    name[w] = 0;
+
+    if (!name[0]) {
+        wcsncpy(name, L"download", n - 1);
+        name[n - 1] = 0;
+        return;
+    }
+
+    if (reserved_windows_name(name)) {
+        size_t len = wcslen(name);
+        if ((int)len + 1 < n) {
+            for (size_t i = len + 1; i > 0; i--) name[i] = name[i - 1];
+            name[0] = L'_';
+        } else {
+            /* 极小缓冲区没有前插空间时，至少破坏设备名本身。 */
+            name[0] = L'_';
+        }
+    }
+}
+
 /* 取最后一个 '/' 之后的后缀（不含点）；没有则返回空。 */
 static void ext_of(const wchar_t *name, wchar_t *out, int n)
 {
@@ -77,12 +140,12 @@ static int wide_unit_len(const wchar_t *p)
 
 /* 取 URL 末段作文件名，并做 %XX 解码。
    关键：%XX 是**字节**，UTF-8 的多字节序列必须整段解回宽字符。
-   以前是「一个 %XX 直接塞进一个 wchar_t」，于是
-   %E4%B8%AD 变成 "ä¸" 三个乱码字符 —— 中文/日文文件名全乱。 */
+   解码完成后还必须做 Windows 文件名清洗：%2F/%5C 等不能重新变成路径。 */
 void category_filename_from_url(const wchar_t *url, wchar_t *out, int n)
 {
+    if (!out || n <= 0) return;
     out[0] = 0;
-    if (!url || n <= 0) return;
+    if (!url) return;
 
     /* 去掉 query / fragment */
     wchar_t tmp[2048];
@@ -100,7 +163,12 @@ void category_filename_from_url(const wchar_t *url, wchar_t *out, int n)
     for (const wchar_t *p = base; *p && j < (int)sizeof bytes - 8; ) {
         if (*p == L'%' && p[1] && p[2]) {
             int hi = hexv(p[1]), lo = hexv(p[2]);
-            if (hi >= 0 && lo >= 0) { bytes[j++] = (char)((hi << 4) | lo); p += 3; continue; }
+            if (hi >= 0 && lo >= 0) {
+                int v = (hi << 4) | lo;
+                bytes[j++] = (char)(v == 0 ? '_' : v);   /* NUL 不能进入 Windows 文件名 */
+                p += 3;
+                continue;
+            }
         }
         char u8[8];
         int wl = wide_unit_len(p);
@@ -113,8 +181,7 @@ void category_filename_from_url(const wchar_t *url, wchar_t *out, int n)
 
     if (!MultiByteToWideChar(CP_UTF8, 0, bytes, -1, out, n)) out[0] = 0;
     out[n - 1] = 0;
-    if (!out[0]) wcsncpy(out, L"download", n - 1);
-    out[n - 1] = 0;
+    sanitize_filename(out, n);
 }
 
 void category_default_base(wchar_t *out, int n)
@@ -124,10 +191,12 @@ void category_default_base(wchar_t *out, int n)
     DWORD r = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
     if (r > 0 && r < MAX_PATH) {
         _snwprintf(out, n, L"%s\\Downloads", up);
+        out[n - 1] = 0;
         return;
     }
     /* 退化：exe 所在目录 */
     GetModuleFileNameW(NULL, out, n);
+    out[n - 1] = 0;
     wchar_t *sl = wcsrchr(out, L'\\');
     if (sl) *(sl + 1) = 0;
 }
@@ -135,6 +204,7 @@ void category_default_base(wchar_t *out, int n)
 void category_build_path(const wchar_t *base, const wchar_t *url_or_name,
                          int use_cat, wchar_t *out, int n)
 {
+    if (!out || n <= 0) return;
     wchar_t fname[512];
     category_filename_from_url(url_or_name, fname, 512);
     if (use_cat) {
@@ -143,4 +213,5 @@ void category_build_path(const wchar_t *base, const wchar_t *url_or_name,
     } else {
         _snwprintf(out, n, L"%s\\%s", base, fname);
     }
+    out[n - 1] = 0;
 }
