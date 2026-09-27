@@ -1,14 +1,10 @@
 # ============================================================
 # IDM Next Windows 发行打包脚本
-# - 自动定位 Qt / windeployqt，不再绑定某台机器的 C:\Qt\...
-# - 收集 Qt 运行库并裁剪无关组件
+# - 自动定位 Qt / windeployqt，不绑定某台机器的 C:\Qt\...
+# - 收集 Qt、MinGW、libcurl 等完整运行时依赖闭包
 # - 下载并校验运行所需辅助工具
 # - 生成便携 ZIP + SHA256
 # - 安装 NSIS 时同时生成 setup.exe
-#
-# 用法：
-#   powershell -ExecutionPolicy Bypass -File installer/package.ps1
-#   powershell -File installer/package.ps1 -QtBin D:\Qt\6.8.3\mingw_64\bin
 # ============================================================
 param(
     [string]$QtBin = $env:QT_BIN,
@@ -56,6 +52,31 @@ function Resolve-QtBin {
     throw "未找到 Qt 6 的 windeployqt.exe。请设置 QT_BIN 或传入 -QtBin。"
 }
 
+function Resolve-Objdump {
+    param([string]$ResolvedQtBin)
+
+    $candidates = @(
+        (Join-Path $ResolvedQtBin "objdump.exe")
+    )
+
+    $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+    if ($gcc) {
+        $candidates += (Join-Path (Split-Path $gcc.Source -Parent) "objdump.exe")
+    }
+
+    $objdump = Find-Executable "objdump.exe" $candidates
+    if ($objdump) { return $objdump }
+
+    foreach ($toolsRoot in @("C:\Qt\Tools", "D:\Qt\Tools")) {
+        if (-not (Test-Path $toolsRoot)) { continue }
+        $found = Get-ChildItem $toolsRoot -Recurse -Filter objdump.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+
+    throw "未找到 objdump.exe。MinGW 构建应包含 binutils；无法验证发行包运行时 DLL 依赖。"
+}
+
 function Get-ProjectVersion {
     $cmake = Get-Content (Join-Path $Root "CMakeLists.txt") -Raw -Encoding UTF8
     $match = [regex]::Match($cmake, 'project\(idm-next\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)', 'IgnoreCase')
@@ -96,11 +117,97 @@ function Ensure-ZipTool {
     }
 }
 
+function Get-PeImports {
+    param([string]$File, [string]$Objdump)
+    $output = & $Objdump -p $File 2>$null
+    if ($LASTEXITCODE -ne 0) { return @() }
+    return @(
+        $output |
+            Select-String -Pattern '^\s*DLL Name:\s*(.+?)\s*$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+}
+
+function Test-SystemDll {
+    param([string]$Name)
+    if ($Name -match '^(?i:api-ms-win-|ext-ms-win-)') { return $true }
+    $system32 = Join-Path $env:SystemRoot "System32\$Name"
+    $syswow64 = Join-Path $env:SystemRoot "SysWOW64\$Name"
+    return (Test-Path $system32) -or (Test-Path $syswow64)
+}
+
+function Add-RuntimeDependencyClosure {
+    param(
+        [string]$DistDir,
+        [string]$ResolvedQtBin,
+        [string]$Objdump
+    )
+
+    # 搜索构建目录、Qt/MinGW bin、vendored libcurl 与当前 PATH。
+    $searchDirs = New-Object System.Collections.Generic.List[string]
+    foreach ($dir in @(
+        $Build,
+        $ResolvedQtBin,
+        (Split-Path $Objdump -Parent),
+        (Join-Path $Root "third_party\libcurl\bin")
+    )) {
+        if ($dir -and (Test-Path $dir) -and -not $searchDirs.Contains($dir)) { $searchDirs.Add($dir) }
+    }
+    foreach ($dir in ($env:PATH -split ';')) {
+        if ($dir -and (Test-Path $dir) -and -not $searchDirs.Contains($dir)) { $searchDirs.Add($dir) }
+    }
+
+    $queue = New-Object System.Collections.Generic.Queue[string]
+    $seenFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $resolvedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+    Get-ChildItem $DistDir -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.dll') } | ForEach-Object {
+        $queue.Enqueue($_.FullName)
+        [void]$resolvedNames.Add($_.Name)
+    }
+
+    $copied = 0
+    while ($queue.Count -gt 0) {
+        $file = $queue.Dequeue()
+        if (-not $seenFiles.Add($file)) { continue }
+
+        foreach ($dependency in (Get-PeImports $file $Objdump)) {
+            if ($resolvedNames.Contains($dependency) -or (Test-SystemDll $dependency)) { continue }
+
+            $source = $null
+            foreach ($dir in $searchDirs) {
+                $candidate = Join-Path $dir $dependency
+                if (Test-Path $candidate) {
+                    $source = (Resolve-Path $candidate).Path
+                    break
+                }
+            }
+
+            if (-not $source) {
+                throw "未解析的运行时依赖：$dependency（由 $([IO.Path]::GetFileName($file)) 引入）"
+            }
+
+            $destination = Join-Path $DistDir $dependency
+            Copy-Item $source $destination -Force
+            [void]$resolvedNames.Add($dependency)
+            $queue.Enqueue($destination)
+            $copied++
+            Write-Host "运行时依赖: $dependency"
+        }
+    }
+
+    Write-Host "运行时依赖闭包完成：新增 $copied 个 DLL"
+}
+
 $Version = Get-ProjectVersion
 $QtBin = Resolve-QtBin
 $WindeployQt = Join-Path $QtBin "windeployqt.exe"
+$Objdump = Resolve-Objdump $QtBin
 Write-Host "IDM Next $Version"
 Write-Host "Qt bin: $QtBin"
+Write-Host "objdump: $Objdump"
 
 if (-not (Test-Path $Build)) { throw "build/ 不存在，请先完成 CMake 构建" }
 $MainExe = Join-Path $Build "idm-next.exe"
@@ -116,13 +223,12 @@ New-Item $OutDir -ItemType Directory -Force | Out-Null
 Copy-Item $MainExe $Dist
 Copy-Item $HostExe $Dist
 
-# 主程序和 host 都执行部署。host 虽然依赖较少，但必须确保独立启动可用。
-& $WindeployQt --release --no-translations (Join-Path $Dist "idm-next.exe")
+# Qt runtime。显式请求 compiler runtime；之后仍用 PE 依赖闭包做最终兜底。
+& $WindeployQt --release --compiler-runtime --no-translations (Join-Path $Dist "idm-next.exe")
 if ($LASTEXITCODE -ne 0) { throw "windeployqt(main) 失败" }
-& $WindeployQt --release --no-translations (Join-Path $Dist "idm-next-host.exe")
+& $WindeployQt --release --compiler-runtime --no-translations (Join-Path $Dist "idm-next-host.exe")
 if ($LASTEXITCODE -ne 0) { throw "windeployqt(host) 失败" }
 
-# 仅保留 SQLite 驱动。
 $SqlDir = Join-Path $Dist "sqldrivers"
 if (Test-Path $SqlDir) {
     Get-ChildItem $SqlDir -Filter "qsql*.dll" | Where-Object { $_.Name -ne "qsqlite.dll" } | Remove-Item -Force
@@ -131,15 +237,17 @@ if (-not (Test-Path (Join-Path $SqlDir "qsqlite.dll"))) {
     throw "发行目录缺少 qsqlite.dll"
 }
 
-# 浏览器扩展作为独立目录随应用发行。
+# 浏览器扩展作为独立目录随应用发行；开发时自动同步进去的 host runtime 不重复打包。
 $ExtensionSource = Join-Path $Root "browser-extension"
 if (Test-Path $ExtensionSource) {
     $ExtensionDest = Join-Path $Dist "browser-extension"
     New-Item $ExtensionDest -ItemType Directory -Force | Out-Null
     Copy-Item (Join-Path $ExtensionSource "*") $ExtensionDest -Recurse -Force
-    # 不把开发阶段同步进去的 exe / Qt DLL 重复塞入扩展目录。
     Remove-Item (Join-Path $ExtensionDest "native-messaging-host") -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# 补齐 MinGW / libcurl / OpenSSL 等非 Qt DLL，并递归验证依赖闭包。
+Add-RuntimeDependencyClosure -DistDir $Dist -ResolvedQtBin $QtBin -Objdump $Objdump
 
 if (-not $SkipTools) {
     Ensure-ZipTool "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" (Join-Path $Dist "aria2") "aria2c.exe"
@@ -161,7 +269,6 @@ if (-not $SkipTools) {
     }
 }
 
-# 便携包
 $PortableName = "idm-next-$Version-win64-portable.zip"
 $PortablePath = Join-Path $OutDir $PortableName
 Compress-Archive -Path (Join-Path $Dist "*") -DestinationPath $PortablePath -CompressionLevel Optimal
@@ -169,7 +276,6 @@ $PortableHash = (Get-FileHash $PortablePath -Algorithm SHA256).Hash.ToLowerInvar
 "$PortableHash  $PortableName" | Set-Content (Join-Path $OutDir "SHA256SUMS.txt") -Encoding ASCII
 Write-Host "便携包：$PortablePath"
 
-# NSIS 安装包。版本从 CMake 注入，不再在 nsi 内写死。
 $Makensis = Find-Executable "makensis.exe" @(
     "C:\Program Files (x86)\NSIS\makensis.exe",
     "C:\Program Files\NSIS\makensis.exe"
