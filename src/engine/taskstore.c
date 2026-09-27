@@ -1,5 +1,6 @@
 #include "taskstore.h"
 #include "torrent.h"
+#include "common/util.h"
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +49,21 @@ static void verify_partial(download_task_t *t)
         t->downloaded = 0;
         for (int i = 0; i < 16; i++) t->seg_written[i] = 0;
         t->status = DL_QUEUED;
+    }
+}
+
+/* 恢复任务不会经过 task_create()，因此必须显式登记 outfile。
+   若损坏/旧版任务库里已有两个活跃 HTTP 任务指向同一路径，第二个不能自动启动并互相覆盖。 */
+static void finalize_loaded_task(download_task_t *t, int nseg)
+{
+    finalize_task(t, nseg);
+    verify_partial(t);
+    if (task_register_outfile(t) != 0) {
+        log_msg("taskstore: duplicate restored output path: %ls", t->outfile);
+        if (t->kind != IDM_KIND_TORRENT && t->status != DL_COMPLETE) {
+            t->status = DL_ERROR;
+            t->user_paused = 1;
+        }
     }
 }
 
@@ -108,7 +124,7 @@ int taskstore_load(const wchar_t *path, download_task_t **tasks, int maxn, int *
         if (!line[0]) continue;
 
         if (strcmp(line, "T") == 0) {
-            if (cur) { finalize_task(cur, seidx); verify_partial(cur); }
+            if (cur) finalize_loaded_task(cur, seidx);
             if (n >= maxn) { cur = NULL; break; }
             cur = (download_task_t *)calloc(1, sizeof *cur);
             if (!cur) break;
@@ -150,7 +166,7 @@ int taskstore_load(const wchar_t *path, download_task_t **tasks, int maxn, int *
         }
     }
     fclose(f);
-    if (cur) { finalize_task(cur, seidx); verify_partial(cur); }
+    if (cur) finalize_loaded_task(cur, seidx);
 
     *outn = n;
     return 0;
