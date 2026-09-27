@@ -21,6 +21,10 @@
 
 const wchar_t *g_class_name = IDM_WINDOW_CLASS;
 
+/* 进程级单实例门闩。必须在主窗口/下载引擎初始化之前创建；仅用 FindWindow 会有
+   两个进程同时启动、都还没创建窗口时的竞态。Local\ 作用域限定到当前登录会话。 */
+static const wchar_t *g_single_instance_mutex = L"Local\\Swoop.SingleInstance.v1";
+
 /* 从 Unicode 命令行抓第一个下载地址。
    不再从 WinMain 的 LPSTR/ACP 参数提取后再猜编码：带中文、签名参数或其他
    非 ASCII 字符的 URL 在“首次启动”和“转发到已有实例”两条路径必须完全一致。 */
@@ -72,10 +76,29 @@ static int forward_to_existing(const wchar_t *url)
         SendMessageW(w, WM_COPYDATA, 0, (LPARAM)&cds);
     }
 
-    /* 托盘隐藏/最小化/被其他窗口遮挡时，二次双击应该表现为“打开已有 Swoop”。 */
-    ShowWindow(w, SW_RESTORE);
+    /* 最小化才 restore；已最大化的窗口不能因为二次启动被无意还原成普通尺寸。
+       托盘隐藏但未最小化时只需要 show。 */
+    if (IsIconic(w))
+        ShowWindow(w, SW_RESTORE);
+    else if (!IsWindowVisible(w))
+        ShowWindow(w, SW_SHOW);
     SetForegroundWindow(w);
     return 1;
+}
+
+/* 第二个进程可能在第一个进程刚拿到 mutex、主窗口尚未创建时进来。
+   此时绝不能继续初始化第二套引擎；短暂等待主窗口出现后再转发。 */
+static int wait_and_forward_to_existing(const wchar_t *url, DWORD timeout_ms)
+{
+    const DWORD step_ms = 50;
+    DWORD waited = 0;
+    for (;;) {
+        if (forward_to_existing(url)) return 1;
+        if (waited >= timeout_ms) break;
+        Sleep(step_ms);
+        waited += step_ms;
+    }
+    return 0;
 }
 
 int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
@@ -86,8 +109,26 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
     wchar_t starturl[4096];
     extract_url_w(GetCommandLineW(), starturl, sizeof starturl / sizeof starturl[0]);
 
-    /* 真单实例：无论是否带 URL，只要已有主窗口就复用它。 */
-    if (forward_to_existing(starturl[0] ? starturl : NULL)) return 0;
+    /* 原子单实例：mutex 必须早于 GUI / HTTP /任务存储初始化。
+       ERROR_ALREADY_EXISTS 表示另一个进程已经抢到启动权，即使它的窗口暂时还没出现。 */
+    HANDLE single = CreateMutexW(NULL, FALSE, g_single_instance_mutex);
+    if (!single) {
+        MessageBoxW(NULL, L"无法创建单实例锁。", L"Swoop", MB_ICONERROR);
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        int ok = wait_and_forward_to_existing(starturl[0] ? starturl : NULL, 10000);
+        CloseHandle(single);
+        if (ok) return 0;
+        MessageBoxW(NULL, L"已有 Swoop 正在启动，但主窗口未能就绪。", L"Swoop", MB_ICONERROR);
+        return 1;
+    }
+
+    /* 兼容升级场景：旧版 Swoop 可能已经运行但还没有上述 mutex。 */
+    if (forward_to_existing(starturl[0] ? starturl : NULL)) {
+        CloseHandle(single);
+        return 0;
+    }
 
     /* 命令行 /starthidden 优先；否则按设置项「启动时隐藏到托盘」 */
     int starthidden = (strstr(cmd, "/starthidden") != NULL) ||
@@ -103,6 +144,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
     if (http_init(proxy_mode == 1 ? WINHTTP_ACCESS_TYPE_NO_PROXY
                                   : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY) != 0) {
         MessageBoxW(NULL, L"无法加载 winhttp.dll", L"Swoop", MB_ICONERROR);
+        CloseHandle(single);
         return 1;
     }
 
@@ -116,7 +158,11 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
     }
 
     HWND w = create_main_window(h);
-    if (!w) { http_cleanup(); return 1; }
+    if (!w) {
+        http_cleanup();
+        CloseHandle(single);
+        return 1;
+    }
 
     /* 菜单里写着 Ctrl+N，就必须真的能按 —— 否则是空头承诺 */
     HACCEL acc = LoadAcceleratorsW(h, MAKEINTRESOURCEW(IDR_ACCEL));
@@ -136,5 +182,6 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
         DispatchMessage(&m);
     }
     http_cleanup();
+    CloseHandle(single);
     return 0;
 }
