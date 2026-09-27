@@ -35,6 +35,62 @@ jobs:
         shell: msys2 {0}
         run: ./swoop_nmhost.exe --selftest
 
+      - name: Single-instance startup-race smoke test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path './swoop.exe').Path
+          # 故意近同时启动两个进程，覆盖“两个进程都还没创建窗口”的竞态。
+          $first = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+          $second = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+          $pair = @($first, $second)
+          try {
+            $winner = $null
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Milliseconds 250
+              foreach ($p in $pair) { $p.Refresh() }
+
+              $alive = @($pair | Where-Object { -not $_.HasExited })
+              if ($alive.Count -gt 1) { continue }
+              if ($alive.Count -eq 0) { throw 'both Swoop instances exited during startup race' }
+
+              $alive[0].Refresh()
+              if ($alive[0].MainWindowHandle -ne 0) {
+                $winner = $alive[0]
+                break
+              }
+            }
+            if (-not $winner) {
+              throw 'startup race did not converge to exactly one ready Swoop instance'
+            }
+
+            $losers = @($pair | Where-Object { $_.HasExited })
+            if ($losers.Count -ne 1) {
+              throw 'exactly one secondary Swoop process should exit'
+            }
+            if ($losers[0].ExitCode -ne 0) {
+              throw "secondary Swoop launch exited with code $($losers[0].ExitCode)"
+            }
+
+            # 稳态二次启动仍要立即复用已有窗口并退出。
+            $third = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+            try {
+              if (-not $third.WaitForExit(5000)) {
+                throw 'steady-state Swoop launch did not reuse the existing instance'
+              }
+              if ($third.ExitCode -ne 0) {
+                throw "steady-state Swoop launch exited with code $($third.ExitCode)"
+              }
+            }
+            finally {
+              if (-not $third.HasExited) { Stop-Process -Id $third.Id -Force -ErrorAction SilentlyContinue }
+            }
+          }
+          finally {
+            foreach ($p in $pair) {
+              if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            }
+          }
+
       - name: Verify no static winhttp/winmm import
         shell: msys2 {0}
         run: |
@@ -50,7 +106,7 @@ jobs:
 
       - name: Test packaging
         shell: pwsh
-        run: python -m unittest packaging/test_make_release.py packaging/test_resource_encoding.py
+        run: python -m unittest discover -s packaging -p "test_*.py"
 
       - name: Build portable package
         shell: pwsh

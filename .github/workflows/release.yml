@@ -63,9 +63,11 @@ jobs:
           python-version: '3.x'
 
       - name: Test release packaging
-        run: python -m unittest packaging/test_make_release.py packaging/test_resource_encoding.py
+        shell: pwsh
+        run: python -m unittest discover -s packaging -p "test_*.py"
 
       - name: Package
+        shell: pwsh
         run: python packaging/make_release.py
 
       - name: Verify checksum file
