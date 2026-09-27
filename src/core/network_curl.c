@@ -27,6 +27,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <wchar.h>     /* wmemmove / wcsncpy（长路径前缀拼接用） */
 #include <sys/stat.h>
 #include <windows.h>   /* Sleep（重试退避） */
 
@@ -44,6 +45,39 @@ static int g_curl_init = 0;
 static char *strcasestr(const char *haystack, const char *needle);
 static void parse_content_disposition(const char *hdr, char *out, int out_len);
 
+/* 把 UTF-8 路径转成宽字符路径，并在超长时补上 Windows `\\?\` 长路径前缀。
+ * 与 download_core.c 的 utf8_to_wpath 语义完全一致：仅当绝对本地路径长度 ≥ 260
+ * 时才加前缀，避免 `\\?\` 的「不规范化」副作用影响正常路径。详细约束见彼处注释。 */
+static int utf8_to_wpath(const char *path, wchar_t *wpath, int wcap)
+{
+#ifdef _WIN32
+    wchar_t tmp[1024];
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, 1024);
+    if (n <= 0) return 0;
+    size_t len = (size_t)(n - 1);
+    if (len >= 260 && (size_t)wcap > len + 8) {
+        if (tmp[0] == L'\\' && tmp[1] == L'?' && tmp[2] == L'\\') {
+            /* 已带前缀 */
+        } else if (tmp[0] == L'\\' && tmp[1] == L'\\') {
+            for (wchar_t *q = tmp; *q; q++) if (*q == L'/') *q = L'\\';
+            wmemmove(tmp + 8, tmp + 2, len - 1);
+            tmp[0] = L'\\'; tmp[1] = L'\\'; tmp[2] = L'?'; tmp[3] = L'\\';
+            tmp[4] = L'U';  tmp[5] = L'N';  tmp[6] = L'C';  tmp[7] = L'\\';
+        } else if (tmp[1] == L':') {
+            for (wchar_t *q = tmp; *q; q++) if (*q == L'/') *q = L'\\';
+            wmemmove(tmp + 4, tmp, len + 1);
+            tmp[0] = L'\\'; tmp[1] = L'\\'; tmp[2] = L'?'; tmp[3] = L'\\';
+        }
+    }
+    wcsncpy(wpath, tmp, (size_t)wcap - 1);
+    wpath[wcap - 1] = L'\0';
+    return 1;
+#else
+    (void)path; (void)wpath; (void)wcap;
+    return 0;
+#endif
+}
+
 /* ── UTF-8 路径安全打开文件 ──
  * Windows 下 fopen 按 ANSI 代码页解释路径，传入 UTF-8 字节的中文文件名会被
  * 变成乱码文件名。这里统一转成 UTF-16 走 _wfopen，保证中文/非 ASCII 路径正确。 */
@@ -51,7 +85,7 @@ static FILE *utf8_fopen(const char *path, const char *mode) {
 #ifdef _WIN32
     wchar_t wpath[1024];
     wchar_t wmode[16];
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) <= 0) return NULL;
+    if (!utf8_to_wpath(path, wpath, 1024)) return NULL;
     if (MultiByteToWideChar(CP_ACP, 0, mode, -1, wmode, 16) <= 0) return NULL;
     return _wfopen(wpath, wmode);
 #else

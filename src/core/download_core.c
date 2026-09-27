@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
+#include <wchar.h> /* wmemmove / wcsncpy（长路径前缀拼接用） */
 #include <io.h>    /* _chsize */
 #include <sys/stat.h>  /* fstat, struct stat */
 
@@ -98,10 +99,59 @@ static int trace_on(void)
  * Windows 的 fopen / DeleteFileA / MoveFileA 走 ANSI 代码页，若路径含 UTF-8 编码的
  * 中文（下载文件名叫中文，或用户名是中文），会生成乱码文件名或操作失败。
  * 这里统一转 UTF-16 后调用宽字符 API，保证非 ASCII 路径正确。 */
+/* 把 UTF-8 路径转成宽字符路径，并在超长时补上 Windows `\\?\` 长路径前缀。
+ *
+ * 背景：Windows 传统上把**完整路径**限制在 260 字符（MAX_PATH）。当保存目录很深、
+ * 或文件名很长（典型场景：网盘/相册按日期分的多级子目录、超长标题的视频）时，
+ * CreateFileW / _wfopen / MoveFileW / GetFileAttributesW 会直接失败
+ * （ERROR_FILENAME_EXCED_RANGE），用户只看到「任务失败」，却不知道是路径太长。
+ * 在绝对本地路径前加 `\\?\` 前缀即可把上限放宽到 ~32767 字符。
+ *
+ * 关键约束（决定实现）：
+ *   - `\\?\` 只接受**绝对**路径，且必须是 `\` 分隔（不接受 `/`）；
+ *   - 每个路径**分量**（单个目录名/文件名）仍受 255 字符限制 —— 前缀只解「总路径过长」，
+ *     不解「单文件名过长」，后者本就属于非法文件名；
+ *   - 只在转换后的宽路径长度 ≥ 260 时才加前缀：绝大多数正常路径行为零变化，
+ *     只有真正超长的路径才进入长路径模式，避免 `\\?\` 带来的「不规范化」副作用
+ *     （它禁用 `..` 折叠、尾随点/空格清理等，可能改变某些特殊路径的语义）；
+ *   - 已带 `\\?\` 的路径原样返回，不重复加。 */
+static int utf8_to_wpath(const char *path, wchar_t *wpath, int wcap)
+{
+#ifdef _WIN32
+    wchar_t tmp[1024];
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, 1024);
+    if (n <= 0) return 0;
+    size_t len = (size_t)(n - 1);   /* 不含结尾 \0 的宽字符数 */
+    if (len >= 260 && (size_t)wcap > len + 8) {
+        if (tmp[0] == L'\\' && tmp[1] == L'?' && tmp[2] == L'\\') {
+            /* 已带前缀，原样使用 */
+        } else if (tmp[0] == L'\\' && tmp[1] == L'\\') {
+            /* UNC 路径：\\server\share\... → \\?\UNC\server\share\... */
+            for (wchar_t *q = tmp; *q; q++) if (*q == L'/') *q = L'\\';
+            wmemmove(tmp + 8, tmp + 2, len - 1);   /* 腾出 \\?\UNC（8 字符） */
+            tmp[0] = L'\\'; tmp[1] = L'\\'; tmp[2] = L'?'; tmp[3] = L'\\';
+            tmp[4] = L'U';  tmp[5] = L'N';  tmp[6] = L'C';  tmp[7] = L'\\';
+        } else if (tmp[1] == L':') {
+            /* 盘符绝对路径 C:\... → \\?\C:\... */
+            for (wchar_t *q = tmp; *q; q++) if (*q == L'/') *q = L'\\';
+            wmemmove(tmp + 4, tmp, len + 1);
+            tmp[0] = L'\\'; tmp[1] = L'\\'; tmp[2] = L'?'; tmp[3] = L'\\';
+        }
+        /* 相对路径等：无法用 \\?\ 表达，保持原样交系统处理 */
+    }
+    wcsncpy(wpath, tmp, (size_t)wcap - 1);
+    wpath[wcap - 1] = L'\0';
+    return 1;
+#else
+    (void)path; (void)wpath; (void)wcap;
+    return 0;
+#endif
+}
+
 static FILE *utf8_fopen(const char *path, const char *mode) {
 #ifdef _WIN32
     wchar_t wpath[1024], wmode[16];
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) <= 0) return NULL;
+    if (!utf8_to_wpath(path, wpath, 1024)) return NULL;
     if (MultiByteToWideChar(CP_ACP, 0, mode, -1, wmode, 16) <= 0) return NULL;
     return _wfopen(wpath, wmode);
 #else
@@ -112,7 +162,7 @@ static FILE *utf8_fopen(const char *path, const char *mode) {
 static int utf8_delete(const char *path) {
 #ifdef _WIN32
     wchar_t wpath[1024];
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) <= 0) return 0;
+    if (!utf8_to_wpath(path, wpath, 1024)) return 0;
     return DeleteFileW(wpath) ? 1 : 0;
 #else
     return remove(path) == 0 ? 1 : 0;
@@ -122,8 +172,8 @@ static int utf8_delete(const char *path) {
 static int utf8_move(const char *src, const char *dst) {
 #ifdef _WIN32
     wchar_t wsrc[1024], wdst[1024];
-    if (MultiByteToWideChar(CP_UTF8, 0, src, -1, wsrc, 1024) <= 0) return 0;
-    if (MultiByteToWideChar(CP_UTF8, 0, dst, -1, wdst, 1024) <= 0) return 0;
+    if (!utf8_to_wpath(src, wsrc, 1024)) return 0;
+    if (!utf8_to_wpath(dst, wdst, 1024)) return 0;
     return MoveFileW(wsrc, wdst) ? 1 : 0;
 #else
     return rename(src, dst) == 0 ? 1 : 0;
@@ -133,7 +183,7 @@ static int utf8_move(const char *src, const char *dst) {
 static int utf8_file_exists(const char *path) {
 #ifdef _WIN32
     wchar_t wpath[1024];
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) <= 0) return 0;
+    if (!utf8_to_wpath(path, wpath, 1024)) return 0;
     DWORD a = GetFileAttributesW(wpath);
     return (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
 #else
@@ -247,6 +297,24 @@ static void describe_file_error(const char *action, const char *path,
  * 任务（用户可能已经把那个目录删了）、CLI、以及把 download_core 当库直接用的调用方。
  * 目录缺失时 utf8_fopen(tmp_path) 会立刻失败，用户只看到「任务失败」，根本看不出
  * 是路径问题。引擎自己兜底，任何入口都不会因此失败。 */
+/* 创建单个目录（已处理长路径 `\\?\` 前缀）。CreateDirectoryW 一次只建一级，
+ * 父目录不存在就失败，所以由 ensure_dir_utf8 逐级调用。 */
+static void create_one_dir_w(wchar_t *p)
+{
+    size_t len = wcslen(p);
+    if (len >= 260 && p[1] == L':') {
+        for (wchar_t *q = p; *q; q++) if (*q == L'/') *q = L'\\';
+        wchar_t buf[1100];
+        if (len + 8 <= (int)(sizeof(buf) / sizeof(buf[0]))) {
+            wmemmove(buf + 4, p, len + 1);
+            buf[0] = L'\\'; buf[1] = L'\\'; buf[2] = L'?'; buf[3] = L'\\';
+            CreateDirectoryW(buf, NULL);
+            return;
+        }
+    }
+    CreateDirectoryW(p, NULL);
+}
+
 static int ensure_dir_utf8(const char *dir) {
     if (!dir || !dir[0]) return 0;
 #ifdef _WIN32
@@ -262,11 +330,11 @@ static int ensure_dir_utf8(const char *dir) {
     for (; *p; p++) {
         if (*p != L'\\') continue;
         *p = L'\0';
-        if (w[0]) CreateDirectoryW(w, NULL);   /* 中间级：失败也无妨，末级会给出结论 */
+        create_one_dir_w(w);   /* 中间级：失败也无妨，末级会给出结论 */
         *p = L'\\';
     }
-    if (CreateDirectoryW(w, NULL)) return 1;
-    return GetLastError() == ERROR_ALREADY_EXISTS;   /* 已存在就是我们要的结果 */
+    create_one_dir_w(w);   /* 末级（可能超长 → 内部加前缀） */
+    return 1;
 #else
     /* 非 Windows：逐级 mkdir，忽略「已存在」。当前目标平台只有 Windows，尽力而为。 */
     char tmp[1024];

@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>   /* wmemmove / wcsncpy（长路径前缀拼接用） */
 #include <windows.h>
 
 #include "download_core.h"
@@ -61,13 +62,29 @@ static int wait_task(int id, int timeout_ms, int *out_status, int64_t *out_downl
     return -1;
 }
 
-/* ⚠️ 必须走 _wfopen：Windows 的 ANSI fopen 吃 UTF-8 路径会失败/乱码，
- * 这正是本项目修过的坑，测试自己也不能犯（否则会误报「文件不存在」）。 */
+/* ⚠️ 必须走 _wfopen + `\\?\` 长路径前缀：Windows 的 ANSI fopen 吃 UTF-8 路径会失败/乱码，
+ * 这正是本项目修过的坑，测试自己也不能犯（否则会误报「文件不存在」）。
+ * 长路径前缀逻辑与引擎一致：仅当绝对本地路径 ≥ 260 时才加 \\?\（单分量仍受 255 限制）。 */
+static int test_to_wpath(const char *path, wchar_t *wpath, int wcap)
+{
+    wchar_t tmp[MAX_PATH * 2];
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, (int)(sizeof(tmp) / sizeof(tmp[0])));
+    if (n <= 0) return 0;
+    size_t len = (size_t)(n - 1);
+    if (len >= 260 && wcap > (int)len + 8 && tmp[1] == L':') {
+        for (wchar_t *q = tmp; *q; q++) if (*q == L'/') *q = L'\\';
+        wmemmove(tmp + 4, tmp, len + 1);
+        tmp[0] = L'\\'; tmp[1] = L'\\'; tmp[2] = L'?'; tmp[3] = L'\\';
+    }
+    wcsncpy(wpath, tmp, (size_t)wcap - 1);
+    wpath[wcap - 1] = L'\0';
+    return 1;
+}
+
 static FILE *utf8_fopen_rb(const char *path)
 {
     wchar_t wpath[MAX_PATH * 2];
-    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])));
-    if (n <= 0) return NULL;
+    if (!test_to_wpath(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])))) return NULL;
     return _wfopen(wpath, L"rb");
 }
 
@@ -75,8 +92,7 @@ static FILE *utf8_fopen_rb(const char *path)
 static long utf8_write_file(const char *path, const char *data)
 {
     wchar_t wpath[MAX_PATH * 2];
-    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])));
-    if (n <= 0) return -1;
+    if (!test_to_wpath(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])))) return -1;
     FILE *f = _wfopen(wpath, L"wb");
     if (!f) return -1;
     size_t len = strlen(data);
@@ -176,8 +192,7 @@ static int wait_final(int id, int timeout_ms, int *out_status, int64_t *out_down
 static void utf8_delete(const char *path)
 {
     wchar_t wpath[MAX_PATH * 2];
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
-                            (int)(sizeof(wpath) / sizeof(wpath[0]))) <= 0)
+    if (!test_to_wpath(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))))
         return;
     DeleteFileW(wpath);
 }
@@ -1186,6 +1201,74 @@ int main(int argc, char **argv)
                   && strstr(r.error_msg, "网络错误") == NULL, d);
         }
         utf8_delete(seed);
+    }
+
+    /* ── [19] 超长保存路径（>260 字符）→ 必须靠 \\?\ 前缀才能落盘 ──
+     * Windows 默认 260 字符上限：保存目录很深、或单目录名很长时，完整路径会超出，
+     * CreateFileW / MoveFileW / CreateDirectoryW 直接失败（ERROR_FILENAME_EXCED_RANGE）。
+     * 这里造一个「单分量 ≤255（合法）、但总路径 >260」的保存目录（一个 240 字符的
+     * 目录名分量），下载到它里面，断言任务完成、文件逐字节正确。
+     * ⚠️ 不能只用一个 >255 的巨文件名去测：那本来就非法，加了 \\?\ 也救不回来，
+     *      那样测的是「引擎有没有为非法名报错」而不是「\\?\ 有没有生效」，会偏离本意。
+     * ⚠️ 测试自己的读/删也必须走 \\?\（test_to_wpath 已加），否则会假失败。 */
+    printf("\n[19] 超长保存路径（>260 字符）→ 必须落盘成功\n");
+    {
+        char longdir[MAX_PATH + 512], u[512];
+        snprintf(u, sizeof(u), "http://127.0.0.1:%d/small.bin", port);
+
+        /* 单分量 240 字符（<255，合法），总路径因此 >260（TEMP 下约 290+ 字符） */
+        char comp[256];
+        memset(comp, 'A', 240); comp[240] = '\0';
+        snprintf(longdir, sizeof(longdir), "%s\\%s", outdir, comp);
+
+        /* 先确保它真的不存在（正常路径 API 读不了 >260，用前缀删除兜底） */
+        {
+            wchar_t w[1024];
+            if (test_to_wpath(longdir, w, 1024)) {
+                DeleteFileW(w); RemoveDirectoryW(w);
+            }
+        }
+
+        /* 配置站点登录（small.bin 需 Basic 认证） */
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+
+        int id = dlmgr_add(u, longdir, "lp.bin", 2, NULL, NULL, NULL, NULL);
+        check("长路径任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 60000, &st, &dl);
+
+            char path[MAX_PATH + 512], tmp2[MAX_PATH + 512];
+            snprintf(path, sizeof(path), "%s\\lp.bin", longdir);
+            snprintf(tmp2, sizeof(tmp2), "%s.idmtmp", path);
+            long fsz = file_size_of(path);
+            char d[300];
+            snprintf(d, sizeof(d), "status=%d file=%ld bytes", st, fsz);
+            check("超长路径下下载仍然完成（status=3）", st == 3, d);
+            check("文件确实落在超长路径目录里（非空）", fsz > 0, d);
+
+            int mc = content_matches_pattern(path, 1024 * 1024);
+            snprintf(d, sizeof(d), "file_size=%lld 比对=%d（1=逐字节一致）",
+                     file_size_i64_of(path), mc);
+            check("超长路径落盘内容逐字节正确", mc == 1, d);
+
+            utf8_delete(path);
+            utf8_delete(tmp2);   /* 失败残留的 .idmtmp 也要清掉 */
+            {
+                wchar_t w[1024];
+                if (test_to_wpath(longdir, w, 1024)) RemoveDirectoryW(w);
+            }
+            dlmgr_remove(id);
+        }
     }
 
     dlmgr_destroy();
