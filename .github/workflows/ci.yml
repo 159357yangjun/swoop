@@ -61,12 +61,23 @@ jobs:
           foreach ($required in @(
             'installer/dist/idm-next.exe',
             'installer/dist/idm-next-host.exe',
+            'installer/dist/libgcc_s_seh-1.dll',
+            'installer/dist/libstdc++-6.dll',
+            'installer/dist/libwinpthread-1.dll',
+            'installer/dist/libcurl-4.dll',
             'installer/dist/sqldrivers/qsqlite.dll',
             'installer/dist/browser-extension/manifest.json',
             'installer/dist/browser-extension/native-messaging-host/com.tencent.idm_next.json',
             'installer/dist/browser-extension/native-messaging-host/install_host.ps1'
           )) {
             if (-not (Test-Path $required)) { throw "packaged runtime missing: $required" }
+          }
+
+          $badExtensionFiles = Get-ChildItem 'installer/dist/browser-extension' -Recurse -File -Force | Where-Object {
+            $_.Name -match '^test_' -or $_.Extension.ToLowerInvariant() -in @('.py', '.pyc', '.pyo')
+          }
+          if ($badExtensionFiles) {
+            throw "development files leaked into browser extension package: $($badExtensionFiles.FullName -join ', ')"
           }
 
           $process = Start-Process `
