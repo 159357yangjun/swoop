@@ -1,7 +1,6 @@
 name: ci
 
-# 每次推送 / PR 都跑一遍：编译 + 双自测 + IDM-parity 校验。
-# 任何一个红，提交就是不能要的。
+# 每次推送 / PR 都执行：编译、自测、依赖约束、发行包测试与可下载 CI artifact。
 on: [push, pull_request, workflow_dispatch]
 
 jobs:
@@ -31,7 +30,6 @@ jobs:
         shell: msys2 {0}
         run: ./swoop_nmhost.exe --selftest
 
-      # IDM-parity：winhttp/winmm 必须动态加载，不得进静态导入表。
       - name: Verify no static winhttp/winmm import
         shell: msys2 {0}
         run: |
@@ -40,3 +38,32 @@ jobs:
             echo "::error::IDM-parity violated: winhttp/winmm statically imported"
             exit 1
           fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Test packaging
+        shell: pwsh
+        run: python -m unittest packaging/test_make_release.py packaging/test_resource_encoding.py
+
+      - name: Build portable package
+        shell: pwsh
+        run: python packaging/make_release.py
+
+      - name: Verify checksum
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist/swoop-*-win64.zip | Select-Object -First 1
+          if (-not $zip) { throw 'Swoop ZIP missing' }
+          $sum = Get-Content dist/SHA256SUMS.txt
+          if ($sum -notmatch '^([0-9a-f]{64})  (.+\.zip)$') { throw 'invalid checksum manifest' }
+          $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $Matches[1]) { throw 'Swoop ZIP checksum mismatch' }
+
+      - name: Upload CI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: swoop-win64-ci
+          path: dist/*
+          if-no-files-found: error
