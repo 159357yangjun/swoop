@@ -40,6 +40,12 @@ SetCompressor /SOLID lzma
 
 Section "Main" SecMain
   SetOutPath "$INSTDIR"
+
+  ; 0.1.0 早期包把 FFmpeg essentials 的 ffplay/ffprobe 一并安装，二者约 200 MB
+  ; 且应用从未调用。升级覆盖不会自动删除“新包里已不存在”的旧文件，所以显式清理。
+  Delete "$INSTDIR\ffmpeg\ffplay.exe"
+  Delete "$INSTDIR\ffmpeg\ffprobe.exe"
+
   ; makensis 可能从任意工作目录启动，必须以本 .nsi 文件所在目录定位 dist。
   File /r "${__FILEDIR__}\dist\*.*"
 
