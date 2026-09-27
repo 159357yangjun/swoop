@@ -22,6 +22,31 @@
 #include <QFile>
 #include <QFileInfo>
 
+namespace {
+
+// 只对“看起来已经完整”的直接文件 URL 推断文件名。
+// 视频页面（YouTube/Bilibili 等）必须留空，让 yt-dlp 根据标题/格式生成唯一输出名；
+// 输入过程中也不能从 "h" / "https://exa" 这类半成品提前锁死文件名。
+QString inferredFileNameForUrl(const QString& raw)
+{
+    const QString url = raw.trimmed();
+    if (url.isEmpty() || VideoDownloader::isVideoUrl(url))
+        return QString();
+
+    QUrl parsed(url, QUrl::StrictMode);
+    if (!parsed.isValid())
+        return QString();
+
+    const QString scheme = parsed.scheme().toLower();
+    if ((scheme == QStringLiteral("http") || scheme == QStringLiteral("https"))
+        && parsed.host().isEmpty())
+        return QString();
+
+    return parsed.fileName();
+}
+
+} // namespace
+
 NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int defaultThreads)
     : QDialog(parent)
 {
@@ -42,6 +67,16 @@ NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int
 
     m_nameEdit = new QLineEdit(this);
     m_nameEdit->setPlaceholderText(QStringLiteral("可选，留空自动从链接推断"));
+
+    // 用户完成一次 URL 编辑后再推断名称。这样逐字输入不会在第一个字符时写入错误文件名；
+    // 对视频页面 inferredFileNameForUrl() 返回空，交给 yt-dlp 决定标题和扩展名。
+    connect(m_urlEdit, &QLineEdit::editingFinished, this, [this]() {
+        if (!m_nameEdit->text().trimmed().isEmpty())
+            return;
+        const QString inferred = inferredFileNameForUrl(m_urlEdit->text());
+        if (!inferred.isEmpty())
+            m_nameEdit->setText(inferred);
+    });
 
     m_threadSpin = new QSpinBox(this);
     m_threadSpin->setRange(1, 32);
@@ -94,8 +129,8 @@ NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int
 void NewTaskDialog::setUrl(const QString& url)
 {
     m_urlEdit->setText(url);
-    if (m_nameEdit->text().isEmpty()) {
-        QString name = QUrl(url).fileName();
+    if (m_nameEdit->text().trimmed().isEmpty()) {
+        const QString name = inferredFileNameForUrl(url);
         if (!name.isEmpty())
             m_nameEdit->setText(name);
     }
@@ -132,12 +167,6 @@ void NewTaskDialog::onUrlChanged()
     bool video = m_videoReady && VideoDownloader::isVideoUrl(url);
     m_formatLabel->setVisible(video);
     m_formatWidget->setVisible(video);
-
-    if (m_nameEdit->text().isEmpty()) {
-        QString inferred = QUrl(url).fileName();
-        if (!inferred.isEmpty())
-            m_nameEdit->setText(inferred);
-    }
 
     if (!video) {
         stopFormatProbe();
