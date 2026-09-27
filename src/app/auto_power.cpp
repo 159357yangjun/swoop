@@ -83,6 +83,8 @@ public:
         setWindowTitle(QStringLiteral("下载完成 - 即将%1").arg(actionText));
         setFixedSize(360, 150);
         setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+        // 对话框关闭后不应在 MainWindow 子对象树里长期残留；控制器只持有当前活动对话框。
+        setAttribute(Qt::WA_DeleteOnClose, true);
 
         auto* v = new QVBoxLayout(this);
         m_label = new QLabel(this);
@@ -102,6 +104,8 @@ public:
             --m_secs;
             if (m_secs <= 0) {
                 m_timer->stop();
+                // 标记“已经正常触发”后再 close；closeEvent 不能把正常触发误判为用户取消。
+                m_resolved = true;
                 if (m_onTrigger) m_onTrigger();
                 close();
             } else {
@@ -114,6 +118,9 @@ public:
     ~AutoPowerDialog() override { if (m_timer) m_timer->stop(); }
 
     void doCancel() {
+        if (m_resolved)
+            return;
+        m_resolved = true;
         if (m_timer) m_timer->stop();
         if (m_onCancel) m_onCancel();
         close();
@@ -122,6 +129,12 @@ public:
 protected:
     void closeEvent(QCloseEvent* e) override {
         if (m_timer) m_timer->stop();
+        // 点击窗口右上角 X 与“取消”按钮语义一致。旧逻辑只停定时器却不通知控制器，
+        // 导致 AutoPowerController::m_pending 永久保持 true，后续再也不会触发倒计时。
+        if (!m_resolved) {
+            m_resolved = true;
+            if (m_onCancel) m_onCancel();
+        }
         QDialog::closeEvent(e);
     }
 
@@ -137,6 +150,7 @@ private:
     int       m_secs = 0;
     Callback  m_onTrigger;
     Callback  m_onCancel;
+    bool      m_resolved = false;
 };
 
 // ── AutoPowerController ──────────────────────────────────
@@ -231,9 +245,13 @@ void AutoPowerController::maybeTrigger()
 void AutoPowerController::cancelPending()
 {
     if (m_dlg) {
-        m_dlg->close();
-        m_dlg->deleteLater();
+        // closeEvent 会回调 onCancel 并把 m_dlg 置空；必须先保存局部指针，不能在 close()
+        // 返回后继续通过 m_dlg 解引用，否则会出现空指针/悬空指针风险。
+        QDialog* dlg = m_dlg;
         m_dlg = nullptr;
+        m_pending = false;
+        dlg->close();   // WA_DeleteOnClose 负责 deleteLater
+        return;
     }
     m_pending = false;
 }
