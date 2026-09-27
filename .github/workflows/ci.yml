@@ -51,11 +51,11 @@ jobs:
         shell: pwsh
         run: choco install nsis -y --no-progress
 
-      - name: Package CI distribution
+      - name: Package full release distribution
         shell: pwsh
-        run: ./installer/package.ps1 -SkipTools
+        run: ./installer/package.ps1
 
-      - name: Smoke test packaged runtime
+      - name: Smoke test full packaged runtime
         shell: pwsh
         run: |
           foreach ($required in @(
@@ -66,11 +66,14 @@ jobs:
             'installer/dist/libwinpthread-1.dll',
             'installer/dist/libcurl-4.dll',
             'installer/dist/sqldrivers/qsqlite.dll',
+            'installer/dist/aria2/aria2c.exe',
+            'installer/dist/ffmpeg/ffmpeg.exe',
+            'installer/dist/yt-dlp/yt-dlp.exe',
             'installer/dist/browser-extension/manifest.json',
             'installer/dist/browser-extension/native-messaging-host/com.tencent.idm_next.json',
             'installer/dist/browser-extension/native-messaging-host/install_host.ps1'
           )) {
-            if (-not (Test-Path $required)) { throw "packaged runtime missing: $required" }
+            if (-not (Test-Path $required)) { throw "full release runtime missing: $required" }
           }
 
           $badExtensionFiles = Get-ChildItem 'installer/dist/browser-extension' -Recurse -File -Force | Where-Object {
@@ -80,8 +83,6 @@ jobs:
             throw "development files leaked into browser extension package: $($badExtensionFiles.FullName -join ', ')"
           }
 
-          # 安装版是 machine-wide，必须显式把 Native Messaging Host 注册到 HKLM；
-          # 便携版脚本默认 CurrentUser，二者由同一个脚本的 Scope 参数区分。
           $hostScript = Get-Content 'installer/dist/browser-extension/native-messaging-host/install_host.ps1' -Raw
           if ($hostScript -notmatch 'ValidateSet\("CurrentUser",\s*"Machine"\)') {
             throw 'native messaging installer does not expose CurrentUser/Machine scope'
@@ -90,6 +91,14 @@ jobs:
           if ($nsi -notmatch '-Scope Machine') {
             throw 'NSIS installer does not request machine-wide native messaging registration'
           }
+
+          # 辅助工具不能只“文件存在”；至少实际启动并返回版本信息。
+          & 'installer/dist/aria2/aria2c.exe' --version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { throw 'bundled aria2c failed to start' }
+          & 'installer/dist/ffmpeg/ffmpeg.exe' -version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { throw 'bundled ffmpeg failed to start' }
+          & 'installer/dist/yt-dlp/yt-dlp.exe' --version
+          if ($LASTEXITCODE -ne 0) { throw 'bundled yt-dlp failed to start' }
 
           $process = Start-Process `
             -FilePath (Resolve-Path 'installer/dist/idm-next.exe') `
@@ -105,8 +114,6 @@ jobs:
         run: |
           $dist = (Resolve-Path 'installer/dist').Path
           $exe = (Resolve-Path 'installer/dist/idm-next.exe').Path
-
-          # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
           $first = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
           $second = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
           $pair = @($first, $second)
@@ -116,53 +123,32 @@ jobs:
               Start-Sleep -Milliseconds 250
               foreach ($p in $pair) { $p.Refresh() }
               $alive = @($pair | Where-Object { -not $_.HasExited })
-
               if ($alive.Count -gt 1) { continue }
               if ($alive.Count -eq 0) { throw 'both IDM Next instances exited during startup race' }
-
               $alive[0].Refresh()
               if ($alive[0].MainWindowHandle -ne 0) {
                 $winner = $alive[0]
                 break
               }
             }
-            if (-not $winner) {
-              throw 'startup race did not converge to exactly one ready IDM Next GUI'
-            }
-
+            if (-not $winner) { throw 'startup race did not converge to exactly one ready IDM Next GUI' }
             $losers = @($pair | Where-Object { $_.HasExited })
-            if ($losers.Count -ne 1) {
-              throw 'exactly one IDM Next secondary process should exit'
-            }
-            if ($losers[0].ExitCode -ne 0) {
-              throw "secondary IDM Next launch exited with code $($losers[0].ExitCode)"
-            }
+            if ($losers.Count -ne 1) { throw 'exactly one IDM Next secondary process should exit' }
+            if ($losers[0].ExitCode -ne 0) { throw "secondary IDM Next launch exited with code $($losers[0].ExitCode)" }
 
-            # 稳态普通二次启动必须激活已有窗口并迅速退出。
             $third = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
             try {
-              if (-not $third.WaitForExit(5000)) {
-                throw 'steady-state IDM Next launch did not reuse the existing GUI instance'
-              }
-              if ($third.ExitCode -ne 0) {
-                throw "steady-state IDM Next launch exited with code $($third.ExitCode)"
-              }
+              if (-not $third.WaitForExit(5000)) { throw 'steady-state IDM Next launch did not reuse the existing GUI instance' }
+              if ($third.ExitCode -ne 0) { throw "steady-state IDM Next launch exited with code $($third.ExitCode)" }
             }
             finally {
               if (-not $third.HasExited) { Stop-Process -Id $third.Id -Force -ErrorAction SilentlyContinue }
             }
 
-            # GUI 已运行时 CLI 必须通过 IPC，而不是另起独立引擎。
             $remoteHelp = Start-Process -FilePath $exe -ArgumentList '--cli','help' -WorkingDirectory $dist -PassThru -Wait
-            if ($remoteHelp.ExitCode -ne 0) {
-              throw "remote CLI help failed with exit code $($remoteHelp.ExitCode)"
-            }
-
-            # 远端业务错误要传播为非 0 退出码，不能“连接成功就一律 exit 0”。
+            if ($remoteHelp.ExitCode -ne 0) { throw "remote CLI help failed with exit code $($remoteHelp.ExitCode)" }
             $remoteMissing = Start-Process -FilePath $exe -ArgumentList '--cli','info','2147483647' -WorkingDirectory $dist -PassThru -Wait
-            if ($remoteMissing.ExitCode -ne 1) {
-              throw "remote CLI failure exit code was $($remoteMissing.ExitCode), expected 1"
-            }
+            if ($remoteMissing.ExitCode -ne 1) { throw "remote CLI failure exit code was $($remoteMissing.ExitCode), expected 1" }
           }
           finally {
             foreach ($p in $pair) {
@@ -182,9 +168,9 @@ jobs:
           $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $Matches[1]) { throw 'portable ZIP checksum mismatch' }
 
-      - name: Upload CI package
+      - name: Upload full release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: idm-next-win64-ci
+          name: idm-next-full-release-0.1.0
           path: installer/out/*
           if-no-files-found: error
