@@ -45,7 +45,9 @@ bool enableShutdownPrivilege()
 void windowsShutdown()
 {
     enableShutdownPrivilege();
-    ExitWindowsEx(EWX_SHUTDOWN | EWX_FORCE, 0);
+    // 不使用 EWX_FORCE：自动下载器不能强杀其他应用并冒险丢失用户未保存的数据。
+    // 正常关机流程允许 Windows/其他应用处理 WM_QUERYENDSESSION 或阻止关机。
+    ExitWindowsEx(EWX_SHUTDOWN, 0);
 }
 
 void windowsHibernate()
@@ -55,7 +57,8 @@ void windowsHibernate()
     if (powr.load()) {
         auto fn = reinterpret_cast<PFN_SetSuspendState>(powr.resolve("SetSuspendState"));
         if (fn) {
-            fn(TRUE, TRUE, FALSE);
+            // ForceCritical=false：保持与安全关机相同的原则，不强制绕过正常系统协调。
+            fn(TRUE, FALSE, FALSE);
             return;
         }
     }
