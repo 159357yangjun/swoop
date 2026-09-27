@@ -80,6 +80,17 @@ jobs:
             throw "development files leaked into browser extension package: $($badExtensionFiles.FullName -join ', ')"
           }
 
+          # 安装版是 machine-wide，必须显式把 Native Messaging Host 注册到 HKLM；
+          # 便携版脚本默认 CurrentUser，二者由同一个脚本的 Scope 参数区分。
+          $hostScript = Get-Content 'installer/dist/browser-extension/native-messaging-host/install_host.ps1' -Raw
+          if ($hostScript -notmatch 'ValidateSet\("CurrentUser",\s*"Machine"\)') {
+            throw 'native messaging installer does not expose CurrentUser/Machine scope'
+          }
+          $nsi = Get-Content 'installer/idm-next.nsi' -Raw
+          if ($nsi -notmatch '-Scope Machine') {
+            throw 'NSIS installer does not request machine-wide native messaging registration'
+          }
+
           $process = Start-Process `
             -FilePath (Resolve-Path 'installer/dist/idm-next.exe') `
             -ArgumentList '--cli','help' `
@@ -89,39 +100,56 @@ jobs:
             throw "packaged CLI smoke test failed with exit code $($process.ExitCode)"
           }
 
-      - name: Single-instance and IPC smoke test
+      - name: Single-instance startup-race and IPC smoke test
         shell: pwsh
         run: |
           $dist = (Resolve-Path 'installer/dist').Path
           $exe = (Resolve-Path 'installer/dist/idm-next.exe').Path
+
+          # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
           $first = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
+          $second = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
+          $pair = @($first, $second)
           try {
-            $ready = $false
-            for ($i = 0; $i -lt 60; $i++) {
+            $winner = $null
+            for ($i = 0; $i -lt 80; $i++) {
               Start-Sleep -Milliseconds 250
-              if ($first.HasExited) {
-                throw "primary IDM Next instance exited early with code $($first.ExitCode)"
-              }
-              $first.Refresh()
-              if ($first.MainWindowHandle -ne 0) {
-                $ready = $true
+              foreach ($p in $pair) { $p.Refresh() }
+              $alive = @($pair | Where-Object { -not $_.HasExited })
+
+              if ($alive.Count -gt 1) { continue }
+              if ($alive.Count -eq 0) { throw 'both IDM Next instances exited during startup race' }
+
+              $alive[0].Refresh()
+              if ($alive[0].MainWindowHandle -ne 0) {
+                $winner = $alive[0]
                 break
               }
             }
-            if (-not $ready) { throw 'primary IDM Next window did not become ready' }
+            if (-not $winner) {
+              throw 'startup race did not converge to exactly one ready IDM Next GUI'
+            }
 
-            # 普通二次启动必须激活已有窗口并迅速退出，而不是创建第二套下载引擎。
-            $second = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
+            $losers = @($pair | Where-Object { $_.HasExited })
+            if ($losers.Count -ne 1) {
+              throw 'exactly one IDM Next secondary process should exit'
+            }
+            if ($losers[0].ExitCode -ne 0) {
+              throw "secondary IDM Next launch exited with code $($losers[0].ExitCode)"
+            }
+
+            # 稳态普通二次启动必须激活已有窗口并迅速退出。
+            $third = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
             try {
-              if (-not $second.WaitForExit(5000)) {
-                throw 'second IDM Next launch did not reuse the existing GUI instance'
+              if (-not $third.WaitForExit(5000)) {
+                throw 'steady-state IDM Next launch did not reuse the existing GUI instance'
               }
-              if ($second.ExitCode -ne 0) {
-                throw "second IDM Next launch exited with code $($second.ExitCode)"
+              if ($third.ExitCode -ne 0) {
+                throw "steady-state IDM Next launch exited with code $($third.ExitCode)"
               }
             }
             finally {
-              if (-not $second.HasExited) { Stop-Process -Id $second.Id -Force -ErrorAction SilentlyContinue }
+              if (-not $third.HasExited) { Stop-Process -Id $third.Id -Force -ErrorAction SilentlyContinue }
             }
 
             # GUI 已运行时 CLI 必须通过 IPC，而不是另起独立引擎。
@@ -137,7 +165,9 @@ jobs:
             }
           }
           finally {
-            if (-not $first.HasExited) { Stop-Process -Id $first.Id -Force -ErrorAction SilentlyContinue }
+            foreach ($p in $pair) {
+              if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            }
           }
 
       - name: Verify package outputs
