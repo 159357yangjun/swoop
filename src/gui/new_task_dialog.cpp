@@ -19,6 +19,7 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 
 NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int defaultThreads)
@@ -93,7 +94,6 @@ NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int
 void NewTaskDialog::setUrl(const QString& url)
 {
     m_urlEdit->setText(url);
-    // 如果文件名为空，尝试从 URL 推断文件名预填
     if (m_nameEdit->text().isEmpty()) {
         QString name = QUrl(url).fileName();
         if (!name.isEmpty())
@@ -133,7 +133,6 @@ void NewTaskDialog::onUrlChanged()
     m_formatLabel->setVisible(video);
     m_formatWidget->setVisible(video);
 
-    // 手动粘贴普通直链时也尽量预填文件名；用户已经填写过名称则绝不覆盖。
     if (m_nameEdit->text().isEmpty()) {
         QString inferred = QUrl(url).fileName();
         if (!inferred.isEmpty())
@@ -147,7 +146,6 @@ void NewTaskDialog::onUrlChanged()
         return;
     }
 
-    // URL 发生变化时取消旧探测，等用户停止输入 500ms 后再启动新的 yt-dlp。
     if (m_formatRequestUrl != url && m_formatProc)
         stopFormatProbe();
     m_formatDebounce->start();
@@ -165,8 +163,6 @@ void NewTaskDialog::fetchFormats()
     if (m_formatDebounce)
         m_formatDebounce->stop();
 
-    // 如果上一次探测还没结束，先明确停止它；不能只 deleteLater()，否则外部 yt-dlp
-    // 可能继续运行一段时间，用户快速改 URL 时会累积多个进程。
     if (m_formatProc) {
         QProcess* old = m_formatProc;
         m_formatProc = nullptr;
@@ -232,7 +228,6 @@ void NewTaskDialog::onFormatsFinished(int exitCode, QProcess::ExitStatus status)
     m_formatRefresh->setEnabled(true);
     m_formatRefresh->setText(QStringLiteral("刷新格式"));
 
-    // 用户在探测期间改了 URL：旧结果不能污染新链接的格式下拉框。
     if (m_formatRequestUrl != m_urlEdit->text().trimmed()) {
         m_formatBuffer.clear();
         return;
@@ -252,7 +247,7 @@ void NewTaskDialog::onFormatsFinished(int exitCode, QProcess::ExitStatus status)
     for (const QString& raw : lines) {
         QString line = raw.trimmed();
         if (line.startsWith(QLatin1Char('[')) || line.isEmpty())
-            continue;  // 跳过 [info]/[youtube] 等日志行
+            continue;
         QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
         if (parts.size() < 3)
             continue;
@@ -260,9 +255,9 @@ void NewTaskDialog::onFormatsFinished(int exitCode, QProcess::ExitStatus status)
         QString ext = parts[1];
         QString res = parts[2];
         if (id == QStringLiteral("ID"))
-            continue;  // 表头
+            continue;
         if (!idRe.match(id).hasMatch())
-            continue;  // 非格式 ID 行
+            continue;
         QString label = QStringLiteral("%1  ·  %2  ·  .%3").arg(id, res, ext);
         m_formatCombo->addItem(label, id);
     }
@@ -318,10 +313,10 @@ void NewTaskDialog::onAccepted()
         return;
     }
 
-    // 只接受当前下载后端真正支持的输入，避免 abc://foo 这类“包含 ://”的字符串
-    // 在对话框里被判定成功，直到进入引擎后才以模糊错误失败。
+    // 使用 StrictMode 校验用户实际输入的 URL，不把 `example.com/file` 静默转换成 HTTP
+    // 后又把原字符串交给下载引擎，避免“对话框判定有效、引擎收到的却仍无 scheme”。
     bool aria2Input = TorrentDownloader::isAria2Url(url);
-    QUrl parsed = QUrl::fromUserInput(url);
+    QUrl parsed(url, QUrl::StrictMode);
     QString scheme = parsed.scheme().toLower();
     bool httpInput = parsed.isValid()
                      && (scheme == QStringLiteral("http") || scheme == QStringLiteral("https"))
@@ -330,7 +325,7 @@ void NewTaskDialog::onAccepted()
                         && url.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive);
     if (!aria2Input && !httpInput && !localTorrent) {
         QMessageBox::warning(this, QStringLiteral("提示"),
-                             QStringLiteral("链接格式不正确。支持 HTTP/HTTPS、FTP/FTPS、magnet 磁力链接和 .torrent 文件。"));
+                             QStringLiteral("链接格式不正确。支持 HTTP/HTTPS、FTP/FTPS、magnet 磁力链接和 .torrent 文件。\n例如：https://example.com/file.zip"));
         return;
     }
 
