@@ -1,0 +1,123 @@
+name: release-idm-next
+
+on:
+  push:
+    tags: ['idm-next-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag matches project version
+        if: startsWith(github.ref, 'refs/tags/idm-next-v')
+        shell: pwsh
+        run: |
+          $cmake = Get-Content CMakeLists.txt -Raw -Encoding UTF8
+          $match = [regex]::Match($cmake, 'project\(idm-next\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)', 'IgnoreCase')
+          if (-not $match.Success) { throw 'cannot read project version from CMakeLists.txt' }
+          $expected = "idm-next-v$($match.Groups[1].Value)"
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "release tag mismatch: expected $expected, got $env:GITHUB_REF_NAME"
+          }
+
+      - name: Set up MSYS2 + Qt 6 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-charts
+            mingw-w64-x86_64-curl
+
+      - name: Detect Qt bin directory
+        shell: msys2 {0}
+        run: |
+          QT_BIN_WIN="$(cygpath -w "$(dirname "$(command -v windeployqt)")")"
+          echo "QT_BIN=$QT_BIN_WIN" >> "$GITHUB_ENV"
+          echo "Qt bin: $QT_BIN_WIN"
+
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Build portable and installer packages
+        shell: pwsh
+        run: ./installer/package.ps1
+
+      - name: Smoke test packaged runtime
+        shell: pwsh
+        run: |
+          foreach ($required in @(
+            'installer/dist/idm-next.exe',
+            'installer/dist/idm-next-host.exe',
+            'installer/dist/sqldrivers/qsqlite.dll',
+            'installer/dist/aria2/aria2c.exe',
+            'installer/dist/ffmpeg/ffmpeg.exe',
+            'installer/dist/yt-dlp/yt-dlp.exe',
+            'installer/dist/browser-extension/native-messaging-host/com.tencent.idm_next.json',
+            'installer/dist/browser-extension/native-messaging-host/install_host.ps1'
+          )) {
+            if (-not (Test-Path $required)) { throw "release runtime missing: $required" }
+          }
+          $process = Start-Process `
+            -FilePath (Resolve-Path 'installer/dist/idm-next.exe') `
+            -ArgumentList '--cli','help' `
+            -WorkingDirectory (Resolve-Path 'installer/dist') `
+            -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "packaged CLI smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Add setup checksum
+        shell: pwsh
+        run: |
+          $manifest = 'installer/out/SHA256SUMS.txt'
+          $setups = Get-ChildItem installer/out/*-setup-x64.exe
+          if (-not $setups) { throw 'setup.exe missing' }
+          foreach ($setup in $setups) {
+            $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Add-Content $manifest "$hash  $($setup.Name)" -Encoding ASCII
+          }
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem installer/out/*-portable.zip -ErrorAction SilentlyContinue)) { throw 'portable ZIP missing' }
+          if (-not (Get-ChildItem installer/out/*-setup-x64.exe -ErrorAction SilentlyContinue)) { throw 'setup EXE missing' }
+          if (-not (Test-Path installer/out/SHA256SUMS.txt)) { throw 'checksum manifest missing' }
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: idm-next-win64
+          path: installer/out/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/idm-next-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/out/*.zip
+            installer/out/*.exe
+            installer/out/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false

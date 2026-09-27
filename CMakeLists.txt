@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(idm-next
     VERSION 0.1.0
-    DESCRIPTION "全协议下载平台 - Qt 6 + libcurl + libtorrent"
+    DESCRIPTION "全协议下载平台 - Qt 6 + libcurl + aria2"
     LANGUAGES C CXX
 )
 
@@ -18,12 +18,12 @@ set(CMAKE_AUTOUIC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Charts Sql)
 
 # ── libcurl 解析（应用层与引擎自测共用，解析一次）────────
-# 优先 find_package(CURL)（vcpkg），否则回退 vendored third_party/libcurl。
+# 优先 find_package(CURL)，否则回退 vendored third_party/libcurl。
 # 结果写入 CURL_FOUND / LIBCURL_INC / LIBCURL_LIB，供下方目标复用。
 if(WIN32)
     find_package(CURL QUIET)
     if(CURL_FOUND)
-        message(STATUS "network: 使用 vcpkg 提供的 libcurl")
+        message(STATUS "network: 使用 CMake 可发现的 libcurl")
     else()
         set(LIBCURL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libcurl")
         find_path(LIBCURL_INC NAMES curl/curl.h REQUIRED
@@ -34,19 +34,9 @@ if(WIN32)
     endif()
 endif()
 
-# NOTE: 网络层已切换到 libcurl（src/core/network_curl.c，API 与 network.h 完全一致，
-#       download_core.c 等调用方无需改动）。libcurl 由项目第三方库 third_party/libcurl
-#       （curl 8.22.0 官方 MinGW-w64 构建）提供，或由 vcpkg 提供（vcpkg.json 已声明依赖）。
-#       链接策略：优先 find_package(CURL)（vcpkg），否则回退到 vendored
-#       third_party/libcurl 的显式 include/lib 路径，并在 POST_BUILD 拷贝 libcurl DLL。
-# FTP 由 aria2 后端（#34）经由 JSON-RPC 托管 aria2c 原生支持，与 libcurl 无关。
-# Sql 组件用于下载历史持久化（#46，Qt6 自带 QSQLite 驱动 qsqlite.dll）。
-
-# 阶段3才需要的依赖（BT/磁力、SQLite、日志等），届时取消注释
-# find_package(libtorrent-rasterbar REQUIRED)
-# find_package(sqlite3 CONFIG REQUIRED)
-# find_package(spdlog CONFIG REQUIRED)
-# find_package(nlohmann_json CONFIG REQUIRED)
+# NOTE: 网络层使用 libcurl（src/core/network_curl.c，API 与 network.h 保持一致）。
+# libcurl 可由系统/vcpkg/MSYS2 提供；找不到时回退 third_party/libcurl。
+# FTP / BT / 磁力由 aria2 后端经 JSON-RPC 托管；Sql 用于 SQLite 历史持久化。
 
 # ── 源文件收集 ───────────────────────────────────
 set(CORE_SOURCES
@@ -79,7 +69,6 @@ set(GUI_SOURCES
     src/gui/history_dialog.cpp
 )
 
-# 数据模型层（L1/L2 之间的 Qt 模型与代理）：任务列表模型 + 分类/分组代理
 set(MODEL_SOURCES
     src/model/task_list_model.cpp
     src/model/task_list_model.h
@@ -89,14 +78,11 @@ set(MODEL_SOURCES
     src/model/task_group_proxy.h
 )
 
-# Web 远程管理层（控制面）：内置 HTTP 服务，供浏览器扩展与远程管理
 set(WEB_SOURCES
     src/web/web_server.cpp
     src/web/web_server.h
 )
 
-# L2 应用编排层：跨 UI 与引擎的「行为组件」（自动关机/休眠等），
-# 通过注入回调解耦 MainWindow 内部状态，便于独立测试与复用。
 set(APP_SOURCES
     src/app/auto_power.cpp
     src/app/auto_power.h
@@ -147,9 +133,7 @@ set(UTILS_SOURCES
     src/utils/app_paths.cpp
 )
 
-# ── 共享静态库：聚合应用层全部源码，供 idm-next 与 ui_snapshot 复用 ──
-# 消除两个可执行目标之间重复的源列表；仅入口（main.cpp / ui_snapshot.cpp）
-# 与资源 qrc 留在各可执行目标，确保 Qt 资源在静态库外被正确初始化。
+# ── 共享静态库：聚合应用层源码，供 idm-next 与可选 ui_snapshot 复用 ──
 set(IDM_APP_SOURCES
     ${CORE_SOURCES}
     ${STORAGE_SOURCES}
@@ -181,8 +165,6 @@ target_link_libraries(idm_app_lib PUBLIC
     Qt6::Sql
 )
 
-# Windows 平台专用库（libcurl / DWM / 多媒体）：应用层源码直接使用，链接到
-# idm_app_lib(PUBLIC) 由可执行目标继承；运行期 DLL 拷贝见文件末尾。
 if(WIN32)
     if(CURL_FOUND)
         target_link_libraries(idm_app_lib PUBLIC CURL::libcurl)
@@ -193,39 +175,32 @@ if(WIN32)
     target_link_libraries(idm_app_lib PUBLIC dwmapi winmm)
 endif()
 
-# ── 可执行目标 ───────────────────────────────────
-# 注意：logger 为 header-only（inline），无需 .cpp；qss 通过 resources.qrc 打包
-# WIN32_EXECUTABLE：GUI 子系统，双击不再闪控制台黑窗（#44 修复）。
-# CLI 模式（--cli）仍可用：main.cpp 在 --cli 下调用 AllocConsole 分配控制台并
-# 重定向标准流；单实例 GUI 已运行时 --cli 命令经 IPC 转发给 GUI。
+# ── 主程序 ───────────────────────────────────────
+# WIN32 子系统避免双击时弹出控制台窗口；--cli 模式由程序按需分配控制台。
 qt_add_executable(idm-next WIN32
     src/main.cpp
     ${CLI_SOURCES}
     resources/resources.qrc
 )
 set_target_properties(idm-next PROPERTIES
-    QT_WINDOWS_VERSION_MAJOR 0
-    QT_WINDOWS_VERSION_MINOR 1
-    QT_WINDOWS_VERSION_PATCH 0
+    QT_WINDOWS_VERSION_MAJOR ${PROJECT_VERSION_MAJOR}
+    QT_WINDOWS_VERSION_MINOR ${PROJECT_VERSION_MINOR}
+    QT_WINDOWS_VERSION_PATCH ${PROJECT_VERSION_PATCH}
 )
-# include 目录与 Qt 链接由 idm_app_lib(PUBLIC) 继承；平台专用库亦由 idm_app_lib 链接
+target_compile_definitions(idm-next PRIVATE IDM_NEXT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(idm-next PRIVATE idm_app_lib)
 
-# ── 原生 Native Messaging Host（浏览器扩展桥接）──────────────
-# 仅依赖 Qt6::Core；设为 Win32 子系统（无控制台黑窗），
-# stdin/stdout 句柄由浏览器继承，走 Native Messaging 长度前缀协议。
+# ── Native Messaging Host ────────────────────────
 qt_add_executable(idm-next-host WIN32
     src/host/idm_next_host.cpp
 )
 target_link_libraries(idm-next-host PRIVATE Qt6::Core Qt6::Network)
 set_target_properties(idm-next-host PROPERTIES WIN32_EXECUTABLE TRUE)
 
-# ── 构建后自动同步 host 到浏览器扩展目录 ───────────
-# 浏览器扩展（chrome://extensions 加载的目录）需要同目录的 idm-next-host.exe
-# 及其 Qt/MinGW 运行时，否则 Native Messaging 会报「宿主启动失败」。
-# 这里在每次编译后：① 拷贝 exe ② 用 windeployqt 部署运行时，省去手动复制。
+# 开发构建后同步 host 与其 Qt 运行时到浏览器扩展目录，方便直接加载扩展调试。
 set(IDM_NMH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/browser-extension/native-messaging-host")
 add_custom_command(TARGET idm-next-host POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${IDM_NMH_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:idm-next-host>"
             "${IDM_NMH_DIR}/idm-next-host.exe"
@@ -241,7 +216,7 @@ install(TARGETS idm-next idm-next-host
     RUNTIME DESTINATION bin
 )
 
-# ── (可选) UI 离屏截图工具：仅用于无显示环境下评审界面，默认不构建 ──
+# ── 可选 UI 离屏截图工具 ─────────────────────────
 option(IDM_BUILD_UI_SNAPSHOT "Build offscreen UI snapshot tool" OFF)
 if(IDM_BUILD_UI_SNAPSHOT)
     qt_add_executable(ui_snapshot
@@ -251,8 +226,7 @@ if(IDM_BUILD_UI_SNAPSHOT)
     target_link_libraries(ui_snapshot PRIVATE idm_app_lib)
 endif()
 
-# ── (可选) 下载引擎自测：验证「设置 → 引擎」链路端到端真的生效（默认不构建） ──
-# 需要配套的本地认证 HTTP 服务，见 tools/engine_selftest_server.py 顶部说明。
+# ── 可选下载引擎自测 ─────────────────────────────
 option(IDM_BUILD_ENGINE_SELFTEST "Build engine self-test (needs local auth HTTP server)" OFF)
 if(IDM_BUILD_ENGINE_SELFTEST)
     add_executable(engine_selftest
@@ -271,10 +245,16 @@ if(IDM_BUILD_ENGINE_SELFTEST)
     endif()
 endif()
 
-# ── 运行期 DLL 拷贝（vendored libcurl）──────────────
-# idm_app_lib 已 PUBLIC 链接 libcurl，故运行期 DLL 需落到各可执行目标目录旁。
+# ── vendored libcurl 运行期文件 ──────────────────
+# 只向“实际存在”的 executable target 添加 POST_BUILD，避免默认关闭 ui_snapshot
+# 时仍引用不存在的 target，导致本地 vendored-libcurl 配置失败。
 if(WIN32 AND NOT CURL_FOUND)
-    foreach(_t idm-next ui_snapshot)
+    set(_curl_runtime_targets idm-next)
+    if(TARGET ui_snapshot)
+        list(APPEND _curl_runtime_targets ui_snapshot)
+    endif()
+
+    foreach(_t IN LISTS _curl_runtime_targets)
         foreach(_f libcurl-x64.dll curl-ca-bundle.crt)
             if(EXISTS "${LIBCURL_DIR}/bin/${_f}")
                 add_custom_command(TARGET ${_t} POST_BUILD

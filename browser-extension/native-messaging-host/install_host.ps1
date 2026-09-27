@@ -1,25 +1,34 @@
 # install_host.ps1 — 注册 IDM Next Native Messaging Host（Windows）
-# 以当前用户权限运行即可，无需管理员。
-# 用法：在 PowerShell 中执行  .\install_host.ps1
+# 便携包：当前用户直接运行即可；安装版会由 NSIS 自动调用。
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $JsonPath  = Join-Path $ScriptDir "com.tencent.idm_next.json"
 
 if (-not (Test-Path $JsonPath)) {
-    Write-Host "未找到 manifest: $JsonPath" -ForegroundColor Red
-    exit 1
+    throw "未找到 Native Messaging manifest: $JsonPath"
 }
 
-# 把 manifest 的 path 改写为与本清单同目录的 C++ host 可执行文件，
-# 这样开发目录与打包安装目录都能正确指向（不再写死开发路径）。
-$HostExe = Join-Path $ScriptDir "idm-next-host.exe"
+# 开发目录中 host 会同步到本目录；正式便携/安装包中 host 位于产品根目录。
+$HostCandidates = @(
+    (Join-Path $ScriptDir "idm-next-host.exe"),
+    (Join-Path $ScriptDir "..\..\idm-next-host.exe")
+)
+$HostExe = $HostCandidates |
+    Where-Object { Test-Path $_ } |
+    ForEach-Object { (Resolve-Path $_).Path } |
+    Select-Object -First 1
+
+if (-not $HostExe) {
+    throw "未找到 idm-next-host.exe。请保持 browser-extension 与主程序目录结构不变。"
+}
+
+# Chrome/Edge 要求 manifest.path 为绝对路径，因此安装/解压位置变化后必须重写。
 $Json = Get-Content -Raw -Encoding UTF8 $JsonPath | ConvertFrom-Json
 $Json.path = $HostExe
 $Json | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 $JsonPath
-Write-Host "manifest path 已更新为: $HostExe" -ForegroundColor Gray
+Write-Host "Native Messaging host: $HostExe" -ForegroundColor Gray
 
-# 同时为 Chrome 与 Edge 注册（HKCU 当前用户，无需管理员）
 $browsers = @(
     "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.tencent.idm_next",
     "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.tencent.idm_next"
@@ -32,7 +41,6 @@ foreach ($key in $browsers) {
 }
 
 Write-Host ""
-Write-Host "Native Messaging Host 注册完成。" -ForegroundColor Cyan
-Write-Host "manifest 路径: $JsonPath"
-Write-Host "allowed_origins 已预填本扩展固定 ID，无需手动修改。" -ForegroundColor Gray
-Write-Host "请到 chrome://extensions 找到「IDM Next 嗅探器」点击刷新图标后生效。" -ForegroundColor Gray
+Write-Host "IDM Next Native Messaging Host 注册完成。" -ForegroundColor Cyan
+Write-Host "manifest: $JsonPath"
+Write-Host "Chrome/Edge 扩展 ID 由 manifest.json 中固定 key 保持稳定。" -ForegroundColor Gray
