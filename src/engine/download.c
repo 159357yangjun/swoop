@@ -115,18 +115,19 @@ static int choose_available_outfile(const wchar_t *desired, wchar_t *out, int n)
     return 0;
 }
 
-download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn)
+static download_task_t *task_create_impl(const char *url, const wchar_t *outfile,
+                                         int num_conn, int avoid_existing)
 {
     if (!url || !url[0] || !outfile || !outfile[0]) return NULL;
     download_task_t *t = (download_task_t *)calloc(1, sizeof *t);
     if (!t) return NULL;
     strncpy(t->url, url, sizeof t->url - 1);
     t->url[sizeof t->url - 1] = 0;
-
-    /* 在任务进入 UI/队列之前确定最终文件名，这样列表显示名与实际落盘名始终一致。
-       新 HTTP 任务绝不静默 CREATE_ALWAYS 覆盖已有文件；BT 的 outfile 是目录，保持原样。 */
     t->kind = torrent_kind_for_url(url);
-    if (t->kind == IDM_KIND_TORRENT) {
+
+    /* 新 HTTP 任务在进入 UI/队列前确定最终文件名；恢复任务则必须忠实保留持久化路径。
+       BT/磁力的 outfile 是目录，两种入口都保持原样。 */
+    if (t->kind == IDM_KIND_TORRENT || !avoid_existing) {
         wcsncpy(t->outfile, outfile, MAX_PATH - 1);
         t->outfile[MAX_PATH - 1] = 0;
     } else {
@@ -143,6 +144,16 @@ download_task_t *task_create(const char *url, const wchar_t *outfile, int num_co
     if (t->num_conn > 16) t->num_conn = 16;
     t->status = DL_QUEUED;
     return t;
+}
+
+download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn)
+{
+    return task_create_impl(url, outfile, num_conn, 1);
+}
+
+download_task_t *task_create_preserve_path(const char *url, const wchar_t *outfile, int num_conn)
+{
+    return task_create_impl(url, outfile, num_conn, 0);
 }
 
 void task_join(download_task_t *t)
