@@ -42,33 +42,28 @@ jobs:
           # 故意近同时启动两个进程，覆盖“两个进程都还没创建窗口”的竞态。
           $first = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
           $second = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+          $pair = @($first, $second)
           try {
-            $ready = $false
+            $winner = $null
             for ($i = 0; $i -lt 60; $i++) {
               Start-Sleep -Milliseconds 250
-              $first.Refresh()
-              $second.Refresh()
+              foreach ($p in $pair) { $p.Refresh() }
 
-              $alive = @($first, $second | Where-Object { -not $_.HasExited })
-              if ($alive.Count -gt 1) {
-                continue
-              }
-              if ($alive.Count -eq 0) {
-                throw 'both Swoop instances exited during startup race'
-              }
+              $alive = @($pair | Where-Object { -not $_.HasExited })
+              if ($alive.Count -gt 1) { continue }
+              if ($alive.Count -eq 0) { throw 'both Swoop instances exited during startup race' }
 
-              $winner = $alive[0]
-              $winner.Refresh()
-              if ($winner.MainWindowHandle -ne 0) {
-                $ready = $true
+              $alive[0].Refresh()
+              if ($alive[0].MainWindowHandle -ne 0) {
+                $winner = $alive[0]
                 break
               }
             }
-            if (-not $ready) {
+            if (-not $winner) {
               throw 'startup race did not converge to exactly one ready Swoop instance'
             }
 
-            $losers = @($first, $second | Where-Object { $_.HasExited })
+            $losers = @($pair | Where-Object { $_.HasExited })
             if ($losers.Count -ne 1) {
               throw 'exactly one secondary Swoop process should exit'
             }
@@ -91,7 +86,7 @@ jobs:
             }
           }
           finally {
-            foreach ($p in @($first, $second)) {
+            foreach ($p in $pair) {
               if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
           }
