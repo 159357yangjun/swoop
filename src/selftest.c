@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <wchar.h>
 #include <stdio.h>
+#include <string.h>
 
 static int test_safe_derived_filenames(void)
 {
