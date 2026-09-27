@@ -17,6 +17,9 @@
 #include <QUrl>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QTimer>
+#include <QDir>
+#include <QFileInfo>
 
 NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int defaultThreads)
     : QDialog(parent)
@@ -43,7 +46,9 @@ NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int
     m_threadSpin->setRange(1, 32);
     m_threadSpin->setValue(defaultThreads > 0 && defaultThreads <= 32 ? defaultThreads : 8);
 
-    // 视频格式：仅当视频 URL 且 yt-dlp 可用时显示
+    // 视频格式：仅当视频 URL 且 yt-dlp 可用时显示。
+    // 输入框 textChanged 不再直接启动 yt-dlp；500ms 防抖后才探测，避免用户输入过程中
+    // 连续创建/销毁多个外部进程造成卡顿和黑窗闪烁。
     m_formatCombo = new QComboBox(this);
     m_formatCombo->setMinimumWidth(220);
     m_formatCombo->addItem(QStringLiteral("最佳画质（自动合并音视频）"), QString());
@@ -58,6 +63,11 @@ NewTaskDialog::NewTaskDialog(QWidget* parent, const QString& defaultSaveDir, int
     m_formatLabel->setVisible(false);
     m_formatWidget->setVisible(false);
     m_videoReady = VideoDownloader::isAvailable();
+
+    m_formatDebounce = new QTimer(this);
+    m_formatDebounce->setSingleShot(true);
+    m_formatDebounce->setInterval(500);
+    connect(m_formatDebounce, &QTimer::timeout, this, &NewTaskDialog::fetchFormats);
 
     auto* dirLayout = new QHBoxLayout;
     dirLayout->addWidget(m_dirEdit, 1);
@@ -90,7 +100,30 @@ void NewTaskDialog::setUrl(const QString& url)
             m_nameEdit->setText(name);
     }
     m_urlEdit->setFocus();
-    onUrlChanged();  // 触发视频格式刷新
+}
+
+void NewTaskDialog::stopFormatProbe()
+{
+    if (m_formatDebounce)
+        m_formatDebounce->stop();
+
+    if (m_formatProc) {
+        QProcess* proc = m_formatProc;
+        m_formatProc = nullptr;
+        proc->disconnect(this);
+        if (proc->state() != QProcess::NotRunning)
+            proc->kill();
+        proc->deleteLater();
+    }
+
+    m_formatBuffer.clear();
+    m_formatRequestUrl.clear();
+    if (m_formatCombo)
+        m_formatCombo->setEnabled(true);
+    if (m_formatRefresh) {
+        m_formatRefresh->setEnabled(true);
+        m_formatRefresh->setText(QStringLiteral("刷新格式"));
+    }
 }
 
 void NewTaskDialog::onUrlChanged()
@@ -99,41 +132,118 @@ void NewTaskDialog::onUrlChanged()
     bool video = m_videoReady && VideoDownloader::isVideoUrl(url);
     m_formatLabel->setVisible(video);
     m_formatWidget->setVisible(video);
-    if (video)
-        fetchFormats();
+
+    // 手动粘贴普通直链时也尽量预填文件名；用户已经填写过名称则绝不覆盖。
+    if (m_nameEdit->text().isEmpty()) {
+        QString inferred = QUrl(url).fileName();
+        if (!inferred.isEmpty())
+            m_nameEdit->setText(inferred);
+    }
+
+    if (!video) {
+        stopFormatProbe();
+        m_formatCombo->clear();
+        m_formatCombo->addItem(QStringLiteral("最佳画质（自动合并音视频）"), QString());
+        return;
+    }
+
+    // URL 发生变化时取消旧探测，等用户停止输入 500ms 后再启动新的 yt-dlp。
+    if (m_formatRequestUrl != url && m_formatProc)
+        stopFormatProbe();
+    m_formatDebounce->start();
 }
 
 void NewTaskDialog::fetchFormats()
 {
-    if (m_formatProc) { m_formatProc->deleteLater(); m_formatProc = nullptr; }
+    if (!m_videoReady)
+        return;
+
+    QString url = m_urlEdit->text().trimmed();
+    if (url.isEmpty() || !VideoDownloader::isVideoUrl(url))
+        return;
+
+    if (m_formatDebounce)
+        m_formatDebounce->stop();
+
+    // 如果上一次探测还没结束，先明确停止它；不能只 deleteLater()，否则外部 yt-dlp
+    // 可能继续运行一段时间，用户快速改 URL 时会累积多个进程。
+    if (m_formatProc) {
+        QProcess* old = m_formatProc;
+        m_formatProc = nullptr;
+        old->disconnect(this);
+        if (old->state() != QProcess::NotRunning)
+            old->kill();
+        old->deleteLater();
+    }
+
     m_formatBuffer.clear();
+    m_formatRequestUrl = url;
     m_formatCombo->clear();
     m_formatCombo->addItem(QStringLiteral("最佳画质（自动合并音视频）"), QString());
     m_formatCombo->setEnabled(false);
+    m_formatRefresh->setEnabled(false);
+    m_formatRefresh->setText(QStringLiteral("读取中..."));
 
-    QString url = m_urlEdit->text().trimmed();
-    m_formatProc = new QProcess(this);
-    m_formatProc->setProcessChannelMode(QProcess::MergedChannels);
-    connect(m_formatProc, &QProcess::readyReadStandardOutput,
+    QProcess* proc = new QProcess(this);
+    m_formatProc = proc;
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(proc, &QProcess::readyReadStandardOutput,
             this, &NewTaskDialog::onFormatsReadyRead);
-    connect(m_formatProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &NewTaskDialog::onFormatsFinished);
-    m_formatProc->start(VideoDownloader::ytDlpPath(),
-                        { QStringLiteral("--no-warnings"),
-                          QStringLiteral("--skip-download"),
-                          QStringLiteral("--list-formats"), url });
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, proc](QProcess::ProcessError) {
+                if (proc != m_formatProc)
+                    return;
+                m_formatProc = nullptr;
+                m_formatCombo->setEnabled(true);
+                m_formatRefresh->setEnabled(true);
+                m_formatRefresh->setText(QStringLiteral("刷新格式"));
+                m_formatCombo->setItemText(
+                    0, QStringLiteral("最佳画质（格式列表读取失败，仍可直接下载）"));
+                proc->deleteLater();
+            });
+
+    proc->start(VideoDownloader::ytDlpPath(),
+                { QStringLiteral("--no-warnings"),
+                  QStringLiteral("--skip-download"),
+                  QStringLiteral("--list-formats"), url });
 }
 
 void NewTaskDialog::onFormatsReadyRead()
 {
-    if (m_formatProc)
-        m_formatBuffer.append(m_formatProc->readAllStandardOutput());
+    QProcess* proc = qobject_cast<QProcess*>(sender());
+    if (proc && proc == m_formatProc)
+        m_formatBuffer.append(proc->readAllStandardOutput());
 }
 
-void NewTaskDialog::onFormatsFinished(int, QProcess::ExitStatus)
+void NewTaskDialog::onFormatsFinished(int exitCode, QProcess::ExitStatus status)
 {
+    QProcess* proc = qobject_cast<QProcess*>(sender());
+    if (!proc || proc != m_formatProc) {
+        if (proc)
+            proc->deleteLater();
+        return;
+    }
+
+    m_formatProc = nullptr;
+    proc->deleteLater();
     m_formatCombo->setEnabled(true);
-    if (m_formatProc) { m_formatProc->deleteLater(); m_formatProc = nullptr; }
+    m_formatRefresh->setEnabled(true);
+    m_formatRefresh->setText(QStringLiteral("刷新格式"));
+
+    // 用户在探测期间改了 URL：旧结果不能污染新链接的格式下拉框。
+    if (m_formatRequestUrl != m_urlEdit->text().trimmed()) {
+        m_formatBuffer.clear();
+        return;
+    }
+
+    if (status != QProcess::NormalExit || exitCode != 0) {
+        m_formatBuffer.clear();
+        m_formatCombo->setItemText(
+            0, QStringLiteral("最佳画质（格式列表读取失败，仍可直接下载）"));
+        return;
+    }
 
     QString text = QString::fromUtf8(m_formatBuffer);
     m_formatBuffer.clear();
@@ -166,6 +276,39 @@ void NewTaskDialog::onBrowseDir()
         m_dirEdit->setText(dir);
 }
 
+bool NewTaskDialog::validateSaveDir(QString* normalizedDir)
+{
+    QString saveDir = QDir::cleanPath(m_dirEdit->text().trimmed());
+    if (saveDir.isEmpty() || saveDir == QStringLiteral(".")) {
+        QMessageBox::warning(this, QStringLiteral("保存目录"),
+                             QStringLiteral("请选择一个有效的保存目录。"));
+        return false;
+    }
+
+    QFileInfo info(saveDir);
+    if (info.exists() && !info.isDir()) {
+        QMessageBox::warning(this, QStringLiteral("保存目录"),
+                             QStringLiteral("保存路径指向的是文件，不是文件夹。"));
+        return false;
+    }
+    if (!info.exists() && !QDir().mkpath(saveDir)) {
+        QMessageBox::warning(this, QStringLiteral("保存目录"),
+                             QStringLiteral("无法创建保存目录：\n%1").arg(saveDir));
+        return false;
+    }
+
+    info.setFile(saveDir);
+    if (!info.isDir() || !info.isWritable()) {
+        QMessageBox::warning(this, QStringLiteral("保存目录"),
+                             QStringLiteral("保存目录不可写：\n%1").arg(saveDir));
+        return false;
+    }
+
+    if (normalizedDir)
+        *normalizedDir = QDir(saveDir).absolutePath();
+    return true;
+}
+
 void NewTaskDialog::onAccepted()
 {
     QString url = m_urlEdit->text().trimmed();
@@ -174,19 +317,30 @@ void NewTaskDialog::onAccepted()
                              QStringLiteral("请填写下载链接"));
         return;
     }
-    // 允许 http(s)/ftp 等带 "://" 的链接，以及 magnet: 磁力链接与本地/远程 .torrent 文件
-    bool looksValid = url.contains(QStringLiteral("://"))
-                      || TorrentDownloader::isTorrentUrl(url)
-                      || QFile::exists(url);
-    if (!looksValid) {
+
+    // 只接受当前下载后端真正支持的输入，避免 abc://foo 这类“包含 ://”的字符串
+    // 在对话框里被判定成功，直到进入引擎后才以模糊错误失败。
+    bool aria2Input = TorrentDownloader::isAria2Url(url);
+    QUrl parsed = QUrl::fromUserInput(url);
+    QString scheme = parsed.scheme().toLower();
+    bool httpInput = parsed.isValid()
+                     && (scheme == QStringLiteral("http") || scheme == QStringLiteral("https"))
+                     && !parsed.host().isEmpty();
+    bool localTorrent = QFile::exists(url)
+                        && url.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive);
+    if (!aria2Input && !httpInput && !localTorrent) {
         QMessageBox::warning(this, QStringLiteral("提示"),
-                             QStringLiteral("链接格式不正确，应为 http(s):// 链接、magnet: 磁力链接或 .torrent 文件"));
+                             QStringLiteral("链接格式不正确。支持 HTTP/HTTPS、FTP/FTPS、magnet 磁力链接和 .torrent 文件。"));
         return;
     }
+
+    QString saveDir;
+    if (!validateSaveDir(&saveDir))
+        return;
+
     m_result.url = url;
-    m_result.saveDir = m_dirEdit->text().trimmed();
-    QString name = m_nameEdit->text().trimmed();
-    m_result.fileName = name;
+    m_result.saveDir = saveDir;
+    m_result.fileName = m_nameEdit->text().trimmed();
     m_result.threadCount = m_threadSpin->value();
     m_result.format = m_formatWidget->isVisible()
         ? m_formatCombo->currentData().toString() : QString();
