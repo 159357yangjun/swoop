@@ -60,6 +60,13 @@ typedef struct {
 /* 返回填充好默认值的选项结构体 */
 NetOptions network_default_options(void);
 
+/* 解析 HTTP Retry-After 头（RFC 7231 §7.1.3）。
+ *  - 整数：秒数 → 毫秒；
+ *  - HTTP-date（RFC 1123，如 "Wed, 21 Oct 2015 07:28:00 GMT"）：距现在的差值 → 毫秒；
+ *  - 非法 / 空 / 过去时间：返回 fallback_ms（调用方应再 clamp 到上限，避免疯数卡死重试）。
+ * 设计为纯函数，便于单元测试（见 tools/engine_selftest.c 的 [20] 用例）。 */
+long parse_retry_after(const char *value, long fallback_ms);
+
 /* ─────────────────────────────────────────────
  * 内存响应体（用于下载网页源码）
  * ───────────────────────────────────────────── */

@@ -12,6 +12,8 @@
    * /huge.bin 返回 40 MiB：40 MiB / 4 MiB = 10 片，用于验证**真实并发连接数**
      是否被 max_conn_per_server 封住（分片数只是弱代理，并发数才是这个设置的本意）。
    * /_stats 返回并发统计（免认证）；/_reset 清零统计（免认证）。
+  * /retryafter.bin 首 GET 返回 429 + Retry-After: 3，后续 GET 返回 200：验证引擎重试时
+    尊重服务器 Retry-After（而不是固定退避猛撞）。
   * **每个文件响应固定延迟 IDM_SELFTEST_SLOW_MS 毫秒（默认 40）**：
     本机回环太快（1 MiB 一毫秒内写完），不延迟的话「并发」根本来不及重叠，
     实测并发峰值只有 2~3，无法区分「真封顶」和「跑太快没重叠」。
@@ -64,9 +66,17 @@ NORANGE_SIZE = len(PAYLOAD_12M)
 BIGOFF_SIZE = 3 * 1024 * 1024 * 1024 + 8192
 BIGOFF_MAX_BODY = 8 * 1024 * 1024   # 单次最多生成的字节：防止有人真按整份请求
 
+# /retryafter.bin：复现「重试应尊重 Retry-After」的真实缺口。
+# 首 GET 回 429 + Retry-After: 3（模拟限流/过载），后续 GET 回 200 + 确定性内容。
+# 引擎若尊重 Retry-After，重试等待≈3s；若只按固定 1s 退避，则≈1s —— 自测据此区分两者。
+RETRYAFTER_PATH = "/retryafter.bin"
+RETRYAFTER_PAYLOAD = make_payload(4096)   # 与 content_matches_pattern 同模式：byte[i] == i % 251
+RETRYAFTER_AFTER = 3                      # Retry-After 秒数
+
+
 _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
-         "norange_get": 0, "norange_range": 0}
+         "norange_get": 0, "norange_range": 0, "retryafter_gets": 0}
 
 
 def _enter():
@@ -135,7 +145,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _hits.update({"auth_fail": 0, "auth_ok": 0, "ranges": 0,
                               "cur": 0, "max_cur": 0,
-                              "norange_get": 0, "norange_range": 0})
+                              "norange_get": 0, "norange_range": 0,
+                              "retryafter_gets": 0})
             return self._send_json({"ok": 1})
         if not self._auth_ok():
             return self._send_401()
@@ -151,6 +162,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(NORANGE_SIZE))
             self.send_header("Accept-Ranges", "bytes")   # 骗人的：GET 时根本不认 Range
+            self.end_headers()
+            return
+        if path == RETRYAFTER_PATH:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(RETRYAFTER_PAYLOAD)))
+            self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
             return
         data = FILES.get(self.path.split("?")[0])
@@ -174,10 +192,32 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _hits.update({"auth_fail": 0, "auth_ok": 0, "ranges": 0,
                               "cur": 0, "max_cur": 0,
-                              "norange_get": 0, "norange_range": 0})
+                              "norange_get": 0, "norange_range": 0,
+                              "retryafter_gets": 0})
             return self._send_json({"ok": 1})
         if not self._auth_ok():
             return self._send_401()
+
+        if path == RETRYAFTER_PATH:
+            # 仅首 GET 回 429 + Retry-After；后续 GET 回 200 + 确定性内容。
+            # 引擎若尊重 Retry-After，重试等待≈RETRYAFTER_AFTER 秒；否则按固定 1s 退避。
+            with _lock:
+                _hits["retryafter_gets"] += 1
+                first = _hits["retryafter_gets"] == 1
+            if first:
+                self.send_response(429)
+                self.send_header("Retry-After", str(RETRYAFTER_AFTER))
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(RETRYAFTER_PAYLOAD)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(RETRYAFTER_PAYLOAD)
+            return
 
         if path == NORANGE_PATH:
             _enter()

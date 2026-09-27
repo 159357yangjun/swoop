@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <wchar.h>     /* wmemmove / wcsncpy（长路径前缀拼接用） */
 #include <sys/stat.h>
+#include <time.h>      /* time() / time_t（Retry-After 的 HTTP-date 差值） */
 #include <windows.h>   /* Sleep（重试退避） */
 
 /* ── 默认 User-Agent ── */
@@ -130,6 +131,43 @@ NetOptions network_default_options(void) {
     o.retry_delay_ms  = 1000;
     o.proxy_type      = PROXY_NONE;
     return o;
+}
+
+/* 尊重 Retry-After 时等待时长封顶（1 小时），避免服务器给个疯数把重试卡死。 */
+#define MAX_RETRY_AFTER_MS 3600000L
+
+/* ── HTTP Retry-After 解析（RFC 7231 §7.1.3）──
+ * 纯函数：整数秒 / HTTP-date 两种形式都支持，便于单元测试。
+ * 调用方（range_write 重试分支）拿到结果后会再 clamp 到 MAX_RETRY_AFTER_MS，这里只保证：
+ *   - 合法整数秒 → 毫秒（如 "120" → 120000）；
+ *   - HTTP-date（RFC 1123）→ 距现在的差值（毫秒），过去时间按 0（立即重试）；
+ *   - 非法 / 空 → 返回 fallback_ms（即固定退避）。
+ * 用 libcurl 的 curl_getdate 解析 HTTP-date，避免自己写脆弱的日期解析。 */
+long parse_retry_after(const char *value, long fallback_ms) {
+    if (!value) return fallback_ms;
+    while (*value == ' ' || *value == '\t') value++;
+    if (!*value) return fallback_ms;
+
+    /* 形式一：整数秒（如 "120" / " 30 "） */
+    char *end = NULL;
+    long secs = strtol(value, &end, 10);
+    if (end != value && (*end == '\0' || *end == ' ' || *end == '\t'
+                       || *end == '\r' || *end == '\n')) {
+        if (secs < 0) return 0;            /* 负数 → 立即重试 */
+        return secs * 1000L;
+    }
+
+    /* 形式二：HTTP-date（如 "Wed, 21 Oct 2015 07:28:00 GMT"） */
+    time_t t = curl_getdate(value, NULL);
+    if (t != (time_t)-1) {
+        time_t now = time(NULL);
+        long long d = (long long)t - (long long)now;
+        if (d < 0) d = 0;
+        if (d > 3600) d = 3600;            /* 单函数内也封顶 1h */
+        return (long)(d * 1000L);
+    }
+
+    return fallback_ms;                    /* 解析失败 → 固定退避 */
 }
 
 /* ════════════════════════════════════════════
@@ -393,7 +431,11 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
                      "%lld-", (long long)task->range_start);
     }
 
+    MemBuf hdr;
+    mb_init(&hdr);
+
     for (int attempt = 0; attempt <= max_retry; attempt++) {
+        mb_free(&hdr); mb_init(&hdr);   /* 每个 attempt 重置响应头缓冲（捕获 Retry-After） */
         CURL *h = curl_easy_init();
         if (!h) {
             strncpy(res.error_msg, "curl_easy_init 失败", sizeof(res.error_msg) - 1);
@@ -402,6 +444,9 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
 
         apply_common_opts(h, &opt);
         curl_easy_setopt(h, CURLOPT_URL, task->url);
+        /* 捕获响应头（用于 Retry-After） */
+        curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, write_hdr_cb);
+        curl_easy_setopt(h, CURLOPT_HEADERDATA, &hdr);
         curl_easy_setopt(h, CURLOPT_HTTPGET, 1L);
         if (range_hdr[0]) curl_easy_setopt(h, CURLOPT_RANGE, range_hdr);
         /* 分片下载不自动解压：保持原始字节（不设 ACCEPT_ENCODING） */
@@ -481,9 +526,31 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
         /* 4xx 客户端错误是确定性的（链接失效、无权限、参数错），重试只是白等：
          * 401/403/404 立即失败，把真实原因尽早抛给用户。408/429 是“稍后再试”语义，照常重试。 */
         if (code >= 400 && code < 500 && code != 408 && code != 429) break;
-        if (attempt < max_retry)
-            Sleep((DWORD)((attempt + 1) * opt.retry_delay_ms));
+        if (attempt < max_retry) {
+            /* 默认退避：指数 (attempt+1) * retry_delay_ms。
+             * 若服务器回了 Retry-After（429 限流 / 503 过载常见），尊重它 —— 既符合 RFC，
+             * 也避免「服务器说等 N 秒、我们却按固定退避猛撞」的无效重试。
+             * 例：Retry-After: 30 → 等 30s 而非 1s；Retry-After: 0 → 立即重试。 */
+            long wait_ms = (long)(attempt + 1) * opt.retry_delay_ms;
+            if (hdr.data) {
+                const char *ra = strcasestr(hdr.data, "Retry-After:");
+                if (ra) {
+                ra += 11; /* strlen("Retry-After") */
+                while (*ra && (*ra == ':' || *ra == ' ' || *ra == '\t')) ra++;
+                    char ra_buf[64];
+                    int ri = 0;
+                    while (*ra && *ra != '\r' && *ra != '\n' && ri < 63)
+                        ra_buf[ri++] = *ra++;
+                    ra_buf[ri] = '\0';
+                    long ra_ms = parse_retry_after(ra_buf, wait_ms);
+                    if (ra_ms > MAX_RETRY_AFTER_MS) ra_ms = MAX_RETRY_AFTER_MS;
+                    if (ra_ms >= 0) wait_ms = ra_ms;
+                }
+            }
+            Sleep((DWORD)wait_ms);
+        }
     }
+    mb_free(&hdr);
     return res;
 }
 

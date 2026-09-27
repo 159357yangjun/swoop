@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>    /* time / gmtime / strftime（[20] Retry-After 的 HTTP-date 用例） */
 #include <wchar.h>   /* wmemmove / wcsncpy（长路径前缀拼接用） */
 #include <windows.h>
 
@@ -202,7 +203,7 @@ static int clean_outputs(const char *outdir)
 {
     static const char *names[] = { "noauth.bin", "withauth.bin", "nocap.bin",
                                    "cap.bin", "shared.bin", "norange.bin",
-                                   "bigoffset.bin",
+                                   "bigoffset.bin", "ra.bin", "lp.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
     for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
@@ -1267,6 +1268,101 @@ int main(int argc, char **argv)
                 wchar_t w[1024];
                 if (test_to_wpath(longdir, w, 1024)) RemoveDirectoryW(w);
             }
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 20. parse_retry_after 纯函数（整数秒 / HTTP-date / 非法）──
+     * 这是「尊重 Retry-After」的基础：解析本身必须正确，否则后面的重试等待算错。
+     * 纯函数、无网络、确定性 —— 单测比端到端更稳，突变（注掉整数分支→回退）必红。 */
+    printf("\n[20] parse_retry_after 纯函数：整数秒 / HTTP-date / 非法\n");
+    {
+        char d[96];
+        long r;
+
+        r = parse_retry_after("120", 1000);
+        snprintf(d, sizeof(d), "120 -> %ldms（期望 120000）", r);
+        check("整数秒 \"120\" -> 120000ms", r == 120000, d);
+
+        r = parse_retry_after(" 30 ", 1000);   /* 前后带空白，必须容忍 */
+        snprintf(d, sizeof(d), "\" 30 \" -> %ldms（期望 30000）", r);
+        check("整数秒带空格 \" 30 \" -> 30000ms", r == 30000, d);
+
+        r = parse_retry_after("0", 1000);
+        snprintf(d, sizeof(d), "0 -> %ldms（期望 0，立即重试）", r);
+        check("整数秒 \"0\" -> 0ms（立即重试）", r == 0, d);
+
+        r = parse_retry_after("abc", 1000);    /* 非法 → 回退固定退避 */
+        snprintf(d, sizeof(d), "abc -> %ldms（期望回退 1000）", r);
+        check("非法字符串 -> 回退 fallback(1000ms)", r == 1000, d);
+
+        r = parse_retry_after(NULL, 1000);
+        check("NULL -> 回退 fallback(1000ms)", r == 1000, "NULL 必须回退");
+
+        /* HTTP-date：构造一个「未来 120 秒」的 RFC 1123 时间串，断言落在 [110000,130000] */
+        {
+            time_t future = time(NULL) + 120;
+            char ds[64];
+            struct tm *g = gmtime(&future);
+            strftime(ds, sizeof(ds), "%a, %d %b %Y %H:%M:%S GMT", g);
+            r = parse_retry_after(ds, 1000);
+            snprintf(d, sizeof(d), "HTTP-date 未来120s -> %ldms（期望 110000~130000）", r);
+            check("HTTP-date 未来120s -> 约120000ms", r >= 110000 && r <= 130000, d);
+        }
+        /* HTTP-date 在过去 → 0（立即重试，而不是退回固定退避） */
+        {
+            time_t past = time(NULL) - 120;
+            char ds[64];
+            struct tm *g = gmtime(&past);
+            strftime(ds, sizeof(ds), "%a, %d %b %Y %H:%M:%S GMT", g);
+            r = parse_retry_after(ds, 1000);
+            snprintf(d, sizeof(d), "HTTP-date 过去 -> %ldms（期望 0）", r);
+            check("HTTP-date 在过去 -> 0ms（立即重试）", r == 0, d);
+        }
+    }
+
+    /* ── 21. 重试尊重 Retry-After（端到端）──
+     * 服务端 /retryafter.bin：首 GET 回 429 + Retry-After: 3，后续 GET 回 200。
+     * 引擎若尊重 Retry-After，重试等待≈3s；若只按固定 1s 退避猛撞，等待≈1s。
+     * 用实际耗时区分两者 —— 这是「尊重 Retry-After」唯一可观测的证据，
+     * 也是突变测试（注掉读头逻辑→退回固定 1s）会变红的断言。 */
+    printf("\n[21] 重试尊重 Retry-After（429 + Retry-After:3 → 实际等待≈3s 而非固定 1s）\n");
+    {
+        char u[512];
+        snprintf(u, sizeof(u), "http://127.0.0.1:%d/retryafter.bin", port);
+        /* retryafter.bin 需 Basic 认证 */
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+        int id = dlmgr_add(u, outdir, "ra.bin", 1, NULL, NULL, NULL, NULL);
+        check("任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            DWORD t0 = GetTickCount();
+            int st = 0; int64_t dl = 0;
+            wait_task(id, 30000, &st, &dl);
+            DWORD el = GetTickCount() - t0;
+
+            char path[MAX_PATH + 64], tmp2[MAX_PATH + 64];
+            snprintf(path, sizeof(path), "%s\\ra.bin", outdir);
+            snprintf(tmp2, sizeof(tmp2), "%s.idmtmp", path);
+            long fsz = file_size_of(path);
+            int mc = content_matches_pattern(path, 4096);
+            char d[220];
+            snprintf(d, sizeof(d),
+                     "status=%d file=%ld 内容=%d 耗时=%ums（期望≥2000，证明等到3s而非固定1s）",
+                     st, fsz, mc, el);
+            check("尊重 Retry-After：重试后下载成功", st == 3 && fsz > 0 && mc == 1, d);
+            /* 实际等待明显长于固定退避（1s）→ 证明读到了 Retry-After: 3 并按它退避 */
+            check("尊重 Retry-After：实际等待≈3s（非固定1s退避）", el >= 2000, d);
+            utf8_delete(path);
+            utf8_delete(tmp2);
             dlmgr_remove(id);
         }
     }
