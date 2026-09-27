@@ -92,13 +92,13 @@ jobs:
             throw 'NSIS installer does not request machine-wide native messaging registration'
           }
 
-          # 辅助工具不能只“文件存在”；至少实际启动并返回版本信息。
-          & 'installer/dist/aria2/aria2c.exe' --version | Select-Object -First 1
-          if ($LASTEXITCODE -ne 0) { throw 'bundled aria2c failed to start' }
-          & 'installer/dist/ffmpeg/ffmpeg.exe' -version | Select-Object -First 1
-          if ($LASTEXITCODE -ne 0) { throw 'bundled ffmpeg failed to start' }
-          & 'installer/dist/yt-dlp/yt-dlp.exe' --version
-          if ($LASTEXITCODE -ne 0) { throw 'bundled yt-dlp failed to start' }
+          # 用 Start-Process 读取真实进程退出码，避免 PowerShell 管道提前关闭污染 LASTEXITCODE。
+          $aria = Start-Process -FilePath (Resolve-Path 'installer/dist/aria2/aria2c.exe') -ArgumentList '--version' -PassThru -Wait -NoNewWindow
+          if ($aria.ExitCode -ne 0) { throw "bundled aria2c failed with exit code $($aria.ExitCode)" }
+          $ffmpeg = Start-Process -FilePath (Resolve-Path 'installer/dist/ffmpeg/ffmpeg.exe') -ArgumentList '-version' -PassThru -Wait -NoNewWindow
+          if ($ffmpeg.ExitCode -ne 0) { throw "bundled ffmpeg failed with exit code $($ffmpeg.ExitCode)" }
+          $ytdlp = Start-Process -FilePath (Resolve-Path 'installer/dist/yt-dlp/yt-dlp.exe') -ArgumentList '--version' -PassThru -Wait -NoNewWindow
+          if ($ytdlp.ExitCode -ne 0) { throw "bundled yt-dlp failed with exit code $($ytdlp.ExitCode)" }
 
           $process = Start-Process `
             -FilePath (Resolve-Path 'installer/dist/idm-next.exe') `
