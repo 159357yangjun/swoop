@@ -2,7 +2,7 @@ name: ci-idm-next
 
 on:
   push:
-    branches: [master, 'release/idm-next-packaging']
+    branches: [master]
   pull_request:
     branches: [master]
   workflow_dispatch:
