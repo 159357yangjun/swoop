@@ -20,6 +20,17 @@ TaskController::TaskController(QObject* parent)
 {
 }
 
+static QString taskQueueForId(TaskListModel* model, int id)
+{
+    if (!model)
+        return QString();
+    for (const TaskRow& row : model->tasks()) {
+        if (row.id == id)
+            return row.queue;
+    }
+    return QString();
+}
+
 // ── 媒体后端信号转发：统一汇入主窗口桥接槽 ─────────────
 void TaskController::onMediaProgress(int taskId, qint64 downloaded, qint64 total, int speedBps)
 {
@@ -272,12 +283,20 @@ void TaskController::startTaskById(int id)
     // 此处由队列调度器放行后真正拉起后端（视频/HLS/BT）。
     if (m_pendingStream.contains(id)) {
         DownloadRequest req = m_pendingStream.take(id);
+        bool started = false;
         if (isTorrentTask(id)) {
-            if (auto* td = m_torrentTasks.value(id)) td->start(req);
+            if (auto* td = m_torrentTasks.value(id)) { td->start(req); started = true; }
         } else if (isHlsTask(id)) {
-            if (auto* hd = m_hlsTasks.value(id)) hd->start(req);
+            if (auto* hd = m_hlsTasks.value(id)) { hd->start(req); started = true; }
         } else if (isVideoTask(id)) {
-            if (auto* vd = m_videoTasks.value(id)) vd->start(req);
+            if (auto* vd = m_videoTasks.value(id)) { vd->start(req); started = true; }
+        }
+        if (!started) {
+            m_setState(id, 4);
+            m_model->updateStatus(id, 4);
+            if (m_syncStatus) m_syncStatus();
+            Log::warn(QStringLiteral("待启动媒体任务 #%1 缺少对应后端实例").arg(id));
+            return;
         }
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
         m_model->updateStatus(id, 1);
@@ -293,22 +312,34 @@ void TaskController::startTaskById(int id)
 
 void TaskController::pauseTaskById(int id)
 {
+    // 媒体任务可能还只是“等待队列/等待并发空位”，此时后端从未 start()。
+    // 对未启动后端直接 pause() 没有意义；只冻结状态并从无队列 deferred 集合移除。
+    if (m_pendingStream.contains(id)) {
+        m_queueScheduler->clearDeferred(id);
+        m_setState(id, 2);
+        m_model->updateStatus(id, 2);
+        if (m_syncStatus) m_syncStatus();
+        return;
+    }
     if (isHlsTask(id)) {
         if (auto* hd = m_hlsTasks.value(id)) hd->pause();
         m_setState(id, 2);
         m_model->updateStatus(id, 2);
+        if (m_syncStatus) m_syncStatus();
         return;
     }
     if (isVideoTask(id)) {
         if (auto* vd = m_videoTasks.value(id)) vd->pause();
         m_setState(id, 2);
         m_model->updateStatus(id, 2);
+        if (m_syncStatus) m_syncStatus();
         return;
     }
     if (isTorrentTask(id)) {
         if (auto* td = m_torrentTasks.value(id)) td->pause();
         m_setState(id, 2);
         m_model->updateStatus(id, 2);
+        if (m_syncStatus) m_syncStatus();
         return;
     }
     m_manager->pauseTask(id);
@@ -318,6 +349,21 @@ void TaskController::pauseTaskById(int id)
 
 void TaskController::resumeTaskById(int id)
 {
+    // 尚未真正 start() 的媒体任务恢复时不能调用 backend->resume()：后端还没有 URL/保存路径。
+    // 恢复为等待态并重新进入调度；无队列且当前有全局空位时可立即启动。
+    if (m_pendingStream.contains(id)) {
+        const QString queue = taskQueueForId(m_model, id);
+        if (queue.isEmpty() && m_queueScheduler->hasFreeSlot()) {
+            startTaskById(id);
+            return;
+        }
+        m_setState(id, 0);
+        m_model->updateStatus(id, 0);
+        if (queue.isEmpty())
+            m_queueScheduler->markDeferred(id);
+        if (m_syncStatus) m_syncStatus();
+        return;
+    }
     if (isHlsTask(id)) {
         if (auto* hd = m_hlsTasks.value(id)) hd->resume();
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
@@ -347,22 +393,33 @@ void TaskController::resumeTaskById(int id)
 
 void TaskController::cancelTaskById(int id)
 {
+    // 未启动媒体任务没有外部进程/RPC 可取消；保留 DownloadRequest，允许“重新开始”复用。
+    if (m_pendingStream.contains(id)) {
+        m_queueScheduler->clearDeferred(id);
+        m_setState(id, 5);
+        m_model->updateStatus(id, 5);
+        if (m_syncStatus) m_syncStatus();
+        return;
+    }
     if (isHlsTask(id)) {
         if (auto* hd = m_hlsTasks.value(id)) hd->cancel();
         m_setState(id, 5);
         m_model->updateStatus(id, 5);
+        if (m_syncStatus) m_syncStatus();
         return;
     }
     if (isVideoTask(id)) {
         if (auto* vd = m_videoTasks.value(id)) vd->cancel();
         m_setState(id, 5);
         m_model->updateStatus(id, 5);
+        if (m_syncStatus) m_syncStatus();
         return;
     }
     if (isTorrentTask(id)) {
         if (auto* td = m_torrentTasks.value(id)) td->cancel();
         m_setState(id, 5);
         m_model->updateStatus(id, 5);
+        if (m_syncStatus) m_syncStatus();
         return;
     }
     m_manager->cancelTask(id);
@@ -373,6 +430,11 @@ void TaskController::cancelTaskById(int id)
 
 void TaskController::restartTaskById(int id)
 {
+    // 对从未启动过的媒体任务，“重新开始”与重新放回调度队列等价。
+    if (m_pendingStream.contains(id)) {
+        resumeTaskById(id);
+        return;
+    }
     if (isHlsTask(id)) {
         if (auto* hd = m_hlsTasks.value(id)) hd->resume();  // HLS 无断点续传，重新下载
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
