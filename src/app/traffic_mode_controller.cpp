@@ -72,8 +72,7 @@ void TrafficModeController::applyMode(int mode)
     Log::info(QStringLiteral("流量档位切换为「%1」(%2 KB/s)")
                   .arg(trafficModeName(mode)).arg(kbps));
     syncCombo();
-    if (m_traySink) m_traySink(m_settings->trafficMode());  // 同步托盘流量子菜单勾选
-    updateIndicator();   // 同步任务列表「限速」列
+    updateIndicator();   // 同步任务列表、状态栏和托盘
 }
 
 void TrafficModeController::syncCombo()
@@ -87,18 +86,29 @@ void TrafficModeController::syncCombo()
 void TrafficModeController::updateIndicator()
 {
     if (!m_model || !m_settings) return;
+
+    // 这个函数也承担“从持久化设置恢复运行态”的职责。MainWindow 在 m_settings.load()
+    // 之后调用它，因此必须把保存的实际 KB/s 同步给两个下载后端，而不能只更新文字。
+    // 尤其 trafficMode == -1（自定义）时，旧代码不会触发 applyMode()，导致 HTTP 引擎
+    // 已恢复限速但 aria2/BT 后端仍保持不限速。
+    const int kbps = qMax(0, m_settings->speedLimitKBps());
+    if (m_maxSpeedSink) m_maxSpeedSink(kbps * 1024);
+    if (m_torrentSink)  m_torrentSink(kbps);
+
     int mode = m_settings->trafficMode();
     QString text;
     if (mode == 0)
         text = QStringLiteral("自动");          // 自动 = 不限速
     else if (mode == -1)
-        text = QStringLiteral("自定义 %1").arg(m_settings->speedLimitKBps());
+        text = QStringLiteral("自定义 %1").arg(kbps);
     else
-        text = QStringLiteral("%1 %2").arg(trafficModeName(mode)).arg(trafficKbpsForMode(mode));
+        text = QStringLiteral("%1 %2").arg(trafficModeName(mode)).arg(kbps);
     m_model->setGlobalTraffic(text);
-    // 状态栏下拉也要跟着走：它现在承担原来「限速胶囊」的职责——让人一眼看出
-    // 当前是不是在限速、限到哪一档。档位名与列的文本同源，不会说两套话。
+
+    // MainWindow 构造早期就创建了状态栏/托盘，此时 Settings 还没 load；因此启动恢复时
+    // 这里必须同时刷新 combo 和托盘菜单，否则主界面显示持久化档位，托盘仍勾默认“自动”。
     syncCombo();
+    syncTray();
 }
 
 void TrafficModeController::syncTray()

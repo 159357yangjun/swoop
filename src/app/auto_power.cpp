@@ -1,6 +1,8 @@
 #include "auto_power.h"
 #include "settings.h"
 #include "logger.h"
+#include "task_list_model.h"
+#include "schedule_service.h"
 
 #include <QDialog>
 #include <QTimer>
@@ -21,7 +23,6 @@
 // ── Windows 电源控制（关机 / 休眠）──────────────────────────────
 #ifdef Q_OS_WIN
 namespace {
-// 请求 SE_SHUTDOWN_NAME 特权，否则普通进程调用 ExitWindowsEx 会失败
 bool enableShutdownPrivilege()
 {
     HANDLE hToken = nullptr;
@@ -44,24 +45,23 @@ bool enableShutdownPrivilege()
 void windowsShutdown()
 {
     enableShutdownPrivilege();
-    // EWX_SHUTDOWN：执行完整关机流程；EWX_FORCE：强关无响应的应用
-    ExitWindowsEx(EWX_SHUTDOWN | EWX_FORCE, 0);
+    // 不使用 EWX_FORCE：自动下载器不能强杀其他应用并冒险丢失用户未保存的数据。
+    // 正常关机流程允许 Windows/其他应用处理 WM_QUERYENDSESSION 或阻止关机。
+    ExitWindowsEx(EWX_SHUTDOWN, 0);
 }
 
 void windowsHibernate()
 {
-    // SetSuspendState 位于 PowrProf.dll，运行时动态解析以兼容不同工具链
-    // 签名：BOOLEAN SetSuspendState(BOOLEAN Hibernate, BOOLEAN ForceCritical, BOOLEAN DisableWakeEvent)
     typedef BOOL (WINAPI *PFN_SetSuspendState)(BOOL, BOOL, BOOL);
     QLibrary powr(QStringLiteral("PowrProf"));
     if (powr.load()) {
         auto fn = reinterpret_cast<PFN_SetSuspendState>(powr.resolve("SetSuspendState"));
         if (fn) {
-            fn(TRUE, TRUE, FALSE);  // Hibernate=true, Force=true
+            // ForceCritical=false：保持与安全关机相同的原则，不强制绕过正常系统协调。
+            fn(TRUE, FALSE, FALSE);
             return;
         }
     }
-    // 回退：调用 rundll32 触发休眠
     QProcess::execute(QStringLiteral("rundll32.exe"),
                       QStringList() << QStringLiteral("powrprof.dll,SetSuspendState")
                                     << QStringLiteral("1") << QStringLiteral("0")
@@ -71,8 +71,6 @@ void windowsHibernate()
 #endif
 
 // ── 可取消倒计时对话框（非模态）──────────────────────────────
-// 倒计时结束触发 onTrigger 回调（执行关机/休眠）；点击“取消”触发 onCancel。
-// 不使用 Q_OBJECT（信号用 std::function 回调替代），避免 AUTOMOC 依赖。
 class AutoPowerDialog : public QDialog {
 public:
     using Callback = std::function<void()>;
@@ -88,6 +86,8 @@ public:
         setWindowTitle(QStringLiteral("下载完成 - 即将%1").arg(actionText));
         setFixedSize(360, 150);
         setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+        // 对话框关闭后不应在 MainWindow 子对象树里长期残留；控制器只持有当前活动对话框。
+        setAttribute(Qt::WA_DeleteOnClose, true);
 
         auto* v = new QVBoxLayout(this);
         m_label = new QLabel(this);
@@ -107,6 +107,8 @@ public:
             --m_secs;
             if (m_secs <= 0) {
                 m_timer->stop();
+                // 标记“已经正常触发”后再 close；closeEvent 不能把正常触发误判为用户取消。
+                m_resolved = true;
                 if (m_onTrigger) m_onTrigger();
                 close();
             } else {
@@ -119,6 +121,9 @@ public:
     ~AutoPowerDialog() override { if (m_timer) m_timer->stop(); }
 
     void doCancel() {
+        if (m_resolved)
+            return;
+        m_resolved = true;
         if (m_timer) m_timer->stop();
         if (m_onCancel) m_onCancel();
         close();
@@ -127,6 +132,12 @@ public:
 protected:
     void closeEvent(QCloseEvent* e) override {
         if (m_timer) m_timer->stop();
+        // 点击窗口右上角 X 与“取消”按钮语义一致。旧逻辑只停定时器却不通知控制器，
+        // 导致 AutoPowerController::m_pending 永久保持 true，后续再也不会触发倒计时。
+        if (!m_resolved) {
+            m_resolved = true;
+            if (m_onCancel) m_onCancel();
+        }
         QDialog::closeEvent(e);
     }
 
@@ -142,6 +153,7 @@ private:
     int       m_secs = 0;
     Callback  m_onTrigger;
     Callback  m_onCancel;
+    bool      m_resolved = false;
 };
 
 // ── AutoPowerController ──────────────────────────────────
@@ -174,13 +186,39 @@ void AutoPowerController::setStatePathProvider(std::function<QString()> cb)
 void AutoPowerController::maybeTrigger()
 {
     if (m_pending)
-        return;  // 已经在倒计时，避免重复弹窗
+        return;
     if (!m_settings)
         return;
     if (m_settings->shutdownAction() == QStringLiteral("none"))
-        return;  // 未开启此功能
-    if (m_hasActiveOrPending && m_hasActiveOrPending())
+        return;
+
+    // 防御性使用真实模型核验一次“是否仍有工作”。MainWindow 的历史组合回调曾把
+    // `!scheduleService->hasPending()` 写反：没有定时任务时反而返回 true，而存在未来
+    // 定时任务时可能返回 false。电源动作属于高风险副作用，不能只依赖一个聚合 bool。
+    // 正常主窗口里 TaskListModel / ScheduleService 都是同一 parent 下的子对象；若本控制器
+    // 被单独用于测试/其他宿主而找不到它们，才回退到注入的旧回调。
+    bool haveAuthoritativeState = false;
+    bool activeOrPending = false;
+    if (QObject* root = parent()) {
+        auto* model = root->findChild<TaskListModel*>();
+        auto* schedules = root->findChild<ScheduleService*>();
+        if (model && schedules) {
+            haveAuthoritativeState = true;
+            for (const TaskRow& row : model->tasks()) {
+                if (row.state == 0 || row.state == 1) {
+                    activeOrPending = true;
+                    break;
+                }
+            }
+            if (!activeOrPending && schedules->hasPending())
+                activeOrPending = true;
+        }
+    }
+    if (!haveAuthoritativeState && m_hasActiveOrPending)
+        activeOrPending = m_hasActiveOrPending();
+    if (activeOrPending)
         return;  // 仍有下载中/排队/未到期定时任务
+
     if (m_hasCompletedOrFailed && !m_hasCompletedOrFailed())
         return;  // 没有任何已完成的下载，避免启动即触发
 
@@ -192,12 +230,12 @@ void AutoPowerController::maybeTrigger()
 
     auto* dlg = new AutoPowerDialog(
         actionText, grace,
-        [this]() {                       // 倒计时结束 → 执行关机/休眠
+        [this]() {
             m_pending = false;
             m_dlg = nullptr;
             perform();
         },
-        [this]() {                       // 用户取消
+        [this]() {
             m_pending = false;
             m_dlg = nullptr;
             Log::info(QStringLiteral("已取消下载完成后的关机/休眠"));
@@ -210,16 +248,19 @@ void AutoPowerController::maybeTrigger()
 void AutoPowerController::cancelPending()
 {
     if (m_dlg) {
-        m_dlg->close();
-        m_dlg->deleteLater();
+        // closeEvent 会回调 onCancel 并把 m_dlg 置空；必须先保存局部指针，不能在 close()
+        // 返回后继续通过 m_dlg 解引用，否则会出现空指针/悬空指针风险。
+        QDialog* dlg = m_dlg;
         m_dlg = nullptr;
+        m_pending = false;
+        dlg->close();   // WA_DeleteOnClose 负责 deleteLater
+        return;
     }
     m_pending = false;
 }
 
 void AutoPowerController::perform()
 {
-    // 关机/休眠前先保存任务状态，避免下次启动丢失进度
     QString p = m_statePathProvider ? m_statePathProvider() : QString();
     if (!p.isEmpty() && m_saveState)
         m_saveState(p);

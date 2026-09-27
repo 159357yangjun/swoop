@@ -18,6 +18,7 @@ class QComboBox;
 class QPushButton;
 class QLabel;
 class QWidget;
+class QTimer;
 #include <QProcess>
 
 class NewTaskDialog : public QDialog {
@@ -41,6 +42,9 @@ private slots:
     void onFormatsFinished(int exitCode, QProcess::ExitStatus status);
 
 private:
+    void stopFormatProbe();
+    bool validateSaveDir(QString* normalizedDir);
+
     NewTaskInput m_result;
 
     QLineEdit* m_urlEdit;
@@ -53,7 +57,9 @@ private:
     QComboBox* m_formatCombo  = nullptr;
     QPushButton* m_formatRefresh = nullptr;
     QProcess*  m_formatProc   = nullptr;
+    QTimer*    m_formatDebounce = nullptr;
     QByteArray m_formatBuffer;
+    QString    m_formatRequestUrl;
     bool       m_videoReady   = false;
 };
 

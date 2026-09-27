@@ -1,5 +1,10 @@
 # install_host.ps1 — 注册 IDM Next Native Messaging Host（Windows）
-# 便携包：当前用户直接运行即可；安装版会由 NSIS 自动调用。
+# 便携包：默认 CurrentUser；安装版由 NSIS 以管理员权限传 -Scope Machine。
+param(
+    [ValidateSet("CurrentUser", "Machine")]
+    [string]$Scope = "CurrentUser"
+)
+
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -29,9 +34,12 @@ $Json.path = $HostExe
 $Json | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 $JsonPath
 Write-Host "Native Messaging host: $HostExe" -ForegroundColor Gray
 
+# 管理员安装不能写 HKCU：当标准用户输入管理员凭据时，HKCU 会指向管理员账户，
+# 浏览器实际运行用户将完全看不到该 host。安装版因此使用 HKLM；便携包仍默认 HKCU。
+$RegistryRoot = if ($Scope -eq "Machine") { "HKLM:\Software" } else { "HKCU:\Software" }
 $browsers = @(
-    "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.tencent.idm_next",
-    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.tencent.idm_next"
+    (Join-Path $RegistryRoot "Google\Chrome\NativeMessagingHosts\com.tencent.idm_next"),
+    (Join-Path $RegistryRoot "Microsoft\Edge\NativeMessagingHosts\com.tencent.idm_next")
 )
 
 foreach ($key in $browsers) {
@@ -41,6 +49,6 @@ foreach ($key in $browsers) {
 }
 
 Write-Host ""
-Write-Host "IDM Next Native Messaging Host 注册完成。" -ForegroundColor Cyan
+Write-Host "IDM Next Native Messaging Host 注册完成（$Scope）。" -ForegroundColor Cyan
 Write-Host "manifest: $JsonPath"
 Write-Host "Chrome/Edge 扩展 ID 由 manifest.json 中固定 key 保持稳定。" -ForegroundColor Gray
