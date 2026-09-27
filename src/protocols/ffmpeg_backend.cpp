@@ -24,6 +24,25 @@ bool FfmpegBackend::isAvailable()
     return HlsDownloader::isFfmpegAvailable();
 }
 
+// 旧版本会把 ffplay/ffprobe 一起复制（约 200 MB）。升级后即使 ffmpeg 已可用，
+// 也要在 fast path 返回前清理；安装版可能残留在应用目录，按需下载版则在 dataDir。
+static void cleanupLegacyFfmpegTools()
+{
+    const QString appFfmpeg = QCoreApplication::applicationDirPath()
+                              + QStringLiteral("/ffmpeg");
+    QFile::remove(appFfmpeg + QStringLiteral("/ffplay.exe"));
+    QFile::remove(appFfmpeg + QStringLiteral("/ffprobe.exe"));
+
+    const QString local = AppPaths::dataDir();
+    if (!local.isEmpty()) {
+        const QString dataFfmpeg = local + QStringLiteral("/ffmpeg");
+        if (QDir::cleanPath(dataFfmpeg) != QDir::cleanPath(appFfmpeg)) {
+            QFile::remove(dataFfmpeg + QStringLiteral("/ffplay.exe"));
+            QFile::remove(dataFfmpeg + QStringLiteral("/ffprobe.exe"));
+        }
+    }
+}
+
 // 递归查找目录下的 ffmpeg.exe（解压后位于 bin/ 子目录）
 static QString findFfmpeg(const QString& dir)
 {
@@ -43,6 +62,7 @@ static QString findFfmpeg(const QString& dir)
 
 void FfmpegBackend::ensureAvailable(QObject* context, std::function<void(bool)> cb, bool warnOnError)
 {
+    cleanupLegacyFfmpegTools();
     if (isAvailable()) {
         if (cb) cb(true);
         return;
@@ -146,9 +166,7 @@ void FfmpegBackend::ensureAvailable(QObject* context, std::function<void(bool)> 
             copiedExe = copiedExe || isFfmpeg;
         }
 
-        // 修复/重装时顺手清掉旧版本曾复制的两个未使用工具，释放约 200 MB 磁盘。
-        QFile::remove(dir + QStringLiteral("/ffplay.exe"));
-        QFile::remove(dir + QStringLiteral("/ffprobe.exe"));
+        cleanupLegacyFfmpegTools();
 
         if (!allOk || !copiedExe) {
             if (warnOnError)
