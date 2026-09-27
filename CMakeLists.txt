@@ -187,6 +187,7 @@ set_target_properties(idm-next PROPERTIES
     QT_WINDOWS_VERSION_MINOR ${PROJECT_VERSION_MINOR}
     QT_WINDOWS_VERSION_PATCH ${PROJECT_VERSION_PATCH}
 )
+target_compile_definitions(idm-next PRIVATE IDM_NEXT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(idm-next PRIVATE idm_app_lib)
 
 # ── Native Messaging Host ────────────────────────
