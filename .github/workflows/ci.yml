@@ -47,7 +47,11 @@ jobs:
           if (-not (Test-Path build/idm-next.exe)) { throw 'idm-next.exe missing' }
           if (-not (Test-Path build/idm-next-host.exe)) { throw 'idm-next-host.exe missing' }
 
-      - name: Package portable distribution
+      - name: Install NSIS for installer validation
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Package CI distribution
         shell: pwsh
         run: ./installer/package.ps1 -SkipTools
 
@@ -74,11 +78,13 @@ jobs:
             throw "packaged CLI smoke test failed with exit code $($process.ExitCode)"
           }
 
-      - name: Verify portable package
+      - name: Verify package outputs
         shell: pwsh
         run: |
           $zip = Get-ChildItem installer/out/*-portable.zip | Select-Object -First 1
           if (-not $zip) { throw 'portable ZIP missing' }
+          $setup = Get-ChildItem installer/out/*-setup-x64.exe | Select-Object -First 1
+          if (-not $setup) { throw 'NSIS setup EXE missing' }
           $sum = Get-Content installer/out/SHA256SUMS.txt
           if ($sum -notmatch '^([0-9a-f]{64})  (.+\.zip)$') { throw 'invalid checksum manifest' }
           $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
