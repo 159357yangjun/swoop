@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QTranslator>
 #include <QHash>
+#include <QTextStream>
 
 #include <cstdio>
 #ifdef Q_OS_WIN
@@ -24,15 +25,17 @@
 #endif
 
 // ── IPC 单实例通信 ──────────────────────────────
-// 当 GUI 已在运行时，CLI 通过 local socket 把命令转发给 GUI，
-// 避免重复 dlmgr_init 导致引擎状态冲突。
+// 当 GUI 已在运行时，CLI/第二个 GUI 实例通过 local socket 把命令转发给现有 GUI，
+// 避免重复 dlmgr_init 和第二个实例抢占 IPC server。
 static const char* IPC_SERVER_NAME = "idm-next-ipc";
 
 /**
  * 尝试连接正在运行的 GUI 实例
- * @return true=已连接并转发成功（应直接退出），false=无 GUI 在运行（继续独立 CLI）
+ * @param cliArgs 要转发的命令参数
+ * @param printResponse 是否把 GUI 返回消息打印到 stdout（GUI 启动转发时关闭）
+ * @return true=已连接并转发成功（应直接退出），false=无 GUI 在运行（继续当前实例）
  */
-static bool tryForwardToGui(const QStringList& cliArgs)
+static bool tryForwardToGui(const QStringList& cliArgs, bool printResponse = true)
 {
     QLocalSocket socket;
     socket.connectToServer(QLatin1String(IPC_SERVER_NAME));
@@ -62,7 +65,7 @@ static bool tryForwardToGui(const QStringList& cliArgs)
             obj["url"] = a;  // 非 flag 的参数 = URL
     }
 
-    // 如果命令不是 add（比如 list/start/pause），也转发
+    // 如果命令不是 add（比如 list/activate），直接按首参数转发
     if (!cliArgs.isEmpty() && cliArgs.first() != QStringLiteral("add")) {
         obj["command"] = cliArgs.first();
         if (cliArgs.size() > 1)
@@ -79,11 +82,12 @@ static bool tryForwardToGui(const QStringList& cliArgs)
         QByteArray response = socket.readAll();
         QJsonDocument doc = QJsonDocument::fromJson(response);
         QJsonObject respObj = doc.object();
-        bool success = respObj.value("success").toBool();
         QString message = respObj.value("message").toString();
-        QTextStream out(stdout);
-        out << message << "\n";
-        out.flush();
+        if (printResponse && !message.isEmpty()) {
+            QTextStream out(stdout);
+            out << message << "\n";
+            out.flush();
+        }
         socket.disconnectFromServer();
         return true;
     }
@@ -93,7 +97,7 @@ static bool tryForwardToGui(const QStringList& cliArgs)
 }
 
 // WIN32 子系统下（GUI 可执行文件）无默认控制台；CLI 模式需用 AllocConsole 分配一个，
-// 并把标准流重定向到该控制台，使 CliApp 的 stdout 输出可见（修复“双击黑窗”后 CLI 仍可用）。
+// 并把标准流重定向到该控制台，使 CliApp / IPC 转发结果的 stdout 输出可见。
 static void ensureConsole()
 {
 #ifdef Q_OS_WIN
@@ -120,6 +124,10 @@ int main(int argc, char* argv[])
     }
 
     if (cliMode) {
+        // WIN32 子系统不会自动得到 C runtime 控制台；必须在“尝试 IPC 转发”之前就绑定，
+        // 否则 GUI 已运行时的 list/help 等转发结果会写到不可见的 stdout。
+        ensureConsole();
+
         // 提取 CLI 实际参数（去掉 --cli/-c 标志）
         QStringList cliArgs;
         for (int i = 1; i < argc; ++i) {
@@ -135,8 +143,7 @@ int main(int argc, char* argv[])
             return 0;  // 已转发给 GUI，无需启动引擎
         }
 
-        // 无 GUI 在运行，独立 CLI 模式：分配控制台并绑定标准流
-        ensureConsole();
+        // 无 GUI 在运行，独立 CLI 模式
         dlmgr_init(nullptr);
         Settings settings;
         settings.load();
@@ -170,10 +177,14 @@ int main(int argc, char* argv[])
             extUrl = a;
     }
 
-    // 若已存在运行实例且本次带 URL，则转发给该实例并退出（单实例 + 协议关联）
-    if (!extUrl.isEmpty() && tryForwardToGui(QStringList()
-                                             << QStringLiteral("add") << extUrl)) {
-        return 0;
+    // 已存在 GUI：带 URL 时转发添加任务；普通二次启动则只激活已有窗口。
+    // 这样不会出现两个 GUI 同时运行、后启动实例 removeServer() 抢掉 IPC 的情况。
+    if (!extUrl.isEmpty()) {
+        if (tryForwardToGui(QStringList() << QStringLiteral("add") << extUrl, false))
+            return 0;
+    } else {
+        if (tryForwardToGui(QStringList() << QStringLiteral("activate"), false))
+            return 0;
     }
 
     dlmgr_init(nullptr);
