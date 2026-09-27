@@ -1,0 +1,62 @@
+name: ci-idm-next
+
+on:
+  push:
+    branches: [master, 'release/idm-next-packaging']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 + Qt 6 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-charts
+            mingw-w64-x86_64-curl
+
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Verify expected executables
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build/idm-next.exe)) { throw 'idm-next.exe missing' }
+          if (-not (Test-Path build/idm-next-host.exe)) { throw 'idm-next-host.exe missing' }
+
+      - name: Package portable distribution
+        shell: pwsh
+        run: ./installer/package.ps1 -QtBin C:\msys64\mingw64\bin -SkipTools
+
+      - name: Verify portable package
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem installer/out/*-portable.zip | Select-Object -First 1
+          if (-not $zip) { throw 'portable ZIP missing' }
+          $sum = Get-Content installer/out/SHA256SUMS.txt
+          if ($sum -notmatch '^([0-9a-f]{64})  (.+\.zip)$') { throw 'invalid checksum manifest' }
+          $actual = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $Matches[1]) { throw 'portable ZIP checksum mismatch' }
+
+      - name: Upload CI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: idm-next-win64-ci
+          path: installer/out/*
+          if-no-files-found: error
