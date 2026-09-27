@@ -87,15 +87,25 @@ void TrafficModeController::syncCombo()
 void TrafficModeController::updateIndicator()
 {
     if (!m_model || !m_settings) return;
+
+    // 这个函数也承担“从持久化设置恢复运行态”的职责。MainWindow 在 m_settings.load()
+    // 之后调用它，因此必须把保存的实际 KB/s 同步给两个下载后端，而不能只更新文字。
+    // 尤其 trafficMode == -1（自定义）时，旧代码不会触发 applyMode()，导致 HTTP 引擎
+    // 已恢复限速但 aria2/BT 后端仍保持不限速。
+    const int kbps = qMax(0, m_settings->speedLimitKBps());
+    if (m_maxSpeedSink) m_maxSpeedSink(kbps * 1024);
+    if (m_torrentSink)  m_torrentSink(kbps);
+
     int mode = m_settings->trafficMode();
     QString text;
     if (mode == 0)
         text = QStringLiteral("自动");          // 自动 = 不限速
     else if (mode == -1)
-        text = QStringLiteral("自定义 %1").arg(m_settings->speedLimitKBps());
+        text = QStringLiteral("自定义 %1").arg(kbps);
     else
-        text = QStringLiteral("%1 %2").arg(trafficModeName(mode)).arg(trafficKbpsForMode(mode));
+        text = QStringLiteral("%1 %2").arg(trafficModeName(mode)).arg(kbps);
     m_model->setGlobalTraffic(text);
+
     // 状态栏下拉也要跟着走：它现在承担原来「限速胶囊」的职责——让人一眼看出
     // 当前是不是在限速、限到哪一档。档位名与列的文本同源，不会说两套话。
     syncCombo();
