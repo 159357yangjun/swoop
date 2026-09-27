@@ -237,13 +237,22 @@ if (-not (Test-Path (Join-Path $SqlDir "qsqlite.dll"))) {
     throw "发行目录缺少 qsqlite.dll"
 }
 
-# 浏览器扩展随应用发行。native-messaging-host 目录只保留正式注册文件，
-# 排除开发时同步的 EXE/DLL、Python fallback、测试脚本和 Qt 插件，避免重复与污染。
+# 浏览器扩展随应用发行。先清理测试/生成脚本/缓存目录，再对 Native Messaging
+# 子目录做更严格的白名单，只保留正式注册文件。
 $ExtensionSource = Join-Path $Root "browser-extension"
 if (Test-Path $ExtensionSource) {
     $ExtensionDest = Join-Path $Dist "browser-extension"
     New-Item $ExtensionDest -ItemType Directory -Force | Out-Null
     Copy-Item (Join-Path $ExtensionSource "*") $ExtensionDest -Recurse -Force
+
+    Get-ChildItem $ExtensionDest -Recurse -File -Force | Where-Object {
+        $_.Name -match '^test_' -or $_.Extension.ToLowerInvariant() -in @('.py', '.pyc', '.pyo')
+    } | Remove-Item -Force
+
+    Get-ChildItem $ExtensionDest -Recurse -Directory -Force |
+        Where-Object { $_.Name -in @('__pycache__', '.pytest_cache', 'node_modules') } |
+        Sort-Object FullName -Descending |
+        Remove-Item -Recurse -Force
 
     $NativeHostDest = Join-Path $ExtensionDest "native-messaging-host"
     if (Test-Path $NativeHostDest) {
