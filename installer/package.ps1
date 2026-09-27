@@ -2,6 +2,7 @@
 # IDM Next Windows 发行打包脚本
 # - 自动定位 Qt / windeployqt，不绑定某台机器的 C:\Qt\...
 # - 收集 Qt、MinGW、libcurl 等完整运行时依赖闭包
+# - 保留浏览器扩展正式 Native Messaging 注册文件
 # - 下载并校验运行所需辅助工具
 # - 生成便携 ZIP + SHA256
 # - 安装 NSIS 时同时生成 setup.exe
@@ -145,7 +146,6 @@ function Add-RuntimeDependencyClosure {
         [string]$Objdump
     )
 
-    # 搜索构建目录、Qt/MinGW bin、vendored libcurl 与当前 PATH。
     $searchDirs = New-Object System.Collections.Generic.List[string]
     foreach ($dir in @(
         $Build,
@@ -237,13 +237,29 @@ if (-not (Test-Path (Join-Path $SqlDir "qsqlite.dll"))) {
     throw "发行目录缺少 qsqlite.dll"
 }
 
-# 浏览器扩展作为独立目录随应用发行；开发时自动同步进去的 host runtime 不重复打包。
+# 浏览器扩展随应用发行。native-messaging-host 目录只保留正式注册文件，
+# 排除开发时同步的 EXE/DLL、Python fallback、测试脚本和 Qt 插件，避免重复与污染。
 $ExtensionSource = Join-Path $Root "browser-extension"
 if (Test-Path $ExtensionSource) {
     $ExtensionDest = Join-Path $Dist "browser-extension"
     New-Item $ExtensionDest -ItemType Directory -Force | Out-Null
     Copy-Item (Join-Path $ExtensionSource "*") $ExtensionDest -Recurse -Force
-    Remove-Item (Join-Path $ExtensionDest "native-messaging-host") -Recurse -Force -ErrorAction SilentlyContinue
+
+    $NativeHostDest = Join-Path $ExtensionDest "native-messaging-host"
+    if (Test-Path $NativeHostDest) {
+        $NativeHostKeep = @("com.tencent.idm_next.json", "install_host.ps1")
+        Get-ChildItem $NativeHostDest -Force | Where-Object {
+            $_.Name -notin $NativeHostKeep
+        } | Remove-Item -Recurse -Force
+
+        foreach ($requiredHostFile in $NativeHostKeep) {
+            if (-not (Test-Path (Join-Path $NativeHostDest $requiredHostFile))) {
+                throw "浏览器宿主注册文件缺失：$requiredHostFile"
+            }
+        }
+    } else {
+        throw "浏览器扩展缺少 native-messaging-host 注册目录"
+    }
 }
 
 # 补齐 MinGW / libcurl / OpenSSL 等非 Qt DLL，并递归验证依赖闭包。
