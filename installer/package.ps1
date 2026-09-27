@@ -108,7 +108,12 @@ function Ensure-ZipTool {
         Expand-Archive -Path $tmp -DestinationPath $extract -Force
         $found = Get-ChildItem $extract -Recurse -Filter $ExeName | Select-Object -First 1
         if (-not $found) { throw "压缩包中未找到 $ExeName" }
-        foreach ($file in Get-ChildItem $found.DirectoryName -File) {
+
+        # 工具包常把多个独立程序放在同一 bin 目录。IDM Next 只需要目标 exe；
+        # 同目录 DLL 继续保留，以兼容未来可能改成动态链接的上游构建。
+        $filesToCopy = @($found)
+        $filesToCopy += @(Get-ChildItem $found.DirectoryName -File -Filter "*.dll")
+        foreach ($file in ($filesToCopy | Sort-Object FullName -Unique)) {
             Copy-Item $file.FullName -Destination $DestDir -Force
         }
     }
@@ -291,6 +296,13 @@ if (-not $SkipTools) {
         (Join-Path $Dist "yt-dlp\yt-dlp.exe")
     )) {
         if (-not (Test-Path $requiredTool)) { throw "发行依赖缺失：$requiredTool" }
+    }
+
+    # FFmpeg essentials 同目录还包含 ffplay/ffprobe；应用没有调用它们，禁止误打包。
+    $unexpectedFfmpegExe = @(Get-ChildItem (Join-Path $Dist "ffmpeg") -File -Filter "*.exe" |
+        Where-Object { $_.Name -ne "ffmpeg.exe" })
+    if ($unexpectedFfmpegExe.Count -gt 0) {
+        throw "FFmpeg 目录混入未使用工具：$($unexpectedFfmpegExe.Name -join ', ')"
     }
 }
 

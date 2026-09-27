@@ -14,14 +14,33 @@
 #include <QMessageBox>
 #include <QWidget>
 
-// 官方 Windows essentials build（含 HLS TS→MP4 copy 所需的必要解码器，体积较小）。
-// 动态链接：ffmpeg.exe 与 bin/ 下的一批 DLL 必须同目录。
+// 官方 Windows essentials build（含 HLS TS→MP4 copy 所需的必要能力）。
+// IDM Next 只调用 ffmpeg.exe；若未来上游切换到动态链接构建，同目录 DLL 仍会保留。
 const char* const FfmpegBackend::FFMPEG_ZIP_URL =
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
 bool FfmpegBackend::isAvailable()
 {
     return HlsDownloader::isFfmpegAvailable();
+}
+
+// 旧版本会把 ffplay/ffprobe 一起复制（约 200 MB）。升级后即使 ffmpeg 已可用，
+// 也要在 fast path 返回前清理；安装版可能残留在应用目录，按需下载版则在 dataDir。
+static void cleanupLegacyFfmpegTools()
+{
+    const QString appFfmpeg = QCoreApplication::applicationDirPath()
+                              + QStringLiteral("/ffmpeg");
+    QFile::remove(appFfmpeg + QStringLiteral("/ffplay.exe"));
+    QFile::remove(appFfmpeg + QStringLiteral("/ffprobe.exe"));
+
+    const QString local = AppPaths::dataDir();
+    if (!local.isEmpty()) {
+        const QString dataFfmpeg = local + QStringLiteral("/ffmpeg");
+        if (QDir::cleanPath(dataFfmpeg) != QDir::cleanPath(appFfmpeg)) {
+            QFile::remove(dataFfmpeg + QStringLiteral("/ffplay.exe"));
+            QFile::remove(dataFfmpeg + QStringLiteral("/ffprobe.exe"));
+        }
+    }
 }
 
 // 递归查找目录下的 ffmpeg.exe（解压后位于 bin/ 子目录）
@@ -43,6 +62,7 @@ static QString findFfmpeg(const QString& dir)
 
 void FfmpegBackend::ensureAvailable(QObject* context, std::function<void(bool)> cb, bool warnOnError)
 {
+    cleanupLegacyFfmpegTools();
     if (isAvailable()) {
         if (cb) cb(true);
         return;
@@ -122,11 +142,20 @@ void FfmpegBackend::ensureAvailable(QObject* context, std::function<void(bool)> 
             return;
         }
 
-        // ffmpeg 是动态链接：连同同目录 DLL 一起复制到目标目录，保证可运行。
+        // essentials 的 bin 目录还带 ffplay/ffprobe，它们各约百 MB 且 IDM Next 不调用。
+        // 只复制 ffmpeg.exe + 同目录 DLL：当前静态构建只需 exe，同时兼容未来动态构建。
         QString binDir = QFileInfo(srcExe).absolutePath();
         QDir bd(binDir);
         bool allOk = true;
+        bool copiedExe = false;
         for (const auto& fi : bd.entryInfoList(QDir::Files)) {
+            const bool isFfmpeg =
+                fi.fileName().compare(QStringLiteral("ffmpeg.exe"), Qt::CaseInsensitive) == 0;
+            const bool isDll =
+                fi.suffix().compare(QStringLiteral("dll"), Qt::CaseInsensitive) == 0;
+            if (!isFfmpeg && !isDll)
+                continue;
+
             QString dest = dir + QStringLiteral("/") + fi.fileName();
             if (QFile::exists(dest))
                 QFile::remove(dest);
@@ -134,8 +163,12 @@ void FfmpegBackend::ensureAvailable(QObject* context, std::function<void(bool)> 
                 allOk = false;
                 break;
             }
+            copiedExe = copiedExe || isFfmpeg;
         }
-        if (!allOk) {
+
+        cleanupLegacyFfmpegTools();
+
+        if (!allOk || !copiedExe) {
             if (warnOnError)
                 QMessageBox::warning(qobject_cast<QWidget*>(context),
                                      QStringLiteral("安装失败"),
