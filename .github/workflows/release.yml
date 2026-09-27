@@ -27,6 +27,13 @@ jobs:
             mingw-w64-x86_64-qt6-charts
             mingw-w64-x86_64-curl
 
+      - name: Detect Qt bin directory
+        shell: msys2 {0}
+        run: |
+          QT_BIN_WIN="$(cygpath -w "$(dirname "$(command -v windeployqt)")")"
+          echo "QT_BIN=$QT_BIN_WIN" >> "$GITHUB_ENV"
+          echo "Qt bin: $QT_BIN_WIN"
+
       - name: Configure
         shell: msys2 {0}
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -41,16 +48,25 @@ jobs:
 
       - name: Build portable and installer packages
         shell: pwsh
-        run: ./installer/package.ps1 -QtBin C:\msys64\mingw64\bin
+        run: ./installer/package.ps1
 
       - name: Add setup checksum
         shell: pwsh
         run: |
           $manifest = 'installer/out/SHA256SUMS.txt'
-          Get-ChildItem installer/out/*-setup-x64.exe | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            Add-Content $manifest "$hash  $($_.Name)" -Encoding ASCII
+          $setups = Get-ChildItem installer/out/*-setup-x64.exe
+          if (-not $setups) { throw 'setup.exe missing' }
+          foreach ($setup in $setups) {
+            $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Add-Content $manifest "$hash  $($setup.Name)" -Encoding ASCII
           }
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem installer/out/*-portable.zip -ErrorAction SilentlyContinue)) { throw 'portable ZIP missing' }
+          if (-not (Get-ChildItem installer/out/*-setup-x64.exe -ErrorAction SilentlyContinue)) { throw 'setup EXE missing' }
+          if (-not (Test-Path installer/out/SHA256SUMS.txt)) { throw 'checksum manifest missing' }
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
