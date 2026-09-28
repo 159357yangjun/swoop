@@ -292,7 +292,16 @@ MainWindow::MainWindow(QWidget* parent)
             addTaskFromUrl(url, filename, dir, threads, queue, format);
         });
     m_ipcServer->setTaskCountProvider([this]() { return m_taskModel->rowCount(); });
-    m_ipcServer->start();
+    /* listen 必须推迟到事件循环的第一轮，不能在这里同步做。
+       QLocalServer::listen() 一调用，命名管道就存在了，OS 立刻允许第二个实例 open 成功；
+       但 newConnection → handleClient → 回话整条链都靠 Qt 事件循环驱动，而循环要等
+       main() 里的 app.exec() 才开始转。于是「构造完成 ~ exec() 之前」是一段黑洞窗口：
+       对方连得上、写进去、没人读，只能白等到超时。CI 的
+       「secondary IDM Next launch exited with code 1」就是踩在这里
+       （见 main.cpp tryForwardToGui 的注释）。
+       改成 singleShot(0) 后，管道只在「能立刻被服务」的那一刻出现：此刻还没建好时
+       对方拿到的是 NotConnected，本来就有 waitForGui 每 100ms 重试接得住。 */
+    QTimer::singleShot(0, this, [this] { m_ipcServer->start(); });
 
     // 加载全局设置（默认目录/线程数/限速/主题）
     m_settings.load();

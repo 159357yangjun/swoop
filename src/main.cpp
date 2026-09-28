@@ -87,6 +87,12 @@ static ForwardResult tryForwardToGui(const QStringList& cliArgs, bool printRespo
         return ForwardResult::Failure;
     }
 
+    /* 「连上了、也写出去了，但对方暂时没回话」不能按失败重发：
+     * 重发更糟——对方可能已经处理过这条请求，activate 幂等还好，add 就是下两遍。
+     * 超时上限必须留在调用方的观察窗之内：CI 用 WaitForExit(5000) 判定稳态二次启动，
+     * 这里若放到 8 秒，同一个竞态只会换一种更难查的红法（「没复用实例」而不是「退出码 1」）。
+     * 真正的黑洞窗口在 MainWindow 构造里同步 listen，已由 main_window.cpp 的
+     * QTimer::singleShot(0) 消掉：现在连得上就等于事件循环已经在转、马上有回话。 */
     if (socket.waitForReadyRead(3000)) {
         QByteArray response = socket.readAll();
         QJsonDocument doc = QJsonDocument::fromJson(response);
@@ -239,8 +245,15 @@ int main(int argc, char* argv[])
         CloseHandle(guiMutex);
         if (forwarded != ForwardResult::NotConnected)
             return forwarded == ForwardResult::Success ? 0 : 1;
-        MessageBoxW(nullptr, L"已有 IDM Next 正在启动，但 IPC 未能就绪。",
-                    L"IDM Next", MB_OK | MB_ICONERROR);
+        /* 换成写日志 + stderr。原来的 MB_OK | MB_ICONERROR 模态框有两个毛病：
+         *   · 无人值守的场合（CI、服务会话、开机自启）没人点确定，进程就挂在那里不退出，
+         *     调用方看到的不是「失败」而是「永远等不到」；
+         *   · 对用户也没有信息量——双击图标两次后弹一句"IPC 未能就绪"，他只能点确定。
+         * 注意：这条分支不是 CI 那次红的原因（它报的是退出码 1，说明走的是 Failure，
+         * 也就是连上了但没回话，见上面 waitForReadyRead 的注释）；这里改的是
+         * 「10 秒压根连不上」那条路，退出码保持非 0，让调用方照样能察觉。 */
+        Log::error(QStringLiteral("已有 IDM Next 正在启动，但 IPC 在 10 秒内未就绪；本次启动放弃。"));
+        QTextStream(stderr) << QStringLiteral("IDM Next: 另一个实例正在启动，但 IPC 未能就绪。\n");
         return 1;
     }
 #else

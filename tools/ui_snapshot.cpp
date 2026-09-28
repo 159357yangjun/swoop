@@ -9,6 +9,9 @@
 #include <QTimer>
 #include <QThread>
 #include <QDir>
+#include <QLocalSocket>
+#include <QJsonObject>
+#include <QJsonDocument>
 #include <QPixmap>
 #include <QFile>
 #include <QSettings>
@@ -550,6 +553,81 @@ int main(int argc, char** argv) {
         printf("%s 倒计时归零（sec=0）自动回落到状态文本\n",           ok3 ? "[PASS]" : "[FAIL]");
         printf("%s 429/503/408 三种文案与 sec<=0 空串都对\n",          ok4 ? "[PASS]" : "[FAIL]");
         return (ok0 && ok1 && ok2 && ok3 && ok4) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_IPC_PROBE=1 ──
+     * 单实例交接的时序契约：命名管道只能在「事件循环已经能服务它」的那一刻才出现。
+     * 以前 IpcServer::start() 在 MainWindow 构造里同步跑，于是「构造完成 ~ app.exec()」
+     * 之间管道存在但没人读——第二实例连得上、写得进、等不到回话，3 秒后按失败退出 1
+     * （CI「secondary IDM Next launch exited with code 1」就是这个 1）。
+     * 这里不起第二个进程（那会往本机再拉一个 GUI），而是在同一进程里用 QLocalSocket
+     * 扮演那个迟到的第二实例：
+     *   ① 窗口构造完、循环第一轮之前：必须**连不上**（黑洞窗口已消除）；
+     *   ② 转一圈事件循环（start() 的 singleShot(0) 被触发）后：必须连得上；
+     *   ③ 发一条 activate：必须拿到 success=true 的回话。
+     * ⚠️ 前置：本机不能有正在运行的 idm-next GUI——那样 ① 连上的是他的实例，
+     * 结论跟本进程无关，所以直接判失败并要求先关掉，而不是假装通过。 */
+    if (qEnvironmentVariableIsSet("IDM_IPC_PROBE")) {
+        {
+            QLocalSocket guard;
+            guard.connectToServer(QStringLiteral("idm-next-ipc"));
+            const bool occupied = guard.waitForConnected(200);
+            guard.disconnectFromServer();
+            if (occupied) {
+                printf("[FAIL] idm-next-ipc 已被别的 IDM Next 实例占用，请先关闭它再跑本探针\n");
+                return 1;
+            }
+        }
+
+        bool notListeningYet = false;
+        bool listeningAfterLoop = false;
+        bool gotReply = false;
+        bool replySaysSuccess = false;
+        {
+            MainWindow w;                       /* 只把 start() 排进队列，不 listen */
+            {
+                QLocalSocket early;
+                early.connectToServer(QStringLiteral("idm-next-ipc"));
+                notListeningYet = !early.waitForConnected(300);
+            }
+
+            QCoreApplication::processEvents();   /* 第一轮：singleShot(0) → IpcServer::start() */
+
+            QLocalSocket late;
+            late.connectToServer(QStringLiteral("idm-next-ipc"));
+            listeningAfterLoop = late.waitForConnected(2000);
+            if (listeningAfterLoop) {
+                QJsonObject req;
+                req[QStringLiteral("command")] = QStringLiteral("activate");
+                late.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                late.flush();
+                /* 本进程里客户端和服务端是同一条线程：QLocalSocket 的写出走
+                 * QWindowsPipeWriter，是异步的，要事件循环才能真正把字节推进管道。
+                 * 不先泵一轮就进 handleClient 的话，它的 waitForReadyRead(100)
+                 * 读不到自己的请求（10 轮 ≈1 秒后按空命令回绝），假红。
+                 * 真实场景是两个进程，各自的写不依赖对方循环，所以这里只是
+                 * 补齐「单进程扮演第二实例」这个做法的必要一步。 */
+                QCoreApplication::processEvents();
+                if (late.waitForBytesWritten(1000)) {
+                    /* 服务端 handleClient 会阻塞这条线程，先把请求送达再泵一次收回话 */
+                    gotReply = late.waitForReadyRead(2000);
+                    if (gotReply) {
+                        const QJsonObject resp = QJsonDocument::fromJson(late.readAll()).object();
+                        replySaysSuccess = resp.value(QStringLiteral("success")).toBool(false);
+                    }
+                }
+                late.disconnectFromServer();
+            }
+        }
+
+        printf("%s 窗口构造完、事件循环第一轮之前没人监听（不留下「连得上但没人读」的黑洞）\n",
+               notListeningYet ? "[PASS]" : "[FAIL]");
+        printf("%s 事件循环转起来之后管道才存在，可被连接\n",
+               listeningAfterLoop ? "[PASS]" : "[FAIL]");
+        printf("%s activate 请求拿到了回话\n", gotReply ? "[PASS]" : "[FAIL]");
+        printf("%s 回话里 success=true（交接成功 ⇒ 第二实例退出码 0）\n",
+               replySaysSuccess ? "[PASS]" : "[FAIL]");
+        return (notListeningYet && listeningAfterLoop && gotReply && replySaysSuccess) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_CONCURRENCY_PROBE=1 ──
