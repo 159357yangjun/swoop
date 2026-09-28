@@ -16,6 +16,82 @@ typedef struct {
     long long written;   /* 本段本轮已写字节 */
 } conn_arg_t;
 
+typedef struct outfile_reservation {
+    download_task_t *owner;
+    wchar_t path[MAX_PATH];
+    struct outfile_reservation *next;
+} outfile_reservation_t;
+
+/* WinXP 兼容：不用 SRWLOCK/InitOnce。路径选择 + 登记必须在同一把锁内完成，
+   否则两个尚未落盘的排队任务都可能同时拿到 file (1).ext。 */
+static CRITICAL_SECTION g_res_lock;
+static volatile LONG g_res_lock_state = 0; /* 0=未初始化 1=初始化中 2=可用 */
+static outfile_reservation_t *g_reservations = NULL;
+
+static void ensure_reservation_lock(void)
+{
+    if (InterlockedCompareExchange(&g_res_lock_state, 1, 0) == 0) {
+        InitializeCriticalSection(&g_res_lock);
+        InterlockedExchange(&g_res_lock_state, 2);
+        return;
+    }
+    while (InterlockedCompareExchange(&g_res_lock_state, 2, 2) != 2)
+        Sleep(0);
+}
+
+static int reserved_by_other_locked(const wchar_t *path, const download_task_t *owner)
+{
+    for (outfile_reservation_t *r = g_reservations; r; r = r->next) {
+        if (_wcsicmp(r->path, path) == 0 && r->owner != owner)
+            return 1;
+    }
+    return 0;
+}
+
+static int add_reservation_locked(download_task_t *owner, const wchar_t *path)
+{
+    if (!owner || !path || !path[0]) return -1;
+    for (outfile_reservation_t *r = g_reservations; r; r = r->next) {
+        if (r->owner == owner) {
+            if (_wcsicmp(r->path, path) == 0) return 0;
+            return -1;
+        }
+        if (_wcsicmp(r->path, path) == 0) return -1;
+    }
+    outfile_reservation_t *r = (outfile_reservation_t *)calloc(1, sizeof *r);
+    if (!r) return -1;
+    r->owner = owner;
+    wcsncpy(r->path, path, MAX_PATH - 1);
+    r->path[MAX_PATH - 1] = 0;
+    r->next = g_reservations;
+    g_reservations = r;
+    return 0;
+}
+
+static void remove_reservation_locked(download_task_t *owner)   /* 调用者持 g_res_lock */
+{
+    if (!owner) return;
+    outfile_reservation_t **pp = &g_reservations;
+    while (*pp) {
+        if ((*pp)->owner == owner) {
+            outfile_reservation_t *dead = *pp;
+            *pp = dead->next;
+            free(dead);
+            break;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static void remove_reservation(download_task_t *owner)
+{
+    if (!owner) return;
+    ensure_reservation_lock();
+    EnterCriticalSection(&g_res_lock);
+    remove_reservation_locked(owner);
+    LeaveCriticalSection(&g_res_lock);
+}
+
 /* 每收到一块就写入文件（文件指针已按偏移定位），累加总量；running=0 时中止。 */
 static int task_write_cb(void *ctx, const void *data, long long n)
 {
@@ -57,17 +133,160 @@ static DWORD WINAPI conn_thread(LPVOID p)
     return 0;
 }
 
-download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn)
+/* GetFileAttributesW 失败不一定代表“不存在”（也可能权限不足）。
+   只有明确的 FILE/PATH_NOT_FOUND 才允许直接使用该名字，其余错误保守视为已占用。 */
+static int path_is_taken(const wchar_t *path)
 {
+    DWORD a = GetFileAttributesW(path);
+    if (a != INVALID_FILE_ATTRIBUTES) return 1;
+    DWORD e = GetLastError();
+    return !(e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND);
+}
+
+/* 调用者必须持有 g_res_lock。磁盘和“尚未创建文件的排队任务”都算占用。 */
+static int candidate_taken_locked(const wchar_t *path, const download_task_t *owner)
+{
+    return path_is_taken(path) || reserved_by_other_locked(path, owner);
+}
+
+/* 为“新建 HTTP 任务”挑一个不会覆盖现有磁盘对象/已排队任务的名字。
+   调用者必须持有 g_res_lock；file.ext -> file (1).ext -> file (2).ext ...。 */
+static int choose_available_outfile_locked(const wchar_t *desired, wchar_t *out, int n,
+                                           const download_task_t *owner)
+{
+    if (!desired || !desired[0] || !out || n <= 1) return 0;
+    wcsncpy(out, desired, n - 1);
+    out[n - 1] = 0;
+    if (!candidate_taken_locked(out, owner)) return 1;
+
+    const wchar_t *end = desired + wcslen(desired);
+    const wchar_t *slash1 = wcsrchr(desired, L'\\');
+    const wchar_t *slash2 = wcsrchr(desired, L'/');
+    const wchar_t *slash = slash1;
+    if (slash2 && (!slash || slash2 > slash)) slash = slash2;
+    const wchar_t *base = slash ? slash + 1 : desired;
+    const wchar_t *dot = wcsrchr(base, L'.');
+    if (dot == base) dot = NULL;  /* .gitignore 这类首字符点不视为扩展分隔点 */
+
+    size_t prefix_len = (size_t)(base - desired);
+    size_t stem_len = (size_t)((dot ? dot : end) - base);
+    const wchar_t *ext = dot ? dot : L"";
+    size_t ext_len = wcslen(ext);
+
+    for (int i = 1; i <= 9999; i++) {
+        wchar_t suffix[32];
+        _snwprintf(suffix, 32, L" (%d)", i);
+        suffix[31] = 0;
+        size_t suffix_len = wcslen(suffix);
+        if (prefix_len + suffix_len + ext_len + 2 > (size_t)n) return 0;
+
+        size_t max_stem = (size_t)n - 1 - prefix_len - suffix_len - ext_len;
+        size_t use_stem = stem_len < max_stem ? stem_len : max_stem;
+        if (use_stem == 0) return 0;
+
+        size_t w = 0;
+        if (prefix_len) { wmemcpy(out + w, desired, prefix_len); w += prefix_len; }
+        wmemcpy(out + w, base, use_stem); w += use_stem;
+        wmemcpy(out + w, suffix, suffix_len); w += suffix_len;
+        if (ext_len) { wmemcpy(out + w, ext, ext_len); w += ext_len; }
+        out[w] = 0;
+
+        if (!candidate_taken_locked(out, owner)) return 1;
+    }
+    return 0;
+}
+
+int task_register_outfile(download_task_t *t)
+{
+    if (!t || t->kind == IDM_KIND_TORRENT || !t->outfile[0]) return 0;
+    ensure_reservation_lock();
+    EnterCriticalSection(&g_res_lock);
+    int rc = add_reservation_locked(t, t->outfile);
+    LeaveCriticalSection(&g_res_lock);
+    return rc;
+}
+
+/* 开文件时才发现名字被占用了：重新挑一个安全名字，并把它换进预留表。
+   返回 1=已换成新名字（与原不同），0=换不动（调用者按错误处理）。
+   ⚠️ 预留表只是本进程内的静态链表，跨进程什么都拦不住 —— 所以真正 CreateFileW
+   那一步才是最终裁决，这里负责把"撞车"变成"换个名字继续"。 */
+static int repick_outfile(download_task_t *t)
+{
+    wchar_t cand[MAX_PATH];
+    int ok = 0;
+    if (!t || !t->outfile[0]) return 0;
+    ensure_reservation_lock();
+    EnterCriticalSection(&g_res_lock);
+    ok = choose_available_outfile_locked(t->outfile, cand, MAX_PATH, t)
+      && _wcsicmp(cand, t->outfile) != 0;
+    if (ok) {
+        wchar_t old[MAX_PATH];
+        wcsncpy(old, t->outfile, MAX_PATH - 1);
+        old[MAX_PATH - 1] = 0;
+        remove_reservation_locked(t);
+        wcsncpy(t->outfile, cand, MAX_PATH - 1);
+        t->outfile[MAX_PATH - 1] = 0;
+        if (add_reservation_locked(t, t->outfile) != 0) {
+            wcsncpy(t->outfile, old, MAX_PATH - 1);      /* 登记不成就退回原名 */
+            t->outfile[MAX_PATH - 1] = 0;
+            (void)add_reservation_locked(t, t->outfile);
+            ok = 0;
+        }
+    }
+    LeaveCriticalSection(&g_res_lock);
+    if (ok) log_msg("task_start: 目标已被占用，改用 %ls", t->outfile);
+    return ok;
+}
+
+static download_task_t *task_create_impl(const char *url, const wchar_t *outfile,
+                                         int num_conn, int avoid_existing)
+{
+    if (!url || !url[0] || !outfile || !outfile[0]) return NULL;
     download_task_t *t = (download_task_t *)calloc(1, sizeof *t);
     if (!t) return NULL;
     strncpy(t->url, url, sizeof t->url - 1);
-    wcsncpy(t->outfile, outfile, MAX_PATH - 1);
+    t->url[sizeof t->url - 1] = 0;
+    t->kind = torrent_kind_for_url(url);
+
+    if (t->kind == IDM_KIND_TORRENT) {
+        wcsncpy(t->outfile, outfile, MAX_PATH - 1);
+        t->outfile[MAX_PATH - 1] = 0;
+    } else {
+        ensure_reservation_lock();
+        EnterCriticalSection(&g_res_lock);
+        int ok;
+        if (avoid_existing)
+            ok = choose_available_outfile_locked(outfile, t->outfile, MAX_PATH, t);
+        else {
+            wcsncpy(t->outfile, outfile, MAX_PATH - 1);
+            t->outfile[MAX_PATH - 1] = 0;
+            ok = !reserved_by_other_locked(t->outfile, t);
+        }
+        if (ok) ok = (add_reservation_locked(t, t->outfile) == 0);
+        LeaveCriticalSection(&g_res_lock);
+        if (!ok) {
+            free(t);
+            return NULL;
+        }
+        if (avoid_existing && _wcsicmp(t->outfile, outfile) != 0)
+            log_msg("task_create: output occupied, renamed to %ls", t->outfile);
+    }
+
     t->num_conn = num_conn;
     if (t->num_conn < 1) t->num_conn = 1;
     if (t->num_conn > 16) t->num_conn = 16;
     t->status = DL_QUEUED;
     return t;
+}
+
+download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn)
+{
+    return task_create_impl(url, outfile, num_conn, 1);
+}
+
+download_task_t *task_create_preserve_path(const char *url, const wchar_t *outfile, int num_conn)
+{
+    return task_create_impl(url, outfile, num_conn, 0);
 }
 
 void task_join(download_task_t *t)
@@ -133,6 +352,8 @@ void task_free(download_task_t *t)
         CloseHandle((HANDLE)t->proc);
         t->proc = NULL;
     }
+    /* 线程/aria2 都已退出后再释放路径，避免新任务抢到仍被旧线程写入的文件。 */
+    remove_reservation(t);
     free(t);
 }
 
@@ -228,10 +449,31 @@ int task_start(download_task_t *t)
         CloseHandle(fh);
     } else {
         split_segments(t, res.supports_range);
-        fh = CreateFileW(t->outfile, GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (fh == INVALID_HANDLE_VALUE) { t->status = DL_ERROR; return -1; }
+        /* ⚠️ 全新下载不能用 CREATE_ALWAYS。名字是 task_create()（排队那一刻）挑的，
+           真正开文件却是现在：队列可能已经放行几分钟，中间任何进程（另一个 Swoop、
+           浏览器抢先落盘、用户自己拖了同名文件进目录）都能把这个名字占掉，
+           而预留表只是本进程的静态链表，跨进程什么都拦不住 —— CREATE_ALWAYS
+           会把别人的文件静默截断成我们的半成品。
+           所以由这一步做最终裁决：不是本任务创建的产物就 CREATE_NEW，撞上就换名字重试；
+           只有重新下载"本任务自己创建过的那份"（含重启后恢复的已完成任务）才允许覆盖。
+           回归用例：自测 race=167。 */
+        int tries = 0;
+        for (;;) {
+            fh = CreateFileW(t->outfile, GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                             t->owns_outfile ? CREATE_ALWAYS : CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+            if (fh != INVALID_HANDLE_VALUE) break;
+            DWORD e = GetLastError();
+            if (!t->owns_outfile
+                && (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
+                && ++tries <= 50 && repick_outfile(t))
+                continue;
+            t->status = DL_ERROR;
+            log_msg("task_start: 打不开目标 %ls（err=%lu）", t->outfile, e);
+            return -1;
+        }
+        t->owns_outfile = 1;                 /* 从现在起这份文件是本任务的产物 */
         if (t->total > 0) {                 /* 预分配，保证各段可乱序写入 */
             LARGE_INTEGER sz; sz.QuadPart = t->total;
             SetFilePointerEx(fh, sz, NULL, FILE_BEGIN);

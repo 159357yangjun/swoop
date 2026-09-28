@@ -584,7 +584,20 @@ static void schedule_queue(void)
     /* 挑选逻辑抽成纯函数（queue_pick）：只挑排队中且用户没暂停的。
        以前这里直接把所有 DL_QUEUED 都拉起来，于是「暂停」排队任务无效。 */
     int n = queue_pick(g_tasks, g_ntasks, slots, idx, 64);
-    for (int k = 0; k < n; k++) task_start(g_tasks[idx[k]]);
+    /* 开文件那一步可能把名字换掉（名字被别的东西占走 → 自动改 to " (1)"），
+       换完必须马上落盘：否则异常退出后 tasks.json 里还是旧路径，
+       下次启动 verify_partial 找不到文件就把进度清零重下，
+       还可能再挑一个不同的 (n) 名字。列表显示不用管，它每次都从 t->outfile 取。 */
+    int renamed = 0;
+    for (int k = 0; k < n; k++) {
+        download_task_t *t = g_tasks[idx[k]];
+        wchar_t before[MAX_PATH];
+        wcsncpy(before, t->outfile, MAX_PATH - 1);
+        before[MAX_PATH - 1] = 0;
+        task_start(t);
+        if (t->outfile[0] && wcscmp(before, t->outfile) != 0) renamed = 1;
+    }
+    if (renamed) save_tasks();
 }
 
 /* ---- 调度用：全部暂停。先统一发停止信号再统一 join，

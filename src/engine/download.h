@@ -33,11 +33,21 @@ typedef struct {
     wchar_t     referer[2048];
     /* 1 = 用户手动暂停，定时调度不得自动恢复（否则覆盖用户意图） */
     int         user_paused;
+    /* 1 = outfile 这个文件是本任务创建出来的产物（或由它上一次会话创建、已随任务
+       一起恢复）。只有这种情况下「重新下载」才允许覆盖它；新任务一律不许覆盖任何
+       已存在的文件（见 task_start 里的 CREATE_NEW 裁决）。 */
+    int         owns_outfile;
     /* 本轮分片线程里传输失败的个数（非 2xx / 连接断）——>0 则整任务判错 */
     volatile LONG io_errors;
 } download_task_t;
 
+/* 用户新建任务：HTTP 目标若已存在/已被其他任务预留，会自动选择 file (1).ext 等安全路径。 */
 download_task_t *task_create(const char *url, const wchar_t *outfile, int num_conn);
+/* 内部精确路径构造：不自动改名，但仍登记预留；目标已被其他任务登记时返回 NULL。
+   当前真实持久化恢复由 taskstore_load() 直接解析对象后调用 task_register_outfile()。 */
+download_task_t *task_create_preserve_path(const char *url, const wchar_t *outfile, int num_conn);
+/* taskstore_load() 对直接 calloc 出来的恢复任务调用，让新任务也能避开这些尚未落盘的目标。 */
+int   task_register_outfile(download_task_t *t);
 void  task_free(download_task_t *t);
 int   task_start(download_task_t *t);   /* 全新下载，或 DL_PAUSED 时续传 */
 void  task_stop(download_task_t *t);    /* 仅发停止信号（running=0），不回收线程 */

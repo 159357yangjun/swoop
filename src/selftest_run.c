@@ -24,6 +24,30 @@
 #include "gui/resources.h"
 #include "selftest_run.h"
 
+/* 仅供本文件旧持久化夹具使用（Makefile 用 -Dtask_create=… 把本编译单元里的
+   task_create 调用映射到这里）。夹具经常先创建“部分下载文件”再构造任务，
+   因此既不能自动改名，也不能占用生产预留表；真正应用恢复由 taskstore_load() 登记。
+   ⚠️ 定义必须留在本文件里，不要搬去 selftest.c：
+   selftest_run.o 同时链进 swoop.exe 和 swoop_selftest.exe，而 selftest.o 只进后者 ——
+   放在 selftest.c 里时 swoop.exe 会报 undefined reference to `task_create_test_fixture`
+   （gcc 13.1 与 15.2 都失败，CI 的 Build 步骤就是被这个卡住的）。 */
+download_task_t *task_create_test_fixture(const char *url, const wchar_t *outfile, int num_conn)
+{
+    if (!url || !url[0] || !outfile || !outfile[0]) return NULL;
+    download_task_t *t = (download_task_t *)calloc(1, sizeof *t);
+    if (!t) return NULL;
+    strncpy(t->url, url, sizeof t->url - 1);
+    t->url[sizeof t->url - 1] = 0;
+    wcsncpy(t->outfile, outfile, MAX_PATH - 1);
+    t->outfile[MAX_PATH - 1] = 0;
+    t->kind = torrent_kind_for_url(url);
+    t->num_conn = num_conn;
+    if (t->num_conn < 1) t->num_conn = 1;
+    if (t->num_conn > 16) t->num_conn = 16;
+    t->status = DL_QUEUED;
+    return t;
+}
+
 /* 本地自测服务：内容为 (offset*31+7)&0xFF 的确定性模式，
    支持 Range；g_slow 打开时限速，用于制造「下载到一半」的中间态。 */
 #define TEST_SIZE (1048576LL)   /* 1 MB */
@@ -630,12 +654,16 @@ int run_selftest(void)
     int rc13 = test_seg_plan();
     int rc14 = test_pause_queued();
     int rc15 = test_resources();
+    /* 定义在 selftest.c：那边才是真实 task_create（本文件的 task_create 被 -D 改名了），
+       又必须在本地 HTTP 服务起来之后跑，所以放进来而不是放在 selftest.c 的 main 里。 */
+    int rc16 = test_race_at_start();
     int rc = 0;
     if (rc1) rc = rc1; else if (rc2) rc = rc2; else if (rc3) rc = rc3;
     else if (rc4) rc = rc4; else if (rc5) rc = rc5; else if (rc6) rc = rc6;
     else if (rc7) rc = rc7; else if (rc8) rc = rc8; else if (rc9) rc = rc9;
     else if (rc10) rc = rc10; else if (rc11) rc = rc11; else if (rc12) rc = rc12;
     else if (rc13) rc = rc13; else if (rc14) rc = rc14; else if (rc15) rc = rc15;
+    else if (rc16) rc = rc16;
 
     http_cleanup();
     WaitForSingleObject(h, 1000);
@@ -648,15 +676,16 @@ int run_selftest(void)
     if (f) {
         fprintf(f, "selftest %s rc=%d whole=%d resume=%d store=%d sched=%d speed=%d "
                    "speeddl=%d queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d "
-                   "segplan=%d paused=%d res=%d\n",
+                   "segplan=%d paused=%d res=%d race=%d\n",
                 rc == 0 ? "PASS" : "FAIL", rc, rc1, rc2, rc3, rc4, rc5, rc6,
-                rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15);
+                rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc16);
         fclose(f);
     }
 
     printf("Swoop selftest: %s (whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d "
-           "queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d segplan=%d paused=%d res=%d rc=%d)\n",
+           "queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d segplan=%d paused=%d "
+           "res=%d race=%d rc=%d)\n",
            rc == 0 ? "PASS" : "FAIL", rc1, rc2, rc3, rc4, rc5, rc6,
-           rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc);
+           rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc16, rc);
     return rc;
 }
