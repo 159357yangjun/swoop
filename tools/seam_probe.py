@@ -20,6 +20,7 @@
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -39,7 +40,15 @@ def measure(tag, qss, replace=False, style=None):
     theme = os.environ.get("IDM_PROBE_THEME", "light")
     os.makedirs(SHOTDIR, exist_ok=True)
     for f in os.listdir(SHOTDIR):
-        os.remove(os.path.join(SHOTDIR, f))
+        p = os.path.join(SHOTDIR, f)
+        # ⚠️ 目录必须走 rmtree：ui_snapshot 在 portable 模式下会在截图目录里建一个
+        # _data 数据目录，而 os.remove 对目录在 Windows 上抛的是 PermissionError
+        # （不是 IsADirectoryError）—— 于是「连跑两次」第二次必崩，暗色基线永远测不了。
+        # 基线工具必须能重复跑，这里连它一并清掉（ui_snapshot 每次都会重建它）。
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            os.remove(p)
 
     # 走查工具会往真实数据目录写 tasks.json，先备份、跑完还原（绝不污染用户任务）
     backup = None
