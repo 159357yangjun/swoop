@@ -106,10 +106,58 @@ jobs:
           $dist = (Resolve-Path 'installer/dist').Path
           $exe = (Resolve-Path 'installer/dist/idm-next.exe').Path
 
+          # 判定条件一条都不改，只补“红的时候看得懂”：每个实例的 stdout/stderr 各自重定向到
+          # 独立文件，抛错时把尾部贴进异常文本。以前这个断言只能报出「exited with code 1」，
+          # 而 1 有两条完全不同的来路（连不上 vs 连上了没人回话），只能靠猜。
+          # QT_LOGGING_TO_CONSOLE=1 让 Qt 日志走 stderr——GUI 子系统程序默认只发
+          # OutputDebugString，重定向文件里会是空的，那条路就白留了。有了它，赢家 stderr 里
+          # 「IPC server 已启动，监听 idm-next-ipc」和「IPC 请求: activate → 成功」两句话
+          # 就是分诊依据：两句都有 = 交接成功；只有前一句 = 请求根本没被读走。
+          $env:QT_LOGGING_TO_CONSOLE = '1'
+          $logDir = Join-Path $env:TEMP ('idm-ipc-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
+          function Get-StreamTail([string]$path) {
+            if (-not (Test-Path -LiteralPath $path)) { return '<没有输出文件>' }
+            $tail = Get-Content -LiteralPath $path -Tail 40 -ErrorAction SilentlyContinue
+            if (-not $tail) { return '<空>' }
+            return ($tail -join "`n")
+          }
+
+          # $entries 是 Start-Logged 的返回值（带 Name/Out/Err），不是 Process。
+          function Fail-WithLogs([string]$message, $entries) {
+            $parts = @($message)
+            foreach ($e in $entries) {
+              if (-not $e) { continue }
+              $parts += ("--- {0} stdout ---`n{1}" -f $e.Name, (Get-StreamTail $e.Out))
+              $parts += ("--- {0} stderr ---`n{1}" -f $e.Name, (Get-StreamTail $e.Err))
+            }
+            throw ($parts -join "`n")
+          }
+
+          function Start-Logged {
+            param([string]$Tag, [string[]]$Arguments = @())
+            $out = Join-Path $logDir ($Tag + '.out.txt')
+            $err = Join-Path $logDir ($Tag + '.err.txt')
+            $spec = @{
+              FilePath               = $exe
+              WorkingDirectory       = $dist
+              RedirectStandardOutput = $out
+              RedirectStandardError  = $err
+              PassThru               = $true
+            }
+            if ($Arguments.Count -gt 0) { $spec['ArgumentList'] = $Arguments }
+            $p = Start-Process @spec
+            return [pscustomobject]@{ Name = $Tag; Proc = $p; Out = $out; Err = $err }
+          }
+
           # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
-          $first = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
-          $second = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
-          $pair = @($first, $second)
+          $first = Start-Logged 'first'
+          $second = Start-Logged 'second'
+          $byId = @{}
+          $byId[$first.Proc.Id] = $first
+          $byId[$second.Proc.Id] = $second
+          $pair = @($first.Proc, $second.Proc)
           try {
             $winner = $null
             for ($i = 0; $i -lt 80; $i++) {
@@ -118,7 +166,9 @@ jobs:
               $alive = @($pair | Where-Object { -not $_.HasExited })
 
               if ($alive.Count -gt 1) { continue }
-              if ($alive.Count -eq 0) { throw 'both IDM Next instances exited during startup race' }
+              if ($alive.Count -eq 0) {
+                Fail-WithLogs 'both IDM Next instances exited during startup race' @($first; $second)
+              }
 
               $alive[0].Refresh()
               if ($alive[0].MainWindowHandle -ne 0) {
@@ -127,47 +177,53 @@ jobs:
               }
             }
             if (-not $winner) {
-              throw 'startup race did not converge to exactly one ready IDM Next GUI'
+              Fail-WithLogs 'startup race did not converge to exactly one ready IDM Next GUI' @($first; $second)
             }
 
             $losers = @($pair | Where-Object { $_.HasExited })
             if ($losers.Count -ne 1) {
-              throw 'exactly one IDM Next secondary process should exit'
+              Fail-WithLogs 'exactly one IDM Next secondary process should exit' @($first; $second)
             }
             if ($losers[0].ExitCode -ne 0) {
-              throw "secondary IDM Next launch exited with code $($losers[0].ExitCode)"
+              Fail-WithLogs "secondary IDM Next launch exited with code $($losers[0].ExitCode)" `
+                            @($byId[$losers[0].Id]; $first; $second)
             }
 
             # 稳态普通二次启动必须激活已有窗口并迅速退出。
-            $third = Start-Process -FilePath $exe -WorkingDirectory $dist -PassThru
+            $third = Start-Logged 'third'
             try {
-              if (-not $third.WaitForExit(5000)) {
-                throw 'steady-state IDM Next launch did not reuse the existing GUI instance'
+              if (-not $third.Proc.WaitForExit(5000)) {
+                Fail-WithLogs 'steady-state IDM Next launch did not reuse the existing GUI instance' `
+                              @($third; $byId[$winner.Id])
               }
-              if ($third.ExitCode -ne 0) {
-                throw "steady-state IDM Next launch exited with code $($third.ExitCode)"
+              if ($third.Proc.ExitCode -ne 0) {
+                Fail-WithLogs "steady-state IDM Next launch exited with code $($third.Proc.ExitCode)" `
+                              @($third; $byId[$winner.Id])
               }
             }
             finally {
-              if (-not $third.HasExited) { Stop-Process -Id $third.Id -Force -ErrorAction SilentlyContinue }
+              if (-not $third.Proc.HasExited) { Stop-Process -Id $third.Proc.Id -Force -ErrorAction SilentlyContinue }
             }
 
             # GUI 已运行时 CLI 必须通过 IPC，而不是另起独立引擎。
-            $remoteHelp = Start-Process -FilePath $exe -ArgumentList '--cli','help' -WorkingDirectory $dist -PassThru -Wait
-            if ($remoteHelp.ExitCode -ne 0) {
-              throw "remote CLI help failed with exit code $($remoteHelp.ExitCode)"
+            $remoteHelp = Start-Logged 'remote-help' @('--cli', 'help')
+            $remoteHelp.Proc.WaitForExit()
+            if ($remoteHelp.Proc.ExitCode -ne 0) {
+              Fail-WithLogs "remote CLI help failed with exit code $($remoteHelp.Proc.ExitCode)" @($remoteHelp)
             }
 
             # 远端业务错误要传播为非 0 退出码，不能“连接成功就一律 exit 0”。
-            $remoteMissing = Start-Process -FilePath $exe -ArgumentList '--cli','info','2147483647' -WorkingDirectory $dist -PassThru -Wait
-            if ($remoteMissing.ExitCode -ne 1) {
-              throw "remote CLI failure exit code was $($remoteMissing.ExitCode), expected 1"
+            $remoteMissing = Start-Logged 'remote-missing' @('--cli', 'info', '2147483647')
+            $remoteMissing.Proc.WaitForExit()
+            if ($remoteMissing.Proc.ExitCode -ne 1) {
+              Fail-WithLogs "remote CLI failure exit code was $($remoteMissing.Proc.ExitCode), expected 1" @($remoteMissing)
             }
           }
           finally {
             foreach ($p in $pair) {
               if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
+            Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
           }
 
       - name: Verify package outputs
