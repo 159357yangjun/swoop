@@ -563,7 +563,11 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
              * 服务器回了 Retry-After（429 限流 / 503 过载常见）就尊重它 —— 既符合 RFC，
              * 也避免「服务器说等 N 秒、我们却按固定退避猛撞」的无效重试。
              * 例：Retry-After: 30 → 等 30s 而非 1s；Retry-After: 0 → 立即重试。 */
-            Sleep((DWORD)retry_wait_ms(&hdr, (long)(attempt + 1) * opt.retry_delay_ms));
+            long wait_ms = retry_wait_ms(&hdr, (long)(attempt + 1) * opt.retry_delay_ms);
+            /* 先报上去再睡：这一觉最长可以是 MAX_RETRY_AFTER_MS（1 小时），
+             * 不通知的话界面上就只剩「下载中」三个字一动不动，用户只能靠猜。 */
+            if (task->notice_wait) task->notice_wait((int)code, wait_ms, task->notice_ud);
+            Sleep((DWORD)wait_ms);
         }
     }
     mb_free(&hdr);

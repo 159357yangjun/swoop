@@ -667,6 +667,18 @@ static void calc_chunks(DownloadTask *t) {
 /* ─────────────────────────────────────
  * 分片下载线程
  * ───────────────────────────────────── */
+/* 网络层在重试等待开始前打来的通知：把「服务器让我们等到什么时候」记到任务上。
+ * 只记绝对截止时刻，换算剩余秒数是读侧（dlmgr_get_task_info）的事。
+ * 注意这是在下载线程上被调用，g_lock 此刻由本函数自己持有，不要在外面等它。 */
+static void on_net_wait(int http_code, long wait_ms, void *ud) {
+    DownloadTask *t = (DownloadTask*)ud;
+    if (!t || wait_ms <= 0) return;
+    EnterCriticalSection(&g_lock);
+    t->throttle_http      = http_code;
+    t->throttle_until_ms  = dl_time_ms() + (int64_t)wait_ms;
+    LeaveCriticalSection(&g_lock);
+}
+
 /* 单个分片的下载逻辑（被线程池动态调度）：整个分片只打开一次文件句柄，
  * 循环下载各小块并写入，减少 open/close 开销（磁盘缓存）。 */
 static int download_one_chunk(DownloadTask *t, int cid) {
@@ -729,6 +741,8 @@ static int download_one_chunk(DownloadTask *t, int cid) {
             nd.range_start = block_start;
             nd.range_end   = block_end;
             nd.opt         = &t->net_opts;   /* 本任务选项（含代理 + 站点认证） */
+            nd.notice_wait = on_net_wait;    /* 429/503 的等待要在界面上看得见，见其注释 */
+            nd.notice_ud   = t;
 
             NetDownloadResult result = network_download_range_fp(&nd, fp);
             if (!result.success && result.range_ignored && t->chunk_count > 1) {
@@ -760,6 +774,10 @@ static int download_one_chunk(DownloadTask *t, int cid) {
             EnterCriticalSection(&g_lock);
             c->downloaded += result.bytes_written;
             t->downloaded += result.bytes_written;
+            /* 字节真的开始进来了 = 限流等待已经过去，立刻清掉倒计时。
+             * 不能只靠「到点自动失效」：服务器提前放行时，那几秒里界面还在喊
+             * 「N 秒后重试」，说反话比信息滞后更糟。 */
+            if (t->throttle_until_ms) { t->throttle_until_ms = 0; t->throttle_http = 0; }
             /* 记录分片下载实际协商到的协议版本（首个非空即锁定，多线程同主机一致） */
             if (!t->http_version[0] && result.http_version[0]) {
                 strncpy(t->http_version, result.http_version, sizeof(t->http_version) - 1);
@@ -1297,6 +1315,10 @@ int dlmgr_pause(int task_id) {
          * 终态（已完成/已失败/已取消）不动，避免把结束的任务改回可续状态。 */
         if (t->status == TASK_PENDING || t->status == TASK_RUNNING)
             t->status = TASK_PAUSED;
+        /* 用户按了暂停，就不该再显示「N 秒后重试」——那是给正在等的下载用的。
+         * 底层那一觉可能还在睡，但界面上说的必须是当前真话。 */
+        t->throttle_until_ms = 0;
+        t->throttle_http     = 0;
     }
     LeaveCriticalSection(&g_lock);
     return t ? 0 : -1;
@@ -1347,6 +1369,8 @@ int dlmgr_restart(int task_id) {
     t->ema_last_ms   = 0;
     t->eta_sec    = 0;
     t->start_time = 0;
+    t->throttle_until_ms = 0;   /* 重新开始：上一轮的限流等待作废，别挂着假倒计时 */
+    t->throttle_http     = 0;
     memset(t->chunks, 0, sizeof(t->chunks));
     /* chunk_count 必须跟着清零：dlmgr_start 现在用「chunk_count == 0」判断是否需要
      * 重新探测分段（不再看状态）。只清数组不清计数，等于对外宣称"已经分好段了"，
@@ -1425,6 +1449,15 @@ int dlmgr_get_task_info(int task_id, TaskInfo *info) {
         info->chunks_done = done;
         strncpy(info->error_msg, t->error_msg, sizeof(info->error_msg) - 1);
         info->error_msg[sizeof(info->error_msg) - 1] = '\0';
+        /* 限流倒计时在这里读侧换算（写侧只记一次截止时刻）；向上取整，
+         * 这样 Retry-After: 3 的第一格显示 3 而不是一上来就 2。 */
+        info->throttle_http = t->throttle_http;
+        info->throttle_sec  = 0;
+        if (t->throttle_until_ms > 0) {
+            int64_t left = t->throttle_until_ms - dl_time_ms();
+            if (left > 0) info->throttle_sec = (int)((left + 999) / 1000);
+            else { t->throttle_until_ms = 0; t->throttle_http = 0; }   /* 到点自清 */
+        }
     }
     LeaveCriticalSection(&g_lock);
     return t ? 0 : -1;
@@ -1438,6 +1471,8 @@ int dlmgr_get_task_infos(TaskInfo *out, int max_count) {
     if (!out || !g_initialized) return 0;
     EnterCriticalSection(&g_lock);
     int cnt = g_task_count < max_count ? g_task_count : max_count;
+    /* 时钟只读一次、全批共用：限流倒计时的粒度是秒，犯不着每任务再取一次 */
+    const int64_t now_ms = dl_time_ms();
     for (int i = 0; i < cnt; i++) {
         DownloadTask *t = &g_tasks[i];
         out[i].task_id    = t->task_id;
@@ -1463,6 +1498,15 @@ int dlmgr_get_task_infos(TaskInfo *out, int max_count) {
         out[i].chunks_done = done;
         strncpy(out[i].error_msg, t->error_msg, sizeof(out[i].error_msg) - 1);
         out[i].error_msg[sizeof(out[i].error_msg) - 1] = '\0';
+        /* 必须与 dlmgr_get_task_info 同步填充：GUI 的 TaskInfo infos[128] 是栈数组，
+         * 漏一个字段就是读未初始化内存。 */
+        out[i].throttle_http = t->throttle_http;
+        out[i].throttle_sec  = 0;
+        if (t->throttle_until_ms > 0) {
+            int64_t left = t->throttle_until_ms - now_ms;
+            if (left > 0) out[i].throttle_sec = (int)((left + 999) / 1000);
+            else { t->throttle_until_ms = 0; t->throttle_http = 0; }
+        }
     }
     LeaveCriticalSection(&g_lock);
     return cnt;

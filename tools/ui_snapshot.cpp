@@ -24,6 +24,7 @@
 #include "schedule_dialog.h"
 #include "task_detail_dialog.h"
 #include "download_core.h"
+#include "task_list_model.h"   // 限流倒计时探针：TaskRow / stateText / throttleNoticeText
 #include "settings.h"
 #include "button_translator.h"
 #include "app_icons.h"
@@ -492,6 +493,51 @@ int main(int argc, char** argv) {
         QFile::remove(iniPath);
         if (createdMark) QFile::remove(markPath);
         return (modeKept && changedMarked && proxyOk && owDefaultOff && owOnWorks) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_NOTICE_PROBE=1 ──
+     * 限流倒计时「看得见」这件事的界面侧：状态列真的换成那句中文、撤掉后回落、
+     * 状态跃迁时不许残留。用独立的 TaskListModel，不建窗口、不碰真实数据目录。
+     * 为什么不在这里连服务器：429 的计时窗口只有几秒，离屏快照里等它不稳定；
+     * 「引擎能不能读到剩余秒数」由 engine_selftest 的 [24] 端到端负责，
+     * 两边合起来才是这条特性完整的证据。 */
+    if (qEnvironmentVariableIsSet("IDM_NOTICE_PROBE")) {
+        TaskListModel m;
+        TaskRow r{};
+        r.id = 901;
+        r.fileName       = QStringLiteral("notice.bin");
+        r.state          = 1;
+        r.statusText     = TaskListModel::stateText(1);
+        r.fileSize       = 1000;
+        r.downloaded     = 100;
+        m.addTask(r);
+
+        const QString c0 = m.index(0, 2).data(Qt::DisplayRole).toString();
+        m.setStatusNotice(901, TaskListModel::throttleNoticeText(3, 429));
+        const QString c1 = m.index(0, 2).data(Qt::DisplayRole).toString();
+        m.updateStatus(901, 3);                       /* 下载中 → 已完成 */
+        const QString c2 = m.index(0, 2).data(Qt::DisplayRole).toString();
+        m.setStatusNotice(901, TaskListModel::throttleNoticeText(5, 503));
+        m.setStatusNotice(901, TaskListModel::throttleNoticeText(0, 503));   /* 到点自撤 */
+        const QString c3 = m.index(0, 2).data(Qt::DisplayRole).toString();
+
+        const bool ok0 = c0.contains(QStringLiteral("下载中")) && !c0.contains(QStringLiteral("重试"));
+        const bool ok1 = c1.contains(QStringLiteral("服务器限流，3 秒后重试"));
+        const bool ok2 = c2.contains(QStringLiteral("已完成")) && !c2.contains(QStringLiteral("重试"));
+        const bool ok3 = c3.contains(QStringLiteral("已完成")) && !c3.contains(QStringLiteral("过载"));
+        const bool ok4 = TaskListModel::throttleNoticeText(7, 429) == QStringLiteral("服务器限流，7 秒后重试")
+                      && TaskListModel::throttleNoticeText(7, 503) == QStringLiteral("服务器过载，7 秒后重试")
+                      && TaskListModel::throttleNoticeText(2, 408) == QStringLiteral("服务器暂时不可用，2 秒后重试")
+                      && TaskListModel::throttleNoticeText(0, 429).isEmpty();
+
+        printf("[notice] 初始=「%s」 限流=「%s」 跃迁到已完成=「%s」 撤掉后=「%s」\n",
+               qUtf8Printable(c0), qUtf8Printable(c1), qUtf8Printable(c2), qUtf8Printable(c3));
+        printf("%s 没在等的时候状态列就是「下载中」，不多话\n",       ok0 ? "[PASS]" : "[FAIL]");
+        printf("%s 429 等待期间显示「服务器限流，3 秒后重试」\n",     ok1 ? "[PASS]" : "[FAIL]");
+        printf("%s 状态跃迁到「已完成」时倒计时被摘掉\n",             ok2 ? "[PASS]" : "[FAIL]");
+        printf("%s 倒计时归零（sec=0）自动回落到状态文本\n",           ok3 ? "[PASS]" : "[FAIL]");
+        printf("%s 429/503/408 三种文案与 sec<=0 空串都对\n",          ok4 ? "[PASS]" : "[FAIL]");
+        return (ok0 && ok1 && ok2 && ok3 && ok4) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_CONCURRENCY_PROBE=1 ──

@@ -109,6 +109,13 @@ typedef struct {
     NetProgressCb  progress_cb;    /* 可为 NULL */
     void          *progress_data;
     const NetOptions *opt;
+    /* 重试等待**开始前**的通知回调（可为 NULL）：告诉调用方「服务器回了这个状态码，
+     * 我们打算等 wait_ms 毫秒」。必须有回调而不是事后从结果里翻——等待就发生在
+     * range_write 内部的 Sleep 里，那几秒上层什么也拿不到，用户在界面上看到的
+     * 就是「下载中」三个字僵住不动（429 限流最常见的观感）。
+     * 回调在下载线程上、且不持有任何引擎锁的状态下调用。 */
+    void (*notice_wait)(int http_code, long wait_ms, void *userdata);
+    void  *notice_ud;
 } NetDownloadTask;
 
 typedef struct {

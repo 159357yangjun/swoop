@@ -1381,6 +1381,12 @@ void MainWindow::refreshFromEngine()
                 m_taskModel->setErrorMsg(ids[i], QString::fromUtf8(info.error_msg).trimmed());
             else if (info.status != 4 && prevState == 4)
                 m_taskModel->setErrorMsg(ids[i], QString());
+            // 服务器限流倒计时：引擎存的是绝对截止时刻，读侧每次换算成剩余秒数，
+            // 所以这一句每 tick 刷一次就是活倒计时。
+            // ⚠️ 不能塞进上面的 isStale 差量里——等待期间速度为 0、进度不动，
+            // isStale 恒为 false，倒计时就会被自己「优化」掉，界面继续只显示「下载中」。
+            m_taskModel->setStatusNotice(ids[i],
+                TaskListModel::throttleNoticeText(info.throttle_sec, info.throttle_http));
             m_states[ids[i]] = info.status;
             m_speeds[ids[i]] = (info.status == 1) ? (int)info.speed_bps : 0;
             continue;
@@ -1400,7 +1406,11 @@ void MainWindow::refreshFromEngine()
         row.speedBps       = (int)info.speed_bps;
         row.lastConnection = QDateTime::currentDateTime();
         row.state          = info.status;
-        row.statusText     = TaskListModel::stateText(info.status);
+        // 首次建行也可能正撞上限流等待，别让新行先显示一句「下载中」再等下个 tick 纠正
+        row.notice         = TaskListModel::throttleNoticeText(info.throttle_sec,
+                                                               info.throttle_http);
+        row.statusText     = row.notice.isEmpty() ? TaskListModel::stateText(info.status)
+                                                  : row.notice;
         row.protocol       = QString::fromUtf8(info.http_version);
         m_taskModel->addTask(row);
 

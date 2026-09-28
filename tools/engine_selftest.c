@@ -1542,6 +1542,99 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ── 24. 限流等待可见：429 + Retry-After 期间要能读到倒计时 ──
+     * 服务端 /retryafter.bin 首 GET 回 429 + Retry-After: 3。那 3 秒里下载线程正在
+     * Sleep，界面上原先只有三个纹丝不动的字「下载中」——用户分不清是慢、是卡、还是死。
+     * 现在网络层在睡之前把「等到什么时候」报给引擎，读侧按引擎时钟换算剩余秒数。
+     * 断言：① 等待期间读到 sec ≥ 2；② 知道是 429；③ 暂停能**立刻**摘掉倒计时
+     * （此刻截止时刻还在约 2 秒之后，靠「到点自动失效」根本来不及）；④ 窗口过后
+     * 与全程都不残留。
+     * 突变测试：去掉 range_write 里的 notice_wait 调用 → ①② 红；
+     * 去掉 dlmgr_pause 里的清零 → ③ 红。
+     * 界面侧（状态列真的换成那句中文、撤掉后回落）见 ui_snapshot 的 IDM_NOTICE_PROBE。 */
+    printf("\n[24] 限流等待可见：429 期间读到倒计时，暂停立刻摘掉、过后不残留\n");
+    {
+        char u24[512], p24[MAX_PATH + 64], p24t[MAX_PATH + 80];
+        snprintf(u24, sizeof(u24), "http://127.0.0.1:%d/retryafter.bin", port);
+        snprintf(p24, sizeof(p24), "%s\\ra.bin", outdir);
+        snprintf(p24t, sizeof(p24t), "%s.idmtmp", p24);
+        utf8_delete(p24); utf8_delete(p24t);
+        /* 把服务端的「首次 GET」状态还回来（[21] 已经消费掉一次 429） */
+        server_reset(port);
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+        int id = dlmgr_add(u24, outdir, "ra.bin", 1, NULL, NULL, NULL, NULL);
+        check("限流可见任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int max_sec = 0, http_seen = 0;
+            TaskInfo info;
+            for (int i = 0; i < 80; i++) {          /* 最多观察 8s，覆盖整段 3s 等待 */
+                if (dlmgr_get_task_info(id, &info) != 0) break;
+                if (info.throttle_sec > max_sec) {
+                    max_sec   = info.throttle_sec;
+                    http_seen = info.throttle_http;
+                }
+                if (info.status == 3 || info.status == 4) break;   /* 提前收尾也正常 */
+                if (max_sec >= 2) break;            /* 观察到就够了，别等它自然过期 */
+                Sleep(100);
+            }
+            char d24[240];
+            snprintf(d24, sizeof(d24), "观察到的最大剩余秒数=%d http=%d", max_sec, http_seen);
+            check("429 等待期间能读到剩余秒数（Retry-After: 3 → 观察到 ≥2）",
+                  max_sec >= 2, d24);
+            snprintf(d24, sizeof(d24), "触发等待的状态码=%d（期望 429）", http_seen);
+            check("倒计时知道自己是为什么在等（429）", http_seen == 429, d24);
+
+            /* 用户一按暂停，倒计时必须**立刻**消失：此刻截止时刻还在约 2 秒之后，
+             * 不显式清零的话界面上就是「已暂停 · 3 秒后重试」这种自相矛盾的话。
+             * 这条也是「引擎侧真能清掉这个状态」的活证据——成功分支的清零在
+             * Retry-After 很短时会被「到点自动失效」掩盖掉，测不出差别。 */
+            if (max_sec >= 2) {
+                dlmgr_pause(id);
+                TaskInfo paused;
+                int psec = -1;
+                if (dlmgr_get_task_info(id, &paused) == 0) psec = paused.throttle_sec;
+                snprintf(d24, sizeof(d24), "暂停后剩余秒数=%d（期望 0）status=%d",
+                         psec, paused.status);
+                check("暂停立刻摘掉倒计时", psec == 0, d24);
+
+                /* 等原本的 Retry-After 窗口过去：倒计时必须是 0，且不能因为
+                 * 「到点」被重新点亮。这里刻意**不**调 dlmgr_start 续下——
+                 * 等待期间起第二组线程会与第一组的收尾动作抢同一份落盘，
+                 * 那是另一个（既有的、与本次改动无关的）问题，见报告。 */
+                Sleep(3500);
+                TaskInfo later;
+                int lsec = -1, lst = -1;
+                if (dlmgr_get_task_info(id, &later) == 0) {
+                    lsec = later.throttle_sec;
+                    lst  = later.status;
+                }
+                snprintf(d24, sizeof(d24), "窗口过后剩余秒数=%d（期望 0）status=%d", lsec, lst);
+                check("等待窗口过后倒计时保持为 0", lsec == 0, d24);
+            }
+            int64_t dl = 0;
+            TaskInfo fin;
+            if (dlmgr_get_task_info(id, &fin) == 0) {
+                dl = fin.downloaded;
+                snprintf(d24, sizeof(d24), "status=%d downloaded=%lld 剩余秒数=%d err=「%s」",
+                         fin.status, (long long)dl, fin.throttle_sec, fin.error_msg);
+                check("倒计时全程不再残留", fin.throttle_sec == 0, d24);
+            } else {
+                check("倒计时全程不再残留", 0, "任务已查不到");
+            }
+            utf8_delete(p24); utf8_delete(p24t);
+            dlmgr_remove(id);
+        }
+    }
+
     dlmgr_destroy();
     printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
     return g_fail;

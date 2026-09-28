@@ -258,10 +258,41 @@ void TaskListModel::updateStatus(int taskId, int state)
     if (m_tasks[i].state == state)
         return;   // 状态未变 → 不触发重绘（4Hz 循环下避免无谓全量重绘）
     m_tasks[i].state = state;
-    m_tasks[i].statusText = stateText(state);
+    // 离开「下载中」就撤掉限流倒计时：完成/失败/暂停之后再喊「N 秒后重试」是假话。
+    if (state != 1) m_tasks[i].notice = QString();
+    refreshStatusText(i);
     // 列 2=状态(含进度条) … 5=最后连接：状态变更（尤其完成/失败）须刷新进度条与状态文本，
     // 否则进度条会停在 <100% 不更新（进度条绘制于第 2 列）。
     emit dataChanged(index(i, 2), index(i, 5));
+}
+
+// 第 2 列显示什么：有临时通知（限流倒计时）就用它，否则用状态文本。
+void TaskListModel::refreshStatusText(int rowIdx)
+{
+    m_tasks[rowIdx].statusText = m_tasks[rowIdx].notice.isEmpty()
+                                     ? stateText(m_tasks[rowIdx].state)
+                                     : m_tasks[rowIdx].notice;
+}
+
+void TaskListModel::setStatusNotice(int taskId, const QString& notice)
+{
+    auto it = m_rowOf.find(taskId);
+    if (it == m_rowOf.end()) return;
+    int i = it.value();
+    if (m_tasks[i].notice == notice) return;   // 4Hz 每 tick 都调，没变就不重绘
+    m_tasks[i].notice = notice;
+    refreshStatusText(i);
+    emit dataChanged(index(i, 2), index(i, 2));
+}
+
+QString TaskListModel::throttleNoticeText(int sec, int http)
+{
+    if (sec <= 0) return QString();            // 没在等 → 空串，让状态列回落到「下载中」
+    switch (http) {
+        case 429: return QStringLiteral("服务器限流，%1 秒后重试").arg(sec);
+        case 503: return QStringLiteral("服务器过载，%1 秒后重试").arg(sec);
+        default:  return QStringLiteral("服务器暂时不可用，%1 秒后重试").arg(sec);
+    }
 }
 
 void TaskListModel::setProtocol(int taskId, const QString& proto)
