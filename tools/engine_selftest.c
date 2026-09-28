@@ -1475,6 +1475,73 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ── 23. HEAD 探测重试：瞬时 429 后仍要拿到文件大小 ──
+     * 服务端 /probe429.bin：首 HEAD 回 429 + Retry-After: 2，之后回正常的 200 + 大小。
+     * 探测原先一次都没有重试：一次限流就把 file_size 打成 -1 → 不分段 → 整个下载
+     * 退化成单连接，用户只看到「能下，但只有一条连接」，且完全不知道原因。
+     * 断言：① 探测最终成功且大小/Range 正确；② 服务端确实被 HEAD 过两次以上
+     * （证明是我们补发的，而不是服务端一次就放行）；③ 等待按 Retry-After: 2 走
+     * 而不是固定 1s 退避；④⑤ 反面哨兵：确定性失败（401）与连接层失败（连不上）
+     * 必须**立刻**返回——dlmgr_start 是在 GUI 线程里同步探测的，对白等重试来说就是卡窗口。
+     * 突变测试：探测退回「只发一次」→ ①②③ 红；把连不上/4xx 也算作可重试 → ④⑤ 红。 */
+    printf("\n[23] HEAD 探测重试：瞬时 429 + Retry-After 后仍拿到大小（401 不白等）\n");
+    {
+        char pu[512];
+        snprintf(pu, sizeof(pu), "http://127.0.0.1:%d/probe429.bin", port);
+        NetOptions opt = network_default_options();
+        char au[128], ap[128];
+        strncpy(au, user, sizeof(au) - 1); au[sizeof(au) - 1] = '\0';
+        strncpy(ap, pass, sizeof(ap) - 1); ap[sizeof(ap) - 1] = '\0';
+        opt.auth_user = au;
+        opt.auth_pass = ap;
+
+        server_reset(port);
+        DWORD t0 = GetTickCount();
+        NetworkProbe pr = network_probe(pu, &opt);
+        DWORD el = GetTickCount() - t0;
+        int heads = server_stat(port, "probe429_heads");
+
+        char d[260];
+        snprintf(d, sizeof(d),
+                 "success=%d http=%ld size=%lld range=%d HEAD次数=%d 耗时=%ums",
+                 pr.success, pr.http_code, (long long)pr.file_size,
+                 pr.supports_range, heads, el);
+        check("探测在 429 之后重试成功并拿到文件大小",
+              pr.success == 1 && pr.http_code == 200 &&
+              pr.file_size == 4096 && pr.supports_range == 1, d);
+        check("探测确实补发了 HEAD（重试真的发生过）", heads >= 2, d);
+        check("探测重试尊重 Retry-After: 2（而非固定 1s 退避）", el >= 1700, d);
+
+        /* ④ 哨兵：确定性失败不该进重试 */
+        NetOptions bad = network_default_options();
+        char nu[32], np[32];
+        strncpy(nu, "nobody", sizeof(nu) - 1); nu[sizeof(nu) - 1] = '\0';
+        strncpy(np, "nopass", sizeof(np) - 1); np[sizeof(np) - 1] = '\0';
+        bad.auth_user = nu;
+        bad.auth_pass = np;
+        DWORD t1 = GetTickCount();
+        NetworkProbe pr401 = network_probe(pu, &bad);
+        DWORD el401 = GetTickCount() - t1;
+        snprintf(d, sizeof(d), "success=%d http=%ld 耗时=%ums（期望 401 且 <1500ms）",
+                 pr401.success, pr401.http_code, el401);
+        check("401 这类确定性失败立即返回，不占用探测重试",
+              pr401.success == 0 && pr401.http_code == 401 && el401 < 1500, d);
+
+        /* ⑤ 连接层失败也必须「立刻放弃探测」：探测跑在 GUI 线程上，
+         * 对连不上的主机反复重试 = 反复冻住窗口，而且多问一次也问不出信息。 */
+        {
+            char du[512];
+            snprintf(du, sizeof(du), "http://127.0.0.1:%d/dead.bin", port + 1);  /* 无人监听 */
+            DWORD t2 = GetTickCount();
+            NetworkProbe prDead = network_probe(du, &opt);
+            DWORD elDead = GetTickCount() - t2;
+            snprintf(d, sizeof(d), "success=%d http=%ld 耗时=%ums（期望立刻失败且 <800ms）",
+                     prDead.success, prDead.http_code, elDead);
+            check("连不上的主机不重试探测（不拖住 GUI 线程）",
+                  prDead.success == 0 && elDead < 800, d);
+        }
+    }
+
     dlmgr_destroy();
     printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
     return g_fail;

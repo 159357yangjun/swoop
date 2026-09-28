@@ -198,6 +198,26 @@ static void mb_append(MemBuf *m, const void *ptr, size_t n) {
 }
 static void mb_free(MemBuf *m) { free(m->data); m->data = NULL; m->len = m->cap = 0; }
 
+/* 从捕获到的响应头里取 Retry-After，换算成「本次该等多久（毫秒）」。
+ * 没有该头 / 值为空 / 解析不出来 → 回 fallback_ms（调用方的固定指数退避）。
+ * 结果统一封顶到 MAX_RETRY_AFTER_MS，免得服务器给个疯数把重试卡死。
+ * range_write 与 network_probe 共用，避免两处各写一份头解析。 */
+static long retry_wait_ms(const MemBuf *hdr, long fallback_ms)
+{
+    if (!hdr->data) return fallback_ms;
+    const char *ra = strcasestr(hdr->data, "Retry-After:");
+    if (!ra) return fallback_ms;
+    ra += 12;   /* strlen("Retry-After:") */
+    while (*ra == ' ' || *ra == '\t') ra++;
+    char ra_buf[64];
+    int ri = 0;
+    while (*ra && *ra != '\r' && *ra != '\n' && ri < 63) ra_buf[ri++] = *ra++;
+    ra_buf[ri] = '\0';
+    long ms = parse_retry_after(ra_buf, fallback_ms);
+    if (ms > MAX_RETRY_AFTER_MS) ms = MAX_RETRY_AFTER_MS;
+    return ms >= 0 ? ms : fallback_ms;
+}
+
 /* 分片下载：数据到达即顺序落盘（调用方已 fseek 到 range_start） */
 typedef struct {
     FILE   *fp;
@@ -539,27 +559,11 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
          * 401/403/404 立即失败，把真实原因尽早抛给用户。408/429 是“稍后再试”语义，照常重试。 */
         if (code >= 400 && code < 500 && code != 408 && code != 429) break;
         if (attempt < max_retry) {
-            /* 默认退避：指数 (attempt+1) * retry_delay_ms。
-             * 若服务器回了 Retry-After（429 限流 / 503 过载常见），尊重它 —— 既符合 RFC，
+            /* 默认退避：指数 (attempt+1) * retry_delay_ms；
+             * 服务器回了 Retry-After（429 限流 / 503 过载常见）就尊重它 —— 既符合 RFC，
              * 也避免「服务器说等 N 秒、我们却按固定退避猛撞」的无效重试。
              * 例：Retry-After: 30 → 等 30s 而非 1s；Retry-After: 0 → 立即重试。 */
-            long wait_ms = (long)(attempt + 1) * opt.retry_delay_ms;
-            if (hdr.data) {
-                const char *ra = strcasestr(hdr.data, "Retry-After:");
-                if (ra) {
-                ra += 11; /* strlen("Retry-After") */
-                while (*ra && (*ra == ':' || *ra == ' ' || *ra == '\t')) ra++;
-                    char ra_buf[64];
-                    int ri = 0;
-                    while (*ra && *ra != '\r' && *ra != '\n' && ri < 63)
-                        ra_buf[ri++] = *ra++;
-                    ra_buf[ri] = '\0';
-                    long ra_ms = parse_retry_after(ra_buf, wait_ms);
-                    if (ra_ms > MAX_RETRY_AFTER_MS) ra_ms = MAX_RETRY_AFTER_MS;
-                    if (ra_ms >= 0) wait_ms = ra_ms;
-                }
-            }
-            Sleep((DWORD)wait_ms);
+            Sleep((DWORD)retry_wait_ms(&hdr, (long)(attempt + 1) * opt.retry_delay_ms));
         }
     }
     mb_free(&hdr);
@@ -591,54 +595,100 @@ NetDownloadResult network_download_range_fp(const NetDownloadTask *task, FILE *f
 }
 
 /* ── 探测：文件大小 + Range 支持（HEAD）── */
+
+/* 探测失败是否属于「补发一次 HEAD 问得出答案」。
+ * 只放过服务器**明确答复了**「现在不行、稍后再试」的情形：408 / 429 / 5xx。
+ * ⚠️ 刻意不含连接层失败（code==0：DNS / 连不上 / TLS / 超时）——
+ *   ① dlmgr_start 是在 GUI 线程里同步调本函数的，对连不上的主机反复重试 = 反复冻窗口，
+ *      而多问一次 HEAD 并没有多问到任何信息；
+ *   ② 连不上时真正要取的是响应体，下载路径（range_write）自己有重试与退避，
+ *      让它去扛才是正确的分层。
+ * 其余 4xx（401/403/404/405…）是确定性的：链接要凭据、被拒、或根本不存在，
+ * 重试只是白等。判据与 range_write 的重试分支一致。 */
+static int probe_transient(long code) {
+    if (code == 408 || code == 429) return 1;
+    if (code >= 500 && code < 600)   return 1;
+    return 0;
+}
+
+/* 探测重试的墙钟预算。⚠️ 这个封顶不是保守起见：dlmgr_start 是在 GUI 线程里**同步**
+ * 调 network_probe 的（DownloadManager::startTask 直调），探测多等一秒，主窗口就卡一秒。
+ * 按预算放行重试保证最坏情况不比改之前差：以前是一次可能挂满 timeout 的请求，
+ * 现在是同样的第一次 + 只在还剩预算时才补发的后续几次。 */
+#define PROBE_BUDGET_MS    12000
+#define PROBE_MAX_ATTEMPTS 3
+
 NetworkProbe network_probe(const char *url, const NetOptions *opt) {
     NetworkProbe r;
     memset(&r, 0, sizeof(r));
     r.file_size = -1;
     if (!url || !url[0]) return r;
 
-    CURL *h = curl_easy_init();
-    if (!h) return r;
+    NetOptions o = opt ? *opt : network_default_options();
+    int max_retry = o.max_retry > 0 ? o.max_retry : (PROBE_MAX_ATTEMPTS - 1);
+    if (max_retry > PROBE_MAX_ATTEMPTS - 1) max_retry = PROBE_MAX_ATTEMPTS - 1;
 
     MemBuf hdr; mb_init(&hdr);
-    apply_common_opts(h, opt);
-    curl_easy_setopt(h, CURLOPT_URL, url);
-    curl_easy_setopt(h, CURLOPT_NOBODY, 1L);          /* HEAD */
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 0L);  /* 探测只发一次，不跟随 */
-    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, write_hdr_cb);
-    curl_easy_setopt(h, CURLOPT_HEADERDATA, &hdr);
+    DWORD t0 = GetTickCount();
 
-    CURLcode rc = curl_easy_perform(h);
-    long code = 0; curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
-    long ver  = 0; curl_easy_getinfo(h, CURLINFO_HTTP_VERSION, &ver);
-    proto_string(ver, r.http_version, sizeof(r.http_version));
-    curl_off_t cl = 0; curl_easy_getinfo(h, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
-    r.http_code = code;
+    /* 服务器瞬时限流（429）/ 过载（503）时，一次 HEAD 失败 → file_size=-1 →
+     * 不分段 → 整个下载退化成单连接。这是「探测比下载更娇气」的真实缺口：
+     * 下载路径有重试，探测一次都没有，用户看到的是「明明能下却只有一条连接」。 */
+    for (int attempt = 0; attempt <= max_retry; attempt++) {
+        mb_free(&hdr); mb_init(&hdr);   /* 每次尝试重置响应头缓冲（捕获 Retry-After） */
+        CURL *h = curl_easy_init();
+        if (!h) break;
 
-    if (code == 200) {
-        r.success = 1;
-        if (cl > 0) r.file_size = (int64_t)cl;
+        apply_common_opts(h, &o);
+        curl_easy_setopt(h, CURLOPT_URL, url);
+        curl_easy_setopt(h, CURLOPT_NOBODY, 1L);          /* HEAD */
+        curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 0L);  /* 探测只发一次，不跟随 */
+        curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, write_hdr_cb);
+        curl_easy_setopt(h, CURLOPT_HEADERDATA, &hdr);
 
-        if (hdr.data) {
-            const char *ar = strcasestr(hdr.data, "Accept-Ranges:");
-            int supports = 0;
-            if (ar) {
-                ar += 13;
-                while (*ar == ' ') ar++;
-                supports = (strncmp(ar, "bytes", 5) == 0);
+        CURLcode rc = curl_easy_perform(h);
+        long code = 0; curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
+        long ver  = 0; curl_easy_getinfo(h, CURLINFO_HTTP_VERSION, &ver);
+        curl_off_t cl = 0; curl_easy_getinfo(h, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+        curl_easy_cleanup(h);
+        (void)rc;   /* 连不上/超时（code==0）时刻意不重试，理由见 probe_transient */
+
+        r.http_code = code;
+        proto_string(ver, r.http_version, sizeof(r.http_version));
+
+        if (code == 200) {
+            r.success = 1;
+            if (cl > 0) r.file_size = (int64_t)cl;
+
+            if (hdr.data) {
+                const char *ar = strcasestr(hdr.data, "Accept-Ranges:");
+                int supports = 0;
+                if (ar) {
+                    ar += 13;
+                    while (*ar == ' ') ar++;
+                    supports = (strncmp(ar, "bytes", 5) == 0);
+                }
+                /* 保守策略：无 Accept-Ranges 但有长度时仍允许尝试分片 */
+                if (!supports && r.file_size > 0) supports = 1;
+                r.supports_range = supports;
+
+                const char *cd = strcasestr(hdr.data, "Content-Disposition:");
+                if (cd) parse_content_disposition(cd, r.suggested_filename, sizeof(r.suggested_filename));
             }
-            /* 保守策略：无 Accept-Ranges 但有长度时仍允许尝试分片 */
-            if (!supports && r.file_size > 0) supports = 1;
-            r.supports_range = supports;
-
-            const char *cd = strcasestr(hdr.data, "Content-Disposition:");
-            if (cd) parse_content_disposition(cd, r.suggested_filename, sizeof(r.suggested_filename));
+            break;
         }
-    } else if (rc != CURLE_OK) {
-        strncpy(r.suggested_filename, "", 0);
+
+        if (!probe_transient(code)) break;   /* 401/403/404 与连不上：重试只是白等 */
+        if (attempt >= max_retry) break;
+
+        long fallback = (long)(attempt + 1) * (o.retry_delay_ms > 0 ? o.retry_delay_ms : 1000);
+        long wait_ms = retry_wait_ms(&hdr, fallback);
+        long budget_left = (long)PROBE_BUDGET_MS - (long)(GetTickCount() - t0);
+        if (budget_left <= 0) break;             /* 预算用尽：宁可不重试，也不冻住窗口 */
+        if (wait_ms > budget_left) wait_ms = budget_left;
+        Sleep((DWORD)wait_ms);
     }
 
-    curl_easy_cleanup(h);
     mb_free(&hdr);
     return r;
 }

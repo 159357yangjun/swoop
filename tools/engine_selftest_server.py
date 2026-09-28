@@ -17,6 +17,8 @@
   * /cut.bin 声明整份长度却只发前 8 KB 就关闭连接（提前断流），HEAD 故意不给
     Content-Length：验证「长度未知、一次流式取完」的路径不会把截断文件当成已完成，
     而是带 Range 从断点续传补齐。/cutnr.bin 同理断流但**不认 Range**：只能诚实失败。
+  * /probe429.bin 首 HEAD 返回 429 + Retry-After: 2，之后 HEAD 正常 200：验证 HEAD 探测
+    会重试并尊重 Retry-After —— 否则探测失败 → file_size=-1 → 不分段 → 退化成单连接。
   * **每个文件响应固定延迟 IDM_SELFTEST_SLOW_MS 毫秒（默认 40）**：
     本机回环太快（1 MiB 一毫秒内写完），不延迟的话「并发」根本来不及重叠，
     实测并发峰值只有 2~3，无法区分「真封顶」和「跑太快没重叠」。
@@ -90,14 +92,20 @@ CUT_TOTAL = 200000
 CUT_PART = 8000
 CUT_PAYLOAD = make_payload(CUT_TOTAL)
 
+# /probe429.bin：复现「HEAD 探测被服务器瞬时限流」。
+# 首 HEAD 回 429 + Retry-After: 2，之后 HEAD 回正常的 200 + Content-Length。
+# 探测若不死重试也不看 Retry-After，管理器就永远拿不到大小 → 不分段 → 单连接下载。
+PROBE429_PATH = "/probe429.bin"
+PROBE429_PAYLOAD = make_payload(4096)
+PROBE429_AFTER = 2
 
 _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
          "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
-         "cut_range": 0, "cutnr_ignored": 0}
+         "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0}
 _RESET_KEYS = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
                "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
-               "cut_range": 0, "cutnr_ignored": 0}
+               "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0}
 
 
 def _enter():
@@ -195,6 +203,23 @@ class Handler(BaseHTTPRequestHandler):
             # HEAD 绝不能带响应体（理由见 _write_body 的说明）。
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return
+        if path == PROBE429_PATH:
+            # 只限流首 HEAD：探测重试并尊重 Retry-After 的话，第二次就拿到正常大小。
+            with _lock:
+                _hits["probe429_heads"] += 1
+                limited = _hits["probe429_heads"] == 1
+            if limited:
+                self.send_response(429)
+                self.send_header("Retry-After", str(PROBE429_AFTER))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(PROBE429_PAYLOAD)))
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
             return
@@ -313,6 +338,14 @@ class Handler(BaseHTTPRequestHandler):
             _enter()
             try:
                 self._serve_cut(honor_range=False)
+            finally:
+                _leave()
+            return
+
+        if path == PROBE429_PATH:
+            _enter()
+            try:
+                self._serve_file(PROBE429_PAYLOAD)
             finally:
                 _leave()
             return
