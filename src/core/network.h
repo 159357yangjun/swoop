@@ -117,6 +117,12 @@ typedef struct {
     long    http_code;
     int     range_ignored;         /* 1 = 服务器无视 Range（要中段却回 200+整份），
                                     * 分段引擎据此降级为单连接续下，而不是产出错位文件 */
+    int     truncated;             /* 1 = 本块收到了字节，但响应体没有按协议声明的边界结束
+                                    *（Content-Length 未收满 / chunked 流被提前关闭 / 超时断流，
+                                    * 即 libcurl 的 CURLE_PARTIAL_FILE 等）。
+                                    * 此时 success 仍可能是 1（引擎按字节数续传即可自愈），
+                                    * 但「长度未知、一次流式取完」的路径没有任何字节数可对账，
+                                    * 必须据此判未完成，否则会产出一个截断的「已完成」文件。 */
     int     no_retry;              /* 1 = 确定性失败，重试无意义（磁盘满/权限/文件被占用）。
                                     * 调用方应直接把 error_msg 抛给用户，不要白等重试间隔 */
     char    error_msg[256];

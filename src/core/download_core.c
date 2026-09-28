@@ -821,8 +821,26 @@ static int download_one_chunk(DownloadTask *t, int cid) {
             throttle_limit(result.bytes_written);
 
             /* 长度未知时一次请求即取完整个响应体，必须跳出，
-             * 否则 unknown_len 恒为真会无限循环 */
-            if (unknown_len) break;
+             * 否则 unknown_len 恒为真会无限循环。
+             * ⚠️ 但这条路径**没有任何字节数可对账**：服务器提前断流时底层照样是
+             * 200 + 有字节，旧代码连着 break → c->done=1 → 任务显示「已完成」，
+             * 用户拿到的却是一个被截断的文件（与既往「大小对、内容坏」同族，
+             * 这次连大小都不对，更隐蔽）。已知总长度的分片没这问题——
+             * while (c->downloaded < total_in_chunk) 本身就会再发一次 Range 补齐。
+             * 所以断流在这里改判未完成：已落盘的字节保留在 c->downloaded 里，
+             * 下一轮重试自动带 Range 从断点续传；续不上（服务器不吃 Range）
+             * 就重试到上限后诚实报失败，绝不产出一个假装完成的半截文件。 */
+            if (unknown_len) {
+                if (result.truncated) {
+                    any_failure = 1;
+                    snprintf(last_err, sizeof(last_err),
+                             "连接中断：服务器提前断流（已收到 %lld 字节，正在续传）",
+                             (long long)result.bytes_written);
+                    TRACE("chunk %d: 长度未知且响应被截断，按断点续传重试", cid);
+                    break;
+                }
+                break;   /* 响应体完整收尾，单流下载结束 */
+            }
         }
 
         if (!any_failure) {

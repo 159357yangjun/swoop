@@ -501,6 +501,18 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
         if ((code == 206 || code == 200) && ctx.written > 0) {
             res.bytes_written = ctx.written;
             res.success = 1;
+            /* 断流如实上报：libcurl 在「Content-Length 没收满」或「chunked 流被提前关闭」时
+             * 回 CURLE_PARTIAL_FILE，可 http_code 依然是 200/206、字节也确实落盘了。
+             * 旧判据只看「有状态码 + 有字节」，于是把断流当成完美收工。
+             * 这里把它记下来交给调用方判断：
+             *   - 已知总长度的分片：字节数对账本身就是兜底（download_one_chunk 的
+             *     while (c->downloaded < total_in_chunk) 会再发一次 Range 续传），
+             *     所以不能在这里判失败——否则慢链路上每块都被 TIMEOUT 打断重试，
+             *     原本能下完的任务反而会被误杀；
+             *   - 长度未知（一次流式取整个响应体）：没有任何可对账的字节数，
+             *     只能靠这个标志判未完成。
+             */
+            res.truncated = (rc != CURLE_OK) ? 1 : 0;
             break;
         } else if (code == 416) {
             /* Range Not Satisfiable — 可能已下完 */

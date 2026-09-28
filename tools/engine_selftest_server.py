@@ -14,6 +14,9 @@
    * /_stats 返回并发统计（免认证）；/_reset 清零统计（免认证）。
   * /retryafter.bin 首 GET 返回 429 + Retry-After: 3，后续 GET 返回 200：验证引擎重试时
     尊重服务器 Retry-After（而不是固定退避猛撞）。
+  * /cut.bin 声明整份长度却只发前 8 KB 就关闭连接（提前断流），HEAD 故意不给
+    Content-Length：验证「长度未知、一次流式取完」的路径不会把截断文件当成已完成，
+    而是带 Range 从断点续传补齐。/cutnr.bin 同理断流但**不认 Range**：只能诚实失败。
   * **每个文件响应固定延迟 IDM_SELFTEST_SLOW_MS 毫秒（默认 40）**：
     本机回环太快（1 MiB 一毫秒内写完），不延迟的话「并发」根本来不及重叠，
     实测并发峰值只有 2~3，无法区分「真封顶」和「跑太快没重叠」。
@@ -73,10 +76,28 @@ RETRYAFTER_PATH = "/retryafter.bin"
 RETRYAFTER_PAYLOAD = make_payload(4096)   # 与 content_matches_pattern 同模式：byte[i] == i % 251
 RETRYAFTER_AFTER = 3                      # Retry-After 秒数
 
+# /cut.bin 与 /cutnr.bin：复现「服务器提前断流」。
+# 两者都：HEAD **不给 Content-Length**（模拟分块传输 / 动态端点 —— 管理器拿不到总长度，
+# 只能走「一次请求流式取完整个响应体」的路径），GET 声明整份长度却只发前 CUT_PART 字节
+# 就关闭连接（Content-Length 未收满 = libcurl 的 CURLE_PARTIAL_FILE）。
+#   /cut.bin  ：带 Range 的请求照常完整应答 → 断点续传能把文件补全。
+#   /cutnr.bin：一律无视 Range、回 200 → 续传续不上，只能诚实失败。
+# 为什么盯「长度未知」这条路径：已知总长度时 while (downloaded < total) 本身会兜住，
+# 而这条路径没有任何字节数可对账 —— 截断文件被当成「已完成」的唯一入口。
+CUT_PATH = "/cut.bin"
+CUTNR_PATH = "/cutnr.bin"
+CUT_TOTAL = 200000
+CUT_PART = 8000
+CUT_PAYLOAD = make_payload(CUT_TOTAL)
+
 
 _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
-         "norange_get": 0, "norange_range": 0, "retryafter_gets": 0}
+         "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
+         "cut_range": 0, "cutnr_ignored": 0}
+_RESET_KEYS = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
+               "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
+               "cut_range": 0, "cutnr_ignored": 0}
 
 
 def _enter():
@@ -143,10 +164,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(dict(_hits))
         if path == "/_reset":
             with _lock:
-                _hits.update({"auth_fail": 0, "auth_ok": 0, "ranges": 0,
-                              "cur": 0, "max_cur": 0,
-                              "norange_get": 0, "norange_range": 0,
-                              "retryafter_gets": 0})
+                _hits.update(_RESET_KEYS)
             return self._send_json({"ok": 1})
         if not self._auth_ok():
             return self._send_401()
@@ -171,6 +189,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
             return
+        if path in (CUT_PATH, CUTNR_PATH):
+            # 刻意不回 Content-Length：让探测得到 file_size=-1，任务只能走
+            # 「长度未知、一次流式取完」这条没有字节数可对账的路径。
+            # HEAD 绝不能带响应体（理由见 _write_body 的说明）。
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return
         data = FILES.get(self.path.split("?")[0])
         if data is None:
             self.send_response(404)
@@ -190,10 +217,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(dict(_hits))
         if path == "/_reset":
             with _lock:
-                _hits.update({"auth_fail": 0, "auth_ok": 0, "ranges": 0,
-                              "cur": 0, "max_cur": 0,
-                              "norange_get": 0, "norange_range": 0,
-                              "retryafter_gets": 0})
+                _hits.update(_RESET_KEYS)
             return self._send_json({"ok": 1})
         if not self._auth_ok():
             return self._send_401()
@@ -277,6 +301,22 @@ class Handler(BaseHTTPRequestHandler):
                 _leave()
             return
 
+        if path == CUT_PATH:
+            _enter()
+            try:
+                self._serve_cut(honor_range=True)
+            finally:
+                _leave()
+            return
+
+        if path == CUTNR_PATH:
+            _enter()
+            try:
+                self._serve_cut(honor_range=False)
+            finally:
+                _leave()
+            return
+
         data = FILES.get(path)
         if data is None:
             body = b"not found\n"
@@ -328,6 +368,50 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_cut(self, honor_range: bool):
+        """声明整份长度却只发前 CUT_PART 字节，然后关闭连接 —— 复现「服务器提前断流」。
+
+        ⚠️ 必须显式置 close_connection：HTTP/1.1 keep-alive 下，Content-Length 没收满
+        就从 handler 返回，连接其实并不会断，客户端只会一直等到超时——那样测到的是
+        CURLE_OPERATION_TIMEDOUT 而不是 CURLE_PARTIAL_FILE，断言就指错了地方。
+        honor_range=False 时连 Range 也不认（回 200 + 整份），用来验证「续不上就诚实失败」。
+        """
+        rng = self.headers.get("Range")
+        if rng and rng.startswith("bytes=") and honor_range:
+            with _lock:
+                _hits["cut_range"] += 1
+            spec = rng[len("bytes="):].split(",")[0].strip()
+            s, _, e = spec.partition("-")
+            start = int(s) if s else 0
+            end = int(e) if e else CUT_TOTAL - 1
+            end = min(end, CUT_TOTAL - 1)
+            if start > end or start >= CUT_TOTAL:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{CUT_TOTAL}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = CUT_PAYLOAD[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{CUT_TOTAL}")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if rng and not honor_range:
+            with _lock:
+                _hits["cutnr_ignored"] += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(CUT_TOTAL))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        self.wfile.write(CUT_PAYLOAD[:CUT_PART])
+        self.close_connection = True
 
     def do_POST(self):
         if not self._auth_ok():

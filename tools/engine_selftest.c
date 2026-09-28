@@ -204,6 +204,7 @@ static int clean_outputs(const char *outdir)
     static const char *names[] = { "noauth.bin", "withauth.bin", "nocap.bin",
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
+                                   "cut.bin", "cut2.bin", "cutnr.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
     for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
@@ -1363,6 +1364,113 @@ int main(int argc, char **argv)
             check("尊重 Retry-After：实际等待≈3s（非固定1s退避）", el >= 2000, d);
             utf8_delete(path);
             utf8_delete(tmp2);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 22. 服务器提前断流：截断的文件绝不能被当成「已完成」──
+     * 服务端 /cut.bin：HEAD 不给 Content-Length（探测得到 file_size=-1，任务只能走
+     * 「长度未知、一次请求流式取完整个响应体」的路径），GET 声明 200000 字节却只发
+     * 8000 就关闭连接。
+     * 为什么单独测这条路径：已知总长度时 while (c->downloaded < total_in_chunk) 天然会
+     * 兜住（差多少补多少），而长度未知**没有任何字节数可对账** —— 旧判据只看
+     * 「有 200/206 + 收到过字节」，于是断流照样 success=1 → chunk done → 用户界面上
+     * 是「已完成」、打开却是个半截文件（与既往「大小对、内容坏」同族，这次连大小都短）。
+     * 断言分两层：① 网络层如实上报 truncated（上层无从判断的前提是下层不撒谎）；
+     * ② 引擎保留已收字节、带 Range 从断点续传补全 —— 最终 200000 字节且逐字节正确，
+     *   且服务端确实收到过续传用的 Range 请求。
+     * ③ 反面：/cutnr.bin 断流且不认 Range → 续不上就必须诚实失败，不许产出成品文件。
+     * 突变测试：注掉 download_core.c 里 truncated 分支 → 第一轮就 done=1，
+     * 文件停在 8000 字节而状态仍是「已完成」，②③ 两条断言同时变红。 */
+    printf("\n[22] 服务器提前断流 → 必须续传补全，不许把半截文件判成已完成\n");
+    {
+        char cu[512], cpath[MAX_PATH + 64];
+        snprintf(cu, sizeof(cu), "http://127.0.0.1:%d/cut.bin", port);
+        snprintf(cpath, sizeof(cpath), "%s\\cut.bin", outdir);
+        utf8_delete(cpath);
+        server_reset(port);
+
+        NetOptions opt = network_default_options();
+        char au[128], ap[128];
+        strncpy(au, user, sizeof(au) - 1); au[sizeof(au) - 1] = '\0';
+        strncpy(ap, pass, sizeof(ap) - 1); ap[sizeof(ap) - 1] = '\0';
+        opt.auth_user = au;
+        opt.auth_pass = ap;
+
+        /* ① 网络层：断流的响应必须带上 truncated 标志 */
+        NetDownloadTask nd; memset(&nd, 0, sizeof(nd));
+        nd.url         = cu;
+        nd.save_path   = cpath;
+        nd.range_start = 0;
+        nd.range_end   = -1;      /* 长度未知的单流取法：不发 Range 头 */
+        nd.opt         = &opt;
+        NetDownloadResult r = network_download_range(&nd);
+        char d[260];
+        snprintf(d, sizeof(d), "success=%d http=%ld written=%lld truncated=%d err=%s",
+                 r.success, r.http_code, (long long)r.bytes_written, r.truncated,
+                 r.error_msg);
+        check("断流响应：收到字节但被标记为 truncated",
+              r.success == 1 && r.http_code == 200 &&
+              r.bytes_written == 8000 && r.truncated == 1, d);
+        long long part = file_size_i64_of(cpath);
+        snprintf(d, sizeof(d), "落盘=%lld 期望=8000", part);
+        check("断流响应：已收字节确实落盘（供断点续传）", part == 8000, d);
+        utf8_delete(cpath);
+
+        /* ② 引擎：长度未知的任务必须续传补全 */
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+        char e2[512], p2[MAX_PATH + 64], p2t[MAX_PATH + 80];
+        snprintf(e2, sizeof(e2), "http://127.0.0.1:%d/cut.bin", port);
+        snprintf(p2, sizeof(p2), "%s\\cut2.bin", outdir);
+        snprintf(p2t, sizeof(p2t), "%s.idmtmp", p2);
+        utf8_delete(p2); utf8_delete(p2t);
+        int id = dlmgr_add(e2, outdir, "cut2.bin", 1, NULL, NULL, NULL, NULL);
+        check("断流续传任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 25000, &st, &dl);
+            long long fsz = file_size_i64_of(p2);
+            int mc = content_matches_pattern(p2, 200000);
+            int nrange = server_stat(port, "cut_range");
+            snprintf(d, sizeof(d),
+                     "status=%d downloaded=%lld file=%lld 内容=%d 续传Range数=%d",
+                     st, (long long)dl, fsz, mc, nrange);
+            check("断流后补齐到完整长度（不是 8000 字节的假完成）",
+                  st == 3 && fsz == 200000 && mc == 1, d);
+            check("断流后确实带 Range 续传过（而不是整份重下）", nrange >= 1, d);
+            utf8_delete(p2); utf8_delete(p2t);
+            dlmgr_remove(id);
+        }
+
+        /* ③ 反面：断流 + 不认 Range → 只能诚实失败，不许产出成品文件 */
+        char e3[512], p3[MAX_PATH + 64], p3t[MAX_PATH + 80];
+        snprintf(e3, sizeof(e3), "http://127.0.0.1:%d/cutnr.bin", port);
+        snprintf(p3, sizeof(p3), "%s\\cutnr.bin", outdir);
+        snprintf(p3t, sizeof(p3t), "%s.idmtmp", p3);
+        utf8_delete(p3); utf8_delete(p3t);
+        id = dlmgr_add(e3, outdir, "cutnr.bin", 1, NULL, NULL, NULL, NULL);
+        check("断流不可续传任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 30000, &st, &dl);
+            char finfo[200];
+            snprintf(finfo, sizeof(finfo), "成品文件是否存在=%d（.idmtmp 允许残留以便重试）",
+                     file_size_i64_of(p3) >= 0 ? 1 : 0);
+            snprintf(d, sizeof(d), "status=%d downloaded=%lld", st, (long long)dl);
+            check("断流且续不上时判为失败（status=4）", st == 4, d);
+            check("失败任务没有把截断数据改名成成品文件",
+                  file_size_i64_of(p3) < 0, finfo);
+            utf8_delete(p3); utf8_delete(p3t);
             dlmgr_remove(id);
         }
     }
