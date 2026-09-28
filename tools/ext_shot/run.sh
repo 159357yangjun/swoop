@@ -31,8 +31,29 @@ rm -rf "$PROFILE"
 EDGE_PID=$!
 
 cleanup() {
-    # /T 连子进程一起杀：Edge 会 fork 一堆 renderer/gpu 进程，只杀父进程会留一地孤儿
-    MSYS_NO_PATHCONV=1 taskkill //F //T //PID $EDGE_PID >/dev/null 2>&1
+    # ① 按 PID 连子进程树一起杀。⚠️ 前面**不能**加 MSYS_NO_PATHCONV=1：
+    #    那个变量只是关掉路径转换，于是 //F 原样传给 taskkill → 「无效参数」，
+    #    而错误又被 >/dev/null 吞掉 —— 这条清理从来没真的生效过，孤儿留了一地。
+    taskkill //F //T //PID "$EDGE_PID" >/dev/null 2>&1
+    # ② 再按「我们自己的 profile 目录」精确补杀孤儿。
+    #    绝不按进程名一刀切：用户自己开着的浏览器同样是 msedge.exe。
+    powershell.exe -NoProfile -Command \
+"Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | Where-Object { \$_.CommandLine -match 'ext-edge-profile' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" \
+        >/dev/null 2>&1
+}
+
+# 数一遍还剩几个我们的 headless Edge。
+# ⚠️ 不要用 wmic ... | grep：wmic 的输出是 UTF-16，管道进 grep 只能数出 0，
+#    之前这条自检就是靠它"永久绿"的 —— 实际系统里还挂着 15 个孤儿进程。
+count_orphans() {
+    local tmp="$ROOT/build/ext-orphan-count.txt" n
+    powershell.exe -NoProfile -Command \
+"Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | Where-Object { \$_.CommandLine -match 'ext-edge-profile' } | Measure-Object | Select-Object -ExpandProperty Count | Out-File -Encoding ascii '$(cygpath -w "$tmp")'" \
+        >/dev/null 2>&1
+    n=$(tr -d '\r\n ' < "$tmp" 2>/dev/null)
+    rm -f "$tmp"
+    [ -n "$n" ] || n=0
+    echo "$n"
 }
 trap cleanup EXIT
 
@@ -59,5 +80,13 @@ fi
 cleanup
 trap - EXIT
 sleep 1
-echo "--- 残留 Edge（应为 0）: $(MSYS_NO_PATHCONV=1 wmic process where "name='msedge.exe'" get commandline 2>/dev/null | grep -c 'ext-edge-profile') ---"
+RES=$(count_orphans)
+PORT_OPEN=0
+if netstat -ano | grep LISTENING | grep -q ":$PORT[^0-9]"; then PORT_OPEN=1; fi
+echo "--- 残留 Edge（应为 0）: $RES ｜ 调试端口 $PORT 仍监听: $PORT_OPEN（应为 0）---"
+if [ "$RES" != "0" ] || [ "$PORT_OPEN" != "0" ]; then
+    # 自检不通过就不许报绿：断掉后台常驻是这条基线的硬要求，不是"最好有"。
+    echo "★ 清理没做干净，本次基线不算通过（截图与断言结果仍见上行输出）"
+    [ "$RC" = "0" ] && RC=1
+fi
 exit $RC
