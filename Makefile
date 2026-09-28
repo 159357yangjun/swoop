@@ -21,7 +21,14 @@ STRIP   = -s
 
 ENGINE = build/speedlimit.o build/sched.o build/taskstore.o build/queue.o build/category.o build/torrent.o
 
-OBJS = build/util.o build/http.o build/download.o $(ENGINE) build/main_window.o build/main.o build/selftest_run.o build/resources.res
+# 自测脚手架（selftest_run.c：本地 HTTP 测试服务 + 用例驱动）只进 swoop_selftest.exe，
+# 不链进发行的 swoop.exe。两个原因：
+#   ① 发行的 exe 里不该带一个监听 18099 的测试服务和整套用例（体积与攻击面）；
+#   ② selftest_run.c 是用 -Dtask_create=…夹具 编译的，一旦它进了 $(OBJS)，
+#      "哪个编译单元能看到真实 task_create / 谁的符号在哪个 exe 里" 就成了链接陷阱
+#      （CI 那次 undefined reference to `task_create_test_fixture` 就是这么来的）。
+# 跑自测一律用 ./swoop_selftest.exe（README、CI、release 都是这么调的）。
+OBJS = build/util.o build/http.o build/download.o $(ENGINE) build/main_window.o build/main.o build/resources.res
 
 all: swoop.exe swoop_selftest.exe swoop_nmhost.exe
 

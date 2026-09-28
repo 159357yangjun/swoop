@@ -654,12 +654,16 @@ int run_selftest(void)
     int rc13 = test_seg_plan();
     int rc14 = test_pause_queued();
     int rc15 = test_resources();
+    /* 定义在 selftest.c：那边才是真实 task_create（本文件的 task_create 被 -D 改名了），
+       又必须在本地 HTTP 服务起来之后跑，所以放进来而不是放在 selftest.c 的 main 里。 */
+    int rc16 = test_race_at_start();
     int rc = 0;
     if (rc1) rc = rc1; else if (rc2) rc = rc2; else if (rc3) rc = rc3;
     else if (rc4) rc = rc4; else if (rc5) rc = rc5; else if (rc6) rc = rc6;
     else if (rc7) rc = rc7; else if (rc8) rc = rc8; else if (rc9) rc = rc9;
     else if (rc10) rc = rc10; else if (rc11) rc = rc11; else if (rc12) rc = rc12;
     else if (rc13) rc = rc13; else if (rc14) rc = rc14; else if (rc15) rc = rc15;
+    else if (rc16) rc = rc16;
 
     http_cleanup();
     WaitForSingleObject(h, 1000);
@@ -672,15 +676,16 @@ int run_selftest(void)
     if (f) {
         fprintf(f, "selftest %s rc=%d whole=%d resume=%d store=%d sched=%d speed=%d "
                    "speeddl=%d queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d "
-                   "segplan=%d paused=%d res=%d\n",
+                   "segplan=%d paused=%d res=%d race=%d\n",
                 rc == 0 ? "PASS" : "FAIL", rc, rc1, rc2, rc3, rc4, rc5, rc6,
-                rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15);
+                rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc16);
         fclose(f);
     }
 
     printf("Swoop selftest: %s (whole=%d resume=%d store=%d sched=%d speed=%d speeddl=%d "
-           "queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d segplan=%d paused=%d res=%d rc=%d)\n",
+           "queue=%d cat=%d torrent=%d verdict=%d dirmiss=%d http404=%d segplan=%d paused=%d "
+           "res=%d race=%d rc=%d)\n",
            rc == 0 ? "PASS" : "FAIL", rc1, rc2, rc3, rc4, rc5, rc6,
-           rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc);
+           rc7, rc8, rc9, rc10, rc11, rc12, rc13, rc14, rc15, rc16, rc);
     return rc;
 }

@@ -33,6 +33,10 @@ typedef struct {
     wchar_t     referer[2048];
     /* 1 = 用户手动暂停，定时调度不得自动恢复（否则覆盖用户意图） */
     int         user_paused;
+    /* 1 = outfile 这个文件是本任务创建出来的产物（或由它上一次会话创建、已随任务
+       一起恢复）。只有这种情况下「重新下载」才允许覆盖它；新任务一律不许覆盖任何
+       已存在的文件（见 task_start 里的 CREATE_NEW 裁决）。 */
+    int         owns_outfile;
     /* 本轮分片线程里传输失败的个数（非 2xx / 连接断）——>0 则整任务判错 */
     volatile LONG io_errors;
 } download_task_t;

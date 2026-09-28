@@ -68,11 +68,9 @@ static int add_reservation_locked(download_task_t *owner, const wchar_t *path)
     return 0;
 }
 
-static void remove_reservation(download_task_t *owner)
+static void remove_reservation_locked(download_task_t *owner)   /* 调用者持 g_res_lock */
 {
     if (!owner) return;
-    ensure_reservation_lock();
-    EnterCriticalSection(&g_res_lock);
     outfile_reservation_t **pp = &g_reservations;
     while (*pp) {
         if ((*pp)->owner == owner) {
@@ -83,6 +81,14 @@ static void remove_reservation(download_task_t *owner)
         }
         pp = &(*pp)->next;
     }
+}
+
+static void remove_reservation(download_task_t *owner)
+{
+    if (!owner) return;
+    ensure_reservation_lock();
+    EnterCriticalSection(&g_res_lock);
+    remove_reservation_locked(owner);
     LeaveCriticalSection(&g_res_lock);
 }
 
@@ -198,6 +204,38 @@ int task_register_outfile(download_task_t *t)
     int rc = add_reservation_locked(t, t->outfile);
     LeaveCriticalSection(&g_res_lock);
     return rc;
+}
+
+/* 开文件时才发现名字被占用了：重新挑一个安全名字，并把它换进预留表。
+   返回 1=已换成新名字（与原不同），0=换不动（调用者按错误处理）。
+   ⚠️ 预留表只是本进程内的静态链表，跨进程什么都拦不住 —— 所以真正 CreateFileW
+   那一步才是最终裁决，这里负责把"撞车"变成"换个名字继续"。 */
+static int repick_outfile(download_task_t *t)
+{
+    wchar_t cand[MAX_PATH];
+    int ok = 0;
+    if (!t || !t->outfile[0]) return 0;
+    ensure_reservation_lock();
+    EnterCriticalSection(&g_res_lock);
+    ok = choose_available_outfile_locked(t->outfile, cand, MAX_PATH, t)
+      && _wcsicmp(cand, t->outfile) != 0;
+    if (ok) {
+        wchar_t old[MAX_PATH];
+        wcsncpy(old, t->outfile, MAX_PATH - 1);
+        old[MAX_PATH - 1] = 0;
+        remove_reservation_locked(t);
+        wcsncpy(t->outfile, cand, MAX_PATH - 1);
+        t->outfile[MAX_PATH - 1] = 0;
+        if (add_reservation_locked(t, t->outfile) != 0) {
+            wcsncpy(t->outfile, old, MAX_PATH - 1);      /* 登记不成就退回原名 */
+            t->outfile[MAX_PATH - 1] = 0;
+            (void)add_reservation_locked(t, t->outfile);
+            ok = 0;
+        }
+    }
+    LeaveCriticalSection(&g_res_lock);
+    if (ok) log_msg("task_start: 目标已被占用，改用 %ls", t->outfile);
+    return ok;
 }
 
 static download_task_t *task_create_impl(const char *url, const wchar_t *outfile,
@@ -411,10 +449,31 @@ int task_start(download_task_t *t)
         CloseHandle(fh);
     } else {
         split_segments(t, res.supports_range);
-        fh = CreateFileW(t->outfile, GENERIC_WRITE,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (fh == INVALID_HANDLE_VALUE) { t->status = DL_ERROR; return -1; }
+        /* ⚠️ 全新下载不能用 CREATE_ALWAYS。名字是 task_create()（排队那一刻）挑的，
+           真正开文件却是现在：队列可能已经放行几分钟，中间任何进程（另一个 Swoop、
+           浏览器抢先落盘、用户自己拖了同名文件进目录）都能把这个名字占掉，
+           而预留表只是本进程的静态链表，跨进程什么都拦不住 —— CREATE_ALWAYS
+           会把别人的文件静默截断成我们的半成品。
+           所以由这一步做最终裁决：不是本任务创建的产物就 CREATE_NEW，撞上就换名字重试；
+           只有重新下载"本任务自己创建过的那份"（含重启后恢复的已完成任务）才允许覆盖。
+           回归用例：自测 race=167。 */
+        int tries = 0;
+        for (;;) {
+            fh = CreateFileW(t->outfile, GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                             t->owns_outfile ? CREATE_ALWAYS : CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+            if (fh != INVALID_HANDLE_VALUE) break;
+            DWORD e = GetLastError();
+            if (!t->owns_outfile
+                && (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
+                && ++tries <= 50 && repick_outfile(t))
+                continue;
+            t->status = DL_ERROR;
+            log_msg("task_start: 打不开目标 %ls（err=%lu）", t->outfile, e);
+            return -1;
+        }
+        t->owns_outfile = 1;                 /* 从现在起这份文件是本任务的产物 */
         if (t->total > 0) {                 /* 预分配，保证各段可乱序写入 */
             LARGE_INTEGER sz; sz.QuadPart = t->total;
             SetFilePointerEx(fh, sz, NULL, FILE_BEGIN);
