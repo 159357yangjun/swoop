@@ -7,6 +7,7 @@
  */
 #include <QApplication>
 #include <QTimer>
+#include <QThread>
 #include <QDir>
 #include <QPixmap>
 #include <QFile>
@@ -318,12 +319,23 @@ int main(int argc, char** argv) {
             //    该信号已连到 MainWindow::onScheduledTaskDue → startTaskById，所以任务会被真正拉起。
             ScheduleService* ss = sw.findChild<ScheduleService*>();
             const bool invoked = ss && QMetaObject::invokeMethod(ss, "onTick", Qt::DirectConnection);
-            QCoreApplication::processEvents();
+            /* 「被拉起」= 状态离开「已暂停」。必须轮询，不能只采一次样：
+             * HEAD 探测已经从 dlmgr_start（GUI 线程）搬进监督线程，startTask 现在立刻返回，
+             * 状态是几毫秒~几百毫秒后才变成「下载中」的。采一次样看到的还是 2，
+             * 于是这条探针会把自己要验的那次"不卡顿"优化误判成"没触发"。
+             * invoked 同时纳入必要条件：信号没派发成功就不算拉起。 */
             TaskInfo ti;
-            const bool gotInfo = (dlmgr_get_task_info(1, &ti) == 0);
+            bool gotInfo = false;
+            int  seen = -1;
+            for (int i = 0; i < 40; i++) {                 /* 最多等 2 秒 */
+                QCoreApplication::processEvents();
+                gotInfo = (dlmgr_get_task_info(1, &ti) == 0);
+                if (gotInfo) { seen = ti.status; if (seen != 2) break; }
+                QThread::msleep(50);
+            }
             printf("[schedule] 触发检查: invoked=%d 任务1状态=%d（2=暂停，1/4=已被拉起/已尝试）\n",
-                   invoked, gotInfo ? ti.status : -1);
-            fired = gotInfo && ti.status != 2;
+                   invoked, seen);
+            fired = invoked && gotInfo && seen != 2;
 
             // 4) 回读配置：重复任务的下次时间应被推进到未来（证明回写真的发生了）
             QSettings s2(iniPath, QSettings::IniFormat);

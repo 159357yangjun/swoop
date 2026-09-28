@@ -205,7 +205,7 @@ static int clean_outputs(const char *outdir)
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
                                    "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
-                                   "px1.bin", "px2.bin",
+                                   "px1.bin", "px2.bin", "stall.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
     for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
@@ -1931,6 +1931,57 @@ int main(int argc, char **argv)
         }
         utf8_delete(pp1); utf8_delete(pp2);
         dlmgr_set_proxy(PROXY_NONE, NULL, 0, NULL, NULL);   /* 收尾：别把代理留在引擎里 */
+    }
+
+    /* ── 29. 慢服务器：点「开始」不许把调用线程占住 ──
+     * dlmgr_start 里同步做 HEAD 探测，而它是 GUI 线程调的（DownloadManager::startTask
+     * 直调；「全部开始」走 dlmgr_start_all 更是逐个串着探）。服务器慢（海外源站、
+     * CDN 拥塞、TLS 握手排队）时探测最坏挂满 connect_timeout，用户点完按钮窗口就僵住。
+     * 服务端 /stall.bin 先睡 IDM_SELFTEST_STALL_MS（默认 3000ms）再回头，于是
+     * 「调用线程被占住多久」变成一个可以直接量的数。
+     * 断言：① dlmgr_start 在 300ms 内返回；② 任务最终仍正常完成（4096 逐字节正确）；
+     * ③ 服务端确实被访问过 ≥2 次（探测 + 取回，不是根本没发请求）。
+     * 修复前 ① 必红（实测约 3000ms）——这条用例就是为那个红而写的。 */
+    printf("\n[29] 慢服务器：dlmgr_start 必须立刻返回，探测挪到监督线程\n");
+    {
+        char su[512], sp[MAX_PATH + 64], spt[MAX_PATH + 80];
+        snprintf(su,  sizeof(su),  "http://127.0.0.1:%d/stall.bin", port);
+        snprintf(sp,  sizeof(sp),  "%s\\stall.bin", outdir);
+        snprintf(spt, sizeof(spt), "%s.idmtmp", sp);
+        utf8_delete(sp); utf8_delete(spt);
+        server_reset(port);
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+        int id = dlmgr_add(su, outdir, "stall.bin", 1, NULL, NULL, NULL, NULL);
+        check("慢服务器任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            char d29[260];
+            DWORD t0 = GetTickCount();
+            int rc = dlmgr_start(id);
+            DWORD el = GetTickCount() - t0;
+            snprintf(d29, sizeof(d29), "dlmgr_start 返回耗时=%ums（期望 <300）rc=%d", el, rc);
+            check("点开始后调用线程不被探测占住", rc == 0 && el < 300, d29);
+
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 25000, &st, &dl);
+            long long fsz = file_size_i64_of(sp);
+            int mc = content_matches_pattern(sp, 4096);
+            int hits = server_stat(port, "stall_hits");
+            snprintf(d29, sizeof(d29), "status=%d 成品=%lld 内容=%d stall命中=%d",
+                     st, fsz, mc, hits);
+            check("挪到监督线程后任务仍正常完成", st == 3 && fsz == 4096 && mc == 1, d29);
+            snprintf(d29, sizeof(d29), "stall.bin 命中=%d（期望 ≥2：探测 + 取回）", hits);
+            check("探测与下载都真的发出去了", hits >= 2, d29);
+            utf8_delete(sp); utf8_delete(spt);
+            dlmgr_remove(id);
+        }
     }
 
     dlmgr_destroy();

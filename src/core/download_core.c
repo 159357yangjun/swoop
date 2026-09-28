@@ -936,10 +936,88 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
     t->worker_alive++;
     LeaveCriticalSection(&g_lock);
 
+    /* 状态立刻置「下载中」，必须放在探测之前。
+     * ⚠️ 探测已经从调用线程搬到本函数里（见下面的 need_probe 段），如果把状态留到
+     *    探测之后才改，用户点「开始」/定时到点拉起之后，任务行在整段探测期间
+     *    还写着「已暂停」——实测定时探针就是这样判成"没被拉起"的（status 停在 2）。
+     *    这里先置位，界面当下就能反映"已经拉起来了"。 */
+    EnterCriticalSection(&g_lock);
+    t->status = TASK_RUNNING;
+    t->error_msg[0] = '\0';   /* 清掉上一次失败留下的原因，否则重试时 GUI 还显示旧错误 */
+    LeaveCriticalSection(&g_lock);
+
     /* 保存目录兜底：不存在就逐级建出来。放在这里（而不是 dlmgr_add）是因为
      * 从状态文件恢复的任务不经过 add，而所有下载都必然经过本函数。
      * 取目录的规则必须与下面拼 tmp_path 的规则一致，否则建了 A 却往 B 里写。 */
     ensure_dir_utf8(t->save_dir[0] ? t->save_dir : g_cfg.default_save_dir);
+
+    /* ── 探测：文件大小 + Range 支持 + 服务器建议文件名 ──
+     * 原来这段在 dlmgr_start 里，也就是**在 GUI 线程上**跑；一次 HEAD 探测最坏挂满
+     * connect_timeout（实测慢服务器 3000ms 起步，「全部开始」还要逐个串着卡）。
+     * 搬到监督线程里之后，点「开始」立刻返回，界面该转圈转圈。
+     * ⚠️ 判据仍是「本任务还没分过段」（chunk_count == 0）而**不是**「状态是 PENDING」：
+     *   ① 新建后立刻被暂停的任务是 PAUSED，用状态判断会跳过探测、chunk_count 停在 0，
+     *      下面拿着 0 个分片空转（状态显示下载中，实际一动不动）；
+     *   ② 从状态文件恢复、chunks 为空数组的任务同理。
+     * 分片一旦算过（含"长度未知"的单流兜底 chunk_count=1）就保持，续传靠 c->downloaded。
+     * 这里可以直接继续用 t，不必像老代码那样"探测完再 find_task 一遍"：
+     * 本函数开头已 worker_alive++，槽位在此期间不会被 detach_slot 挪动（见该字段注释），
+     * 顺带把「探测期间任务被删除」这一类竞态也堵掉了。 */
+    EnterCriticalSection(&g_lock);
+    /* 每次启动都重算一次本任务的网络选项：设置可能在任务创建之后才改（代理/UA/站点登录），
+     * 而且从状态文件恢复的任务 net_opts 是空的，必须补上。 */
+    apply_site_auth(t);
+    int need_probe = (t->chunk_count == 0) ? 1 : 0;
+    LeaveCriticalSection(&g_lock);
+
+    if (need_probe) {
+        /* 单请求探测：文件大小 + Range 支持（2 RTT → 1 RTT）。锁外做，别占着锁等网络。 */
+        NetworkProbe probe = network_probe(t->url, &t->net_opts);
+        int64_t fsize   = probe.file_size;
+        int     supports = probe.supports_range;
+        TRACE("probe: success=%d http=%ld size=%lld range=%d ver=%s （auth_user=%s）",
+              probe.success, probe.http_code, (long long)fsize, supports,
+              probe.http_version,
+              t->net_opts.auth_user ? t->net_opts.auth_user : "(null)");
+
+        EnterCriticalSection(&g_lock);
+        t->file_size = fsize;
+        /* 记录 HEAD 探测实际协商到的协议版本（HTTP/2 仅 HTTPS 出现） */
+        if (probe.http_version[0]) {
+            strncpy(t->http_version, probe.http_version, sizeof(t->http_version) - 1);
+            t->http_version[sizeof(t->http_version) - 1] = '\0';
+        }
+
+        /* 若用户未显式指定文件名，采用服务器建议的文件名（Content-Disposition）。
+         * 这能修正大量动态下载链接 / API 下载 / 无扩展名 URL 的文件名错误问题。 */
+        if (!t->filename_from_user && probe.suggested_filename[0]) {
+            /* 服务器给的名字同样不可信（Content-Disposition 里带 : * ? 的都有） */
+            sanitize_filename_utf8(probe.suggested_filename, t->filename,
+                                   sizeof(t->filename));
+            snprintf(t->tmp_path, sizeof(t->tmp_path), "%s\\%s.idmtmp",
+                     t->save_dir, t->filename);
+        }
+
+        /* range_downgrade：已经实测过这台服务器不吃 Range（回 200+整份文件），
+         * HEAD 的 Accept-Ranges 不可信，直接按单连接处理，不再分片。 */
+        if (supports && fsize >= MIN_CHUNK_SIZE && !t->range_downgrade)
+            calc_chunks(t);
+        else {
+            t->chunk_count = 1;
+            t->chunks[0].chunk_id   = 0;
+            t->chunks[0].start      = 0;
+            /* end = -1 → 连 Range 头都不发（下载范围未知 = 取整个响应体），
+             * 就当一个普通单连接下载，不会再被服务器回一次 200。 */
+            t->chunks[0].end        = t->range_downgrade ? -1
+                                                         : (fsize > 0 ? fsize - 1 : -1);
+            t->chunks[0].downloaded = 0;
+            t->chunks[0].done       = 0;
+            t->chunks[0].retry_count = 0;
+        }
+        TRACE("chunks: 本任务 → %d 片（size=%lld range=%d threads=%d）",
+              t->chunk_count, (long long)fsize, supports, t->thread_count);
+        LeaveCriticalSection(&g_lock);
+    }
 
     /* 预分配临时文件大小 */
     FILE *fp = utf8_fopen(t->tmp_path, "r+b");
@@ -961,9 +1039,9 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
     EnterCriticalSection(&g_lock);
     t->dispatch_idx = 0;   /* 重置动态调度计数器 */
     t->start_time = dl_time_ms();
-    t->status = TASK_RUNNING;
-    /* 清掉上一次失败留下的原因，否则重试成功后 GUI 仍会读到过期的错误文案 */
-    t->error_msg[0] = '\0';
+    /* 状态与 error_msg 已在本函数开头置好（必须先于探测，否则探测期间界面还说谎）。
+     * 这里**不能**再写一次 TASK_RUNNING：探测期间用户可能已经按了暂停，
+     * 再写就把 PAUSED 覆盖回 RUNNING，等于把「暂停」悄悄吃回去。 */
     LeaveCriticalSection(&g_lock);
 
     /* 动态线程池：固定数量工作线程从 dispatch_idx 取片，先做完的线程继续领后续分片
@@ -1267,71 +1345,15 @@ int dlmgr_start(int task_id) {
         return 0;
     }
 
-    /* 是否需要先探测文件大小并计算分片。
-     * ⚠️ 判据必须是「本任务还没分过段」而**不是**「状态是 PENDING」：
-     *   ① 新建后立刻被暂停的任务是 PAUSED，用状态判断会跳过探测，chunk_count 停在 0，
-     *      接着 start_task_threads 拿着 0 个分片空转（状态显示下载中，实际一动不动）；
-     *   ② 从状态文件恢复、chunks 为空数组的任务同理。
-     * 分片一旦算过（含"长度未知"的单流兜底 chunk_count=1）就保持，续传靠 c->downloaded。 */
-    int need_size = (t->chunk_count == 0) ? 1 : 0;
-    /* 每次启动都重算一次本任务的网络选项：设置可能在任务创建之后才改（代理/UA/站点登录），
-     * 而且从状态文件恢复的任务 net_opts 是空的，必须补上。 */
-    apply_site_auth(t);
-    TRACE("start: id=%d need_size=%d threads=%d（上限 %d）url=%s",
-          task_id, need_size, t->thread_count, g_cfg.max_conn_per_server, t->url);
+    /* 探测（HEAD 取大小/Range/建议文件名）与站点凭据下发都挪到监督线程里做了，
+     * 见 start_task_threads 的 need_probe 段。原因很直接：dlmgr_start 是 GUI 线程调的
+     * （DownloadManager::startTask 直调、「全部开始」经 dlmgr_start_all 逐个串着调），
+     * 而一次探测最坏会挂满 connect_timeout —— 实测对慢服务器本函数要 3000ms 才返回，
+     * 用户点完「开始」就是整整三秒不响应。
+     * 这里只留下必须同步决定的事：能不能起（RUNNING）、要不要补起（worker_alive 守卫）。 */
+    TRACE("start: id=%d threads=%d（上限 %d）url=%s",
+          task_id, t->thread_count, g_cfg.max_conn_per_server, t->url);
     LeaveCriticalSection(&g_lock);
-
-    if (need_size) {
-        /* 单请求探测：文件大小 + Range 支持（2 RTT → 1 RTT） */
-        NetworkProbe probe = network_probe(t->url, &t->net_opts);
-        int64_t fsize = probe.file_size;
-        int     supports = probe.supports_range;
-        TRACE("probe: success=%d http=%ld size=%lld range=%d ver=%s "
-              "（auth_user=%s）",
-              probe.success, probe.http_code, (long long)fsize, supports,
-              probe.http_version,
-              t->net_opts.auth_user ? t->net_opts.auth_user : "(null)");
-
-        EnterCriticalSection(&g_lock);
-        t = find_task(task_id);
-        if (!t) { LeaveCriticalSection(&g_lock); return -1; }
-        t->file_size = fsize;
-        /* 记录 HEAD 探测实际协商到的协议版本（HTTP/2 仅 HTTPS 出现） */
-        if (probe.http_version[0]) {
-            strncpy(t->http_version, probe.http_version, sizeof(t->http_version) - 1);
-            t->http_version[sizeof(t->http_version) - 1] = '\0';
-        }
-
-        /* 若用户未显式指定文件名，采用服务器建议的文件名（Content-Disposition）。
-         * 这能修正大量动态下载链接 / API 下载 / 无扩展名 URL 的文件名错误问题。 */
-        if (!t->filename_from_user && probe.suggested_filename[0]) {
-            /* 服务器给的名字同样不可信（Content-Disposition 里带 : * ? 的都有） */
-            sanitize_filename_utf8(probe.suggested_filename, t->filename,
-                                   sizeof(t->filename));
-            snprintf(t->tmp_path, sizeof(t->tmp_path), "%s\\%s.idmtmp",
-                     t->save_dir, t->filename);
-        }
-
-        /* range_downgrade：已经实测过这台服务器不吃 Range（回 200+整份文件），
-         * HEAD 的 Accept-Ranges 不可信，直接按单连接处理，不再分片。 */
-        if (supports && fsize >= MIN_CHUNK_SIZE && !t->range_downgrade)
-            calc_chunks(t);
-        else {
-            t->chunk_count = 1;
-            t->chunks[0].chunk_id   = 0;
-            t->chunks[0].start      = 0;
-            /* end = -1 → 连 Range 头都不发（下载范围未知 = 取整个响应体），
-             * 就当一个普通单连接下载，不会再被服务器回一次 200。 */
-            t->chunks[0].end        = t->range_downgrade ? -1
-                                                         : (fsize > 0 ? fsize - 1 : -1);
-            t->chunks[0].downloaded = 0;
-            t->chunks[0].done       = 0;
-            t->chunks[0].retry_count = 0;
-        }
-        TRACE("chunks: 任务 %d → %d 片（size=%lld range=%d threads=%d）",
-              task_id, t->chunk_count, (long long)fsize, supports, t->thread_count);
-        LeaveCriticalSection(&g_lock);
-    }
 
 #ifdef _WIN32
     HANDLE h = CreateThread(NULL, 0, start_task_threads,

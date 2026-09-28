@@ -122,15 +122,23 @@ PROXY_PASS = "proxpass"
 PROXY_EXPECT = "Basic " + base64.b64encode(f"{PROXY_USER}:{PROXY_PASS}".encode()).decode()
 PROXY_BODY = make_payload(4096)     # 与 content_matches_pattern 同模式：byte[i] == i % 251
 
+# /stall.bin：连接建立后**先睡 IDM_SELFTEST_STALL_MS（默认 3000）毫秒再回东西**，
+# HEAD 与 GET 都睡。用来量「探测把调用线程占住多久」——服务器慢是真实场景
+# （海外源站 / CDN 拥塞 / TLS 握手排队），而 GUI 线程一旦被占住，整个窗口就不响应了。
+STALL_PATH = "/stall.bin"
+STALL_MS = int(os.environ.get("IDM_SELFTEST_STALL_MS", "3000"))
+STALL_PAYLOAD = make_payload(4096)
+
 _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
          "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
          "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0,
-         "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0}
+         "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0, "stall_hits": 0}
 _RESET_KEYS = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
                "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
                "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0,
-               "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0}
+               "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0,
+               "stall_hits": 0}
 
 
 def _enter():
@@ -247,6 +255,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(PROBE429_PAYLOAD)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return
+        if path == STALL_PATH:
+            # 先睡再回：模拟"源站很慢"。测的是调用线程被占住多久，不是字节数。
+            with _lock:
+                _hits["stall_hits"] += 1
+            time.sleep(STALL_MS / 1000.0)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(STALL_PAYLOAD)))
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
             return
@@ -388,6 +407,17 @@ class Handler(BaseHTTPRequestHandler):
             _enter()
             try:
                 self._serve_file(PROBE429_PAYLOAD)
+            finally:
+                _leave()
+            return
+
+        if path == STALL_PATH:
+            with _lock:
+                _hits["stall_hits"] += 1
+            time.sleep(STALL_MS / 1000.0)
+            _enter()
+            try:
+                self._serve_file(STALL_PAYLOAD)
             finally:
                 _leave()
             return
