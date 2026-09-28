@@ -344,6 +344,10 @@ static void apply_common_opts(CURL *h, const NetOptions *opt) {
     if (def.follow_redirect > 0) {
         curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(h, CURLOPT_MAXREDIRS, (long)def.follow_redirect);
+        /* 刻意**不**设 CURLOPT_UNRESTRICTED_AUTH 与 CURLOPT_AUTOREFERER：
+         * 前者会让 Basic 凭据跟着 302 跨 host 一起发出去（实测：设了之后 sink
+         * 直接收到 Authorization，见自测 [27] 的突变记录）；
+         * 后者会把 Referer 改写成上一跳 URL —— 带 token 的源地址就递给第三方域了。 */
     }
 
     /* HTTP/2 协商（HTTPS 经 ALPN；明文自动回退 1.1） */

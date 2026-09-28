@@ -255,6 +255,40 @@ static void server_dump_stats(int port, const char *tag)
     free(r.data);
 }
 
+/* 下一发「302 跳到指定 host 的 sink」的请求，把 sink 回显的 JSON 读进 body。
+ * 供 [27] 的三个变体共用：同 host 对照 / 跨 host（配了机密）/ 跨 host（什么都没配）。
+ * with_secrets=0 时不给凭据、Cookie、Referer，用来测「会不会被自动补出一个 Referer」。
+ * 返回读到的字节数，链路没走通返回 -1。 */
+static long sink_peek(int port, const char *outdir, const char *user, const char *pass,
+                      int with_secrets, const char *redir_path, const char *target_host,
+                      char *body, size_t bodycap)
+{
+    char url[1024], to[512], path[MAX_PATH + 64];
+    snprintf(to,   sizeof(to),   "http://%s:%d/sink.json", target_host, port);
+    snprintf(url,  sizeof(url),  "http://127.0.0.1:%d%s?to=%s", port, redir_path, to);
+    snprintf(path, sizeof(path), "%s\\sinkpeek.bin", outdir);
+    utf8_delete(path);
+
+    NetOptions opt = network_default_options();
+    char au[128] = {0}, ap[128] = {0};
+    if (with_secrets) {
+        strncpy(au, user ? user : "", sizeof(au) - 1);
+        strncpy(ap, pass ? pass : "", sizeof(ap) - 1);
+        opt.auth_user = au;
+        opt.auth_pass = ap;
+        opt.cookie    = "sid=SELFTESTCOOKIEVALUE";
+        opt.referer   = "http://127.0.0.1/private/lease-page";
+    }
+    NetDownloadTask nd; memset(&nd, 0, sizeof(nd));
+    nd.url = url; nd.save_path = path;
+    nd.range_start = 0; nd.range_end = -1; nd.opt = &opt;
+    NetDownloadResult r = network_download_range(&nd);
+    body[0] = '\0';
+    long n = utf8_read_file(path, body, bodycap);
+    utf8_delete(path);
+    return (r.success == 1 && n > 0) ? n : -1;
+}
+
 int main(int argc, char **argv)
 {
     /* 关掉 stdout 缓冲：自测若在收尾阶段崩掉，全缓冲会把最后一批输出整体丢掉，
@@ -1766,6 +1800,61 @@ int main(int argc, char **argv)
             utf8_delete(p26); utf8_delete(p26t);
             dlmgr_remove(id);
         }
+    }
+
+    /* ── 27. 跨 host 重定向：凭据 / Cookie / Referer 到底会不会跟过去 ──
+     * 交接稿把这条列为「待修的安全项」。实测结论（本机 vendored libcurl 8.22）：
+     *   · Authorization、Cookie **不会**跨 host 送出 —— libcurl 默认就这个策略
+     *     （CURLOPT_UNRESTRICTED_AUTH 我们从不设置，默认关），所以这里没有"修复"可做；
+     *   · Referer 与 User-Agent 会跟过去 —— **故意保留**：防盗链 CDN 经常要求跳转后
+     *     仍带着来源页 Referer 和浏览器 UA，剥掉会让一批真实下载直接下不动；
+     *   · 客户端没配 Referer 时不会被自动补一个（CURLOPT_AUTOREFERER 也从不开），
+     *     所以带 token 的源 URL 不会以 Referer 形式递给第三方域。
+     * 于是这条用例的价值是**回归闸**而不是修复：哪天升级 libcurl、或者有人手滑设了
+     * UNRESTRICTED_AUTH / AUTOREFERER，这里立刻红。
+     * 服务端：/redir.bin 要求 Basic（先让客户端在原站认证，才谈得上"带不带得过去"），
+     * /_redir.bin 免认证（测"什么都没配"那一组），/sink.json 把收到的头原样回显。
+     * 「同一 host」那组是对照组：没有对照，"没看到"分不清是"没带过去"还是"看不见"。
+     * 突变验证：给 apply_common_opts 加 CURLOPT_UNRESTRICTED_AUTH=1 → ② 的前两条红；
+     * 加 CURLOPT_AUTOREFERER=1 → ③ 红。 */
+    printf("\n[27] 跨 host 重定向：凭据/Cookie 不外递，Referer/UA 按设计保留\n");
+    {
+        char b[2048], d[240];
+
+        /* ① 对照组：同 host 跳转，三样都该看得到 —— 证明观测点有效 */
+        long n0 = sink_peek(port, outdir, user, pass, 1, "/redir.bin", "127.0.0.1", b, sizeof(b));
+        printf("      ① 对照 同 host   ：%s\n", b);
+        int c_auth = strstr(b, "\"auth\": \"Basic") != NULL;
+        int c_ck   = strstr(b, "SELFTESTCOOKIEVALUE") != NULL;
+        int c_rf   = strstr(b, "private/lease-page") != NULL;
+        snprintf(d, sizeof(d), "rc=%ld auth=%d cookie=%d referer=%d", n0, c_auth, c_ck, c_rf);
+        check("对照组：同 host 跳转三样都收得到（观测点有效）",
+              n0 > 0 && c_auth && c_ck && c_rf, d);
+
+        /* ② 跨 host：口令与 Cookie 必须消失，Referer / UA 仍在（设计如此） */
+        long n1 = sink_peek(port, outdir, user, pass, 1, "/redir.bin", "localhost", b, sizeof(b));
+        printf("      ② 跨 host（配了机密）：%s\n", b);
+        int x_auth = strstr(b, "\"auth\": \"Basic") != NULL;
+        int x_ck   = strstr(b, "SELFTESTCOOKIEVALUE") != NULL;
+        int x_rf   = strstr(b, "private/lease-page") != NULL;
+        int x_ua   = strstr(b, "IDM/6.42") != NULL;
+        snprintf(d, sizeof(d), "rc=%ld auth=%d cookie=%d referer=%d ua=%d",
+                 n1, x_auth, x_ck, x_rf, x_ua);
+        check("跨 host 跳转不带 Authorization（口令不送给第三方域）",
+              n1 > 0 && !x_auth, d);
+        snprintf(d, sizeof(d), "auth=%d cookie=%d referer=%d ua=%d", x_auth, x_ck, x_rf, x_ua);
+        check("跨 host 跳转不带 Cookie", n1 > 0 && !x_ck, d);
+        check("跨 host 仍带 Referer 与 UA（防盗链需要，故意保留）",
+              n1 > 0 && x_rf && x_ua, d);
+
+        /* ③ 什么都没配：不能被自动补出 Referer，否则带 token 的源 URL 就漏给第三方了 */
+        long n2 = sink_peek(port, outdir, user, pass, 0, "/_redir.bin", "localhost", b, sizeof(b));
+        printf("      ③ 跨 host（未配机密）：%s\n", b);
+        int n_auth = strstr(b, "\"auth\": \"Basic") != NULL;
+        int n_rf   = strstr(b, "referer\": \"http") != NULL;
+        snprintf(d, sizeof(d), "rc=%ld auth=%d referer=%d", n2, n_auth, n_rf);
+        check("未配置时不会被自动补上 Referer（源 URL 不外递）",
+              n2 > 0 && !n_rf && !n_auth, d);
     }
 
     dlmgr_destroy();

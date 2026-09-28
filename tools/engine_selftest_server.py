@@ -99,13 +99,25 @@ PROBE429_PATH = "/probe429.bin"
 PROBE429_PAYLOAD = make_payload(4096)
 PROBE429_AFTER = 2
 
+# ── 重定向 + 请求头回显：量「跳转到别的 host 时，什么东西跟着走了」──────────
+# /redir.bin?to=<绝对URL>：**要求 Basic 认证**（必须先让客户端在原站完成认证，
+#   才谈得上"凭据会不会被带过去"），然后回 302 把客户端支到 to 指的地方。
+#   to 只允许 127.0.0.1 / localhost 两个 host —— 本机测试服务，不做开放重定向。
+# /sink.json：**免认证**，把收到的请求头原样回显成 JSON。
+#   泄漏与否在这里取证；「同一 host」那一发是对照组，
+#   没有对照就无法区分"确实没带过去"和"这里根本看不见"。
+REDIR_PATH = "/redir.bin"
+REDIRFREE_PATH = "/_redir.bin"
+SINK_PATH = "/sink.json"
+
 _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
          "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
-         "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0}
+         "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0}
 _RESET_KEYS = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
                "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
-               "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0}
+               "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0,
+               "sink_hits": 0}
 
 
 def _enter():
@@ -244,8 +256,21 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _hits.update(_RESET_KEYS)
             return self._send_json({"ok": 1})
+        if path == SINK_PATH:
+            # 免认证：sink 的任务是「看客户端主动带了什么过来」，自己不设门槛
+            return self._serve_sink()
+
+        if path == REDIRFREE_PATH:
+            # 免认证的跳转：用来测「客户端根本没配凭据/Cookie/Referer 时，
+            # 会不会被 libcurl 自动补一个 Referer（= 把带 token 的源 URL 递出去）」
+            return self._serve_redirect()
+
         if not self._auth_ok():
             return self._send_401()
+
+        if path == REDIR_PATH:
+            # 到这里说明客户端已经在本 host 通过 Basic 认证 —— 接下来看它跳走时带什么
+            return self._serve_redirect()
 
         if path == RETRYAFTER_PATH:
             # 仅首 GET 回 429 + Retry-After；后续 GET 回 200 + 确定性内容。
@@ -401,6 +426,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_redirect(self):
+        """302 到 ?to= 指定的地址。to 只允许本机 127.0.0.1 / localhost 两个 host 串，
+        既够模拟「跳到另一个 host」，也不会把自己变成开放重定向。"""
+        raw = self.path.split("?", 1)[1] if "?" in self.path else ""
+        to = ""
+        if raw.startswith("to=http://127.0.0.1:") or raw.startswith("to=http://localhost:"):
+            to = raw[3:]      # 只去 "to="；本端点由自测自己拼，原样传不再解码
+        if not to:
+            body = b"bad to\n"
+            self.send_response(400)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self._write_body(body)
+            return
+        self.send_response(302)
+        self.send_header("Location", to)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _serve_sink(self):
+        """把收到的请求头回显成 JSON —— 重定向泄漏的取证点。
+
+        ⚠️ 必须有「同一 host」那一发作对照：没有对照，"这里没看到 Authorization"
+        既可能是客户端真的没带，也可能是这个观测点根本收不到，两者完全不同。
+        """
+        with _lock:
+            _hits["sink_hits"] += 1
+            hits = _hits["sink_hits"]
+        self._send_json({
+            "host":    self.headers.get("Host", ""),
+            "auth":    self.headers.get("Authorization", ""),
+            "cookie":  self.headers.get("Cookie", ""),
+            "referer": self.headers.get("Referer", ""),
+            "ua":      self.headers.get("User-Agent", ""),
+            "hits":    hits,
+        })
 
     def _serve_cut(self, honor_range: bool):
         """声明整份长度却只发前 CUT_PART 字节，然后关闭连接 —— 复现「服务器提前断流」。
