@@ -254,6 +254,22 @@ static const char *widefault_reason(DWORD winerr, int err) {
     }
 }
 
+/* 把常见 HTTP 状态码翻译成「用户下一步该改哪里」的一句话，NULL = 没有专门文案。
+ * ⚠️ 407 是这里最要紧的一条：它来自**代理**而不是站点，处理办法完全不同
+ * （去设置里填代理账号，而不是站点登录）。只给「HTTP 错误: 407」等于让用户猜。 */
+static const char *http_user_reason(long code) {
+    switch (code) {
+    case 401: return "需要登录：请在设置里为该站点添加账号密码";
+    case 403: return "服务器拒绝访问（可能需要登录，或链接已过期）";
+    case 404: return "链接无效或文件已不存在";
+    case 407: return "代理服务器要求认证：请在设置里填写代理用户名和密码";
+    case 408: return "服务器响应超时";
+    case 429: return "服务器限流（请求过于频繁）";
+    case 503: return "服务器过载，稍后自动重试";
+    default:  return NULL;
+    }
+}
+
 static size_t write_file_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     RangeCtx *c = (RangeCtx*)userdata;
     size_t total = size * nmemb;
@@ -312,7 +328,8 @@ static void apply_common_opts(CURL *h, const NetOptions *opt) {
             case PROXY_SOCKS4: curl_easy_setopt(h, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4); break;
             case PROXY_SOCKS5: curl_easy_setopt(h, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5); break;
         }
-        /* 代理认证（HTTP/SOCKS 均支持） */
+        /* 代理认证（HTTP/SOCKS 均支持）。⚠️ 这两行必须真下发：设置页存了盘不等于
+         * 生效，自测 [28] 用「不往下发」作突变，实测会卡在 407 下不完。 */
         if (def.proxy_user && def.proxy_user[0])
             curl_easy_setopt(h, CURLOPT_PROXYUSERNAME, def.proxy_user);
         if (def.proxy_pass && def.proxy_pass[0])
@@ -549,8 +566,13 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
             break;
         } else {
             /* 直接把原因写清楚：这是最终会显示到任务行的文案，不带「尝试 n/m」这类噪声。
-             * code==0 表示连 HTTP 响应都没拿到，用 libcurl 的错误描述更有用。 */
-            if (code > 0)
+             * code==0 表示连 HTTP 响应都没拿到，用 libcurl 的错误描述更有用。
+             * 常见的几个状态码再往前一步：翻成「用户下一步该做什么」，
+             * 因为 401 与 407 的差别是「站点登录」还是「代理账号」，光给数字分不出来。 */
+            const char *why = (code > 0) ? http_user_reason(code) : NULL;
+            if (why)
+                snprintf(res.error_msg, sizeof(res.error_msg), "HTTP %ld：%s", code, why);
+            else if (code > 0)
                 snprintf(res.error_msg, sizeof(res.error_msg), "HTTP 错误: %ld", code);
             else
                 snprintf(res.error_msg, sizeof(res.error_msg), "网络错误: %s",

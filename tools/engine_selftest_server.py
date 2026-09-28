@@ -19,6 +19,8 @@
     而是带 Range 从断点续传补齐。/cutnr.bin 同理断流但**不认 Range**：只能诚实失败。
   * /probe429.bin 首 HEAD 返回 429 + Retry-After: 2，之后 HEAD 正常 200：验证 HEAD 探测
     会重试并尊重 Retry-After —— 否则探测失败 → file_size=-1 → 不分段 → 退化成单连接。
+  * 请求行是**绝对 URI**（http://…）时按「HTTP 代理」处理：没有正确的
+    Proxy-Authorization 就回 407 + Proxy-Authenticate，用来测代理认证这条链路。
   * **每个文件响应固定延迟 IDM_SELFTEST_SLOW_MS 毫秒（默认 40）**：
     本机回环太快（1 MiB 一毫秒内写完），不延迟的话「并发」根本来不及重叠，
     实测并发峰值只有 2~3，无法区分「真封顶」和「跑太快没重叠」。
@@ -110,14 +112,25 @@ REDIR_PATH = "/redir.bin"
 REDIRFREE_PATH = "/_redir.bin"
 SINK_PATH = "/sink.json"
 
+# ── 兼职扮演「要求 Basic 认证的 HTTP 代理」────────────────────────────
+# curl 走 HTTP 代理时请求行是**绝对 URI**（GET http://host/path），据此把
+# 「代理请求」和「源站请求」分开处理。为什么要单独一条分支：407 必须由代理这一侧
+# 出来，它和 401（源站要登录）在客户端走完全不同的凭据与提示路径 —— 混在一起，
+# 用户就分不出该去填「代理账号」还是「站点登录」。
+PROXY_USER = "proxuser"
+PROXY_PASS = "proxpass"
+PROXY_EXPECT = "Basic " + base64.b64encode(f"{PROXY_USER}:{PROXY_PASS}".encode()).decode()
+PROXY_BODY = make_payload(4096)     # 与 content_matches_pattern 同模式：byte[i] == i % 251
+
 _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
          "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
-         "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0}
+         "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0,
+         "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0}
 _RESET_KEYS = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
                "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
                "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0,
-               "sink_hits": 0}
+               "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0}
 
 
 def _enter():
@@ -179,6 +192,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         path = self.path.split("?")[0]
+        if path.startswith("http://"):
+            return self._serve_proxy()      # 代理侧的 HEAD：不带响应体
         if path == "/_stats":
             with _lock:
                 return self._send_json(dict(_hits))
@@ -249,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path.startswith("http://"):
+            return self._serve_proxy()      # 绝对 URI = 走代理的请求，先于源站逻辑处理
         if path == "/_stats":
             with _lock:
                 return self._send_json(dict(_hits))
@@ -445,6 +462,35 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", to)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _serve_proxy(self):
+        """要求 Basic 认证的 HTTP 代理：没有（或不对的）Proxy-Authorization 就回 407。
+
+        这是真的代理行为，不是模拟：请求行是绝对 URI、认证头是 Proxy-Authorization、
+        挑战头是 Proxy-Authenticate，状态码是 407 而不是 401。
+        自测靠它证明两件事：① 没填代理账号时报错文案指向「代理」而不是站点；
+        ② 填了之后代理凭据真的下发到了下载线程（而不是只存在设置页里）。
+        """
+        got = self.headers.get("Proxy-Authorization", "")
+        with _lock:
+            _hits["proxy_req"] += 1
+        if got != PROXY_EXPECT:
+            with _lock:
+                _hits["proxy_407"] += 1
+            self.send_response(407)
+            self.send_header("Proxy-Authenticate", 'Basic realm="idm-selftest-proxy"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        with _lock:
+            _hits["proxy_ok"] += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(PROXY_BODY)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("X-Proxied-Url", self.path)
+        self.end_headers()
+        self._write_body(PROXY_BODY)
 
     def _serve_sink(self):
         """把收到的请求头回显成 JSON —— 重定向泄漏的取证点。

@@ -205,6 +205,7 @@ static int clean_outputs(const char *outdir)
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
                                    "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
+                                   "px1.bin", "px2.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
     for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
@@ -1855,6 +1856,81 @@ int main(int argc, char **argv)
         snprintf(d, sizeof(d), "rc=%ld auth=%d referer=%d", n2, n_auth, n_rf);
         check("未配置时不会被自动补上 Referer（源 URL 不外递）",
               n2 > 0 && !n_rf && !n_auth, d);
+    }
+
+    /* ── 28. 代理要求认证（407）：文案要指向代理，凭据要真下发 ──
+     * 测试服务兼职扮演「要求 Basic 的 HTTP 代理」：请求行是绝对 URI，挑战走
+     * Proxy-Authenticate / 407（不是源站的 401）。
+     * ① 没配代理账号：必须失败，而且任务行要说得清是**代理**要认证 ——
+     *    只给「HTTP 错误: 407」，用户分不清该去填代理账号还是站点登录；
+     * ② 配上正确账号：必须真的下下来 —— 这是「代理凭据下发到了下载线程」的端到端
+     *    证据；设置页存了盘不等于生效（本项目反复踩过的那类「死设置」）。
+     * 突变测试：删掉 http_user_reason 的 407 分支 → ① 红（退回光秃秃的状态码）；
+     * 不往 net_opts 写 proxy_user/pass → ② 红（永远停在 407）。 */
+    printf("\n[28] 代理 407：报错指向代理，填对账号要真能下下来\n");
+    {
+        char pu28[512], pp1[MAX_PATH + 64], pp2[MAX_PATH + 64], tmpp[MAX_PATH + 80];
+        snprintf(pu28, sizeof(pu28), "http://127.0.0.1:%d/small.bin", port);
+        snprintf(pp1, sizeof(pp1), "%s\\px1.bin", outdir);
+        snprintf(pp2, sizeof(pp2), "%s\\px2.bin", outdir);
+        snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", pp1); utf8_delete(tmpp);
+        snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", pp2); utf8_delete(tmpp);
+        utf8_delete(pp1); utf8_delete(pp2);
+        server_reset(port);
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 0;        /* 这一节只测代理，不掺站点登录 */
+            dlmgr_set_config(&cfg);
+        }
+        char d28[280];
+
+        /* ① 未配代理凭据 */
+        dlmgr_set_proxy(PROXY_HTTP, "127.0.0.1", port, NULL, NULL);
+        int id = dlmgr_add(pu28, outdir, "px1.bin", 1, NULL, NULL, NULL, NULL);
+        check("代理 407（未配凭据）任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 20000, &st, &dl);
+            TaskInfo info;
+            char err[300]; err[0] = '\0';
+            if (dlmgr_get_task_info(id, &info) == 0) {
+                strncpy(err, info.error_msg, sizeof(err) - 1);
+                err[sizeof(err) - 1] = '\0';
+            }
+            printf("      未配凭据：status=%d err=「%s」\n", st, err);
+            snprintf(d28, sizeof(d28), "status=%d err=「%s」", st, err);
+            check("未配代理凭据 → 判定失败", st == 4, d28);
+            snprintf(d28, sizeof(d28), "error_msg=「%s」", err);
+            check("失败文案同时给出「代理」与 407（指向能改的地方）",
+                  strstr(err, "代理") != NULL && strstr(err, "407") != NULL, d28);
+            dlmgr_remove(id);
+        }
+
+        /* ② 配上正确的代理凭据 */
+        dlmgr_set_proxy(PROXY_HTTP, "127.0.0.1", port, "proxuser", "proxpass");
+        id = dlmgr_add(pu28, outdir, "px2.bin", 1, NULL, NULL, NULL, NULL);
+        check("代理 407（配了凭据）任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 20000, &st, &dl);
+            long long fsz = file_size_i64_of(pp2);
+            int mc = content_matches_pattern(pp2, 4096);
+            int n407 = server_stat(port, "proxy_407");
+            int nok  = server_stat(port, "proxy_ok");
+            snprintf(d28, sizeof(d28),
+                     "status=%d file=%lld 内容=%d 服务端 407=%d 凭据正确=%d",
+                     st, fsz, mc, n407, nok);
+            check("填对代理账号后下载成功（凭据确实下发到下载线程）",
+                  st == 3 && fsz == 4096 && mc == 1, d28);
+            check("服务端确实 407 挑战过、也收到过正确的 Proxy-Authorization",
+                  n407 >= 1 && nok >= 1, d28);
+            dlmgr_remove(id);
+        }
+        utf8_delete(pp1); utf8_delete(pp2);
+        dlmgr_set_proxy(PROXY_NONE, NULL, 0, NULL, NULL);   /* 收尾：别把代理留在引擎里 */
     }
 
     dlmgr_destroy();
