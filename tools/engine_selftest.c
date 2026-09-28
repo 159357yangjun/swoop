@@ -204,7 +204,7 @@ static int clean_outputs(const char *outdir)
     static const char *names[] = { "noauth.bin", "withauth.bin", "nocap.bin",
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
-                                   "cut.bin", "cut2.bin", "cutnr.bin",
+                                   "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
     for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
@@ -1631,6 +1631,139 @@ int main(int argc, char **argv)
                 check("倒计时全程不再残留", 0, "任务已查不到");
             }
             utf8_delete(p24); utf8_delete(p24t);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 25. 限流等待期间「暂停 → 继续」：不许起第二组线程抢收尾 ──
+     * 窗口由 Retry-After: 3 撑开，所以是可稳定复现而不是偶发：
+     *   start → 观察到倒计时 ≥2（说明旧组的下载线程还在 Sleep 里，没退出）
+     *   → pause（状态变 PAUSED，那一觉却还在睡）
+     *   → 立刻 start 继续。dlmgr_start 的挡重复判据是「状态 == RUNNING」，
+     *     此刻状态是 PAUSED，于是又起**一个监督线程**，同一个任务出现两代线程。
+     * 实测后果（本会话两次独立跑到都是这样）：status=4、downloaded 已等于全文件
+     * 大小、成品文件却不存在，error_msg=「保存文件（重命名）失败：文件被其他程序
+     * 占用」——用户看到的就是「暂停后点继续，结果失败了」。
+     * 断言：继续之后必须正常完成（3）、成品完整、不留 .idmtmp。
+     * 这条在修复前应红（这就是它的用处），修复后转绿。 */
+    printf("\n[25] 限流等待期间暂停→继续：任务必须正常完成，不能假失败\n");
+    {
+        char u25[512], p25[MAX_PATH + 64], p25t[MAX_PATH + 80];
+        snprintf(u25, sizeof(u25), "http://127.0.0.1:%d/retryafter.bin", port);
+        snprintf(p25, sizeof(p25), "%s\\rs.bin", outdir);
+        snprintf(p25t, sizeof(p25t), "%s.idmtmp", p25);
+        utf8_delete(p25); utf8_delete(p25t);
+        server_reset(port);          /* 把「首次 GET 回 429」的状态还回来 */
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+        int id = dlmgr_add(u25, outdir, "rs.bin", 1, NULL, NULL, NULL, NULL);
+        check("暂停续传任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            TaskInfo i25;
+            int in_window = 0;
+            for (int i = 0; i < 50; i++) {
+                if (dlmgr_get_task_info(id, &i25) != 0) break;
+                if (i25.throttle_sec >= 2) { in_window = 1; break; }
+                if (i25.status == 3 || i25.status == 4) break;
+                Sleep(100);
+            }
+            char d25[260];
+            snprintf(d25, sizeof(d25), "是否仍在等待窗口内=%d", in_window);
+            check("已确认停在 Retry-After 窗口里（旧组线程还没退出）", in_window, d25);
+
+            dlmgr_pause(id);
+            Sleep(50);
+            dlmgr_start(id);                 /* ← 继续：修复前会在这里起第二组线程 */
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 20000, &st, &dl);
+            long long fsz = file_size_i64_of(p25);
+            int mc = content_matches_pattern(p25, 4096);
+            int tmp_left = (file_size_i64_of(p25t) >= 0) ? 1 : 0;
+            TaskInfo fin;
+            const char *ferr = "";
+            if (dlmgr_get_task_info(id, &fin) == 0) ferr = fin.error_msg;
+            snprintf(d25, sizeof(d25),
+                     "status=%d downloaded=%lld 成品=%lld 内容=%d 残留tmp=%d err=「%s」",
+                     st, (long long)dl, fsz, mc, tmp_left, ferr);
+            check("继续之后任务正常完成且成品完整", st == 3 && fsz == 4096 && mc == 1, d25);
+            check("没有留下半截 .idmtmp", tmp_left == 0, d25);
+            utf8_delete(p25); utf8_delete(p25t);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 26. 普通下载中途「暂停 → 继续」：必须续完，不幽灵、不假失败 ──
+     * [25] 覆盖的是「旧线程还卡在重试 Sleep 里」那一支（继续 → 旧组接着下）；
+     * 这一支覆盖另一半：线程已经因为暂停在块边界收工、监督线程还在做收尾，
+     * 此时 dlmgr_start 的 worker_alive 守卫不能把「继续」吞掉，必须由
+     * start_task_threads 尾部的 resume_later 补起新一代。
+     * 少了那一步，任务就永远显示「下载中」而一个线程都没有（幽灵任务）。
+     * 用 /huge.bin（40 MiB → 10 片）配 4 条线程，暂停时机改成「轮询到第一个块落地」
+     * ——实测固定 Sleep(150) 取到的 downloaded 还是 0（探测 + 40ms 服务端延迟 + 1MB 块），
+     * 那样前提不成立，等于在暂停一个还没动过的任务。
+     * 暂停后只等 30ms 就「继续」，此时监督线程大概率还在等它那一代的最后一个 worker
+     * → 命中新分支的机会最高。
+     * 断言只看结果（完成 + 逐字节正确 + 无残留），两条路径都必须能到达它。
+     * 突变测试：把 resume_later 恒置 0 → 这一支的用例超时失败（幽灵任务现场）。 */
+    printf("\n[26] 中途暂停→继续：必须从断点续完（不幽灵、不假失败）\n");
+    {
+        char u26[512], p26[MAX_PATH + 64], p26t[MAX_PATH + 80];
+        snprintf(u26, sizeof(u26), "http://127.0.0.1:%d/huge.bin", port);
+        snprintf(p26, sizeof(p26), "%s\\resume.bin", outdir);
+        snprintf(p26t, sizeof(p26t), "%s.idmtmp", p26);
+        utf8_delete(p26); utf8_delete(p26t);
+        {
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+            strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+            dlmgr_set_config(&cfg);
+        }
+        int id = dlmgr_add(u26, outdir, "resume.bin", 4, NULL, NULL, NULL, NULL);
+        check("中途续传任务创建成功", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            /* 等到第一个块真的落地再暂停：固定 Sleep(150) 实测取到的是 downloaded=0
+             * （40ms 服务端延迟 + 探测 + 1MB 块），那样「中途」这个前提根本不成立，
+             * 用例就变成「暂停一个还没开始的任务」，测不到断点续传。 */
+            int64_t dl_mid = 0;
+            TaskInfo mid;
+            for (int i = 0; i < 60; i++) {            /* 最多等 6s */
+                if (dlmgr_get_task_info(id, &mid) != 0) break;
+                dl_mid = mid.downloaded;
+                if (dl_mid > 0) break;
+                if (mid.status == 3 || mid.status == 4) break;
+                Sleep(100);
+            }
+            dlmgr_pause(id);
+            char d26[260];
+            snprintf(d26, sizeof(d26), "暂停时已下=%lld", (long long)dl_mid);
+            check("暂停发生在中途（已下了一部分但没下完）",
+                  dl_mid > 0 && dl_mid < 40LL * 1024 * 1024, d26);
+            Sleep(30);                       /* worker 陆续在块边界收工 */
+            dlmgr_start(id);                 /* 继续 */
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 40000, &st, &dl);
+            long long fsz = file_size_i64_of(p26);
+            int mc = content_matches_pattern(p26, 40LL * 1024 * 1024);
+            int tmp_left = (file_size_i64_of(p26t) >= 0) ? 1 : 0;
+            snprintf(d26, sizeof(d26),
+                     "status=%d downloaded=%lld 成品=%lld 内容=%d 残留tmp=%d",
+                     st, (long long)dl, fsz, mc, tmp_left);
+            check("继续之后从断点续到完整（40 MiB 且逐字节正确）",
+                  st == 3 && fsz == 40LL * 1024 * 1024 && mc == 1, d26);
+            check("续完没有留下半截 .idmtmp", tmp_left == 0, d26);
+            utf8_delete(p26); utf8_delete(p26t);
             dlmgr_remove(id);
         }
     }

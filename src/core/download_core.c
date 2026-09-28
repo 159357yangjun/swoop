@@ -1058,6 +1058,15 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
     /* 不支持 Range 的降级重下：同样等线程清空后再动分片表 */
     if (!gone && !relaunch && t->range_downgrade && st == TASK_CANCELLED)
         relaunch_single = 1;
+    /* 「暂停 → 继续」的记账，配合 dlmgr_start 的 worker_alive 守卫看：
+     * 本代线程收工时若分片还没做完、而用户此刻要的仍是「继续」（状态还是 RUNNING，
+     * 说明没被再按一次暂停），就必须补起新一代 —— 否则任务会永远停在「下载中」
+     * 却一个线程都没有（幽灵任务）。分片已做完就不用补，交给上面的完成分支改名。 */
+    int resume_later = 0;
+    if (!gone && !relaunch && !relaunch_single && t->resume_pending) {
+        t->resume_pending = 0;
+        if (!all_done && st == TASK_RUNNING) resume_later = 1;
+    }
     if (gone) {
         /* 槽位现在可以安全挪动了。摘除后 t 已失效，不得再解引用。 */
         detach_slot(tid);
@@ -1066,16 +1075,25 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
         /* 马上会自动重来，别先报一次「失败」——那会让任务行闪一下红色、
          * 还会弹一条完成通知，用户以为下载挂了。 */
         cb = NULL;
+    } else if (resume_later) {
+        /* 同上：马上补起新一代，别闪红。状态要退回 PENDING，
+         * 否则 dlmgr_start 一看「RUNNING」就直接返回，什么都不会发生。 */
+        t->status = TASK_PENDING;
+        cb = NULL;
     }
     LeaveCriticalSection(&g_lock);
 
     if (cb) cb(tid, success, ud);
 
-    /* 两种「线程清空后重来」：下载中收到的重新开始、以及不支持 Range 的降级重下。
-     * 都走 dlmgr_restart 的「无活动线程」分支（删临时文件 + 重置 + 重新探测启动）。
-     * 必须放在锁外调用——dlmgr_restart 自己会拿锁，并且会再创建线程。 */
+    /* 三种「线程清空后重来」：下载中收到的重新开始、不支持 Range 的降级重下、
+     * 以及等待期间收到却被本代线程没接住的「继续」。
+     * 前两者都走 dlmgr_restart 的「无活动线程」分支（删临时文件 + 重置 + 重新探测启动），
+     * 第三者只走 dlmgr_start（保留分片与断点，不删临时文件）。
+     * 必须放在锁外调用——这两个 API 自己会拿锁，并且会再创建线程。 */
     if (relaunch || relaunch_single)
         dlmgr_restart(tid);
+    else if (resume_later)
+        dlmgr_start(tid);
     return 0;
 }
 
@@ -1228,6 +1246,26 @@ int dlmgr_start(int task_id) {
     DownloadTask *t = find_task(task_id);
     if (!t) { LeaveCriticalSection(&g_lock); return -1; }
     if (t->status == TASK_RUNNING) { LeaveCriticalSection(&g_lock); return 0; }
+
+    /* ⚠️ 上一代线程还没退干净时，绝不再起第二组监督线程。
+     * 最常见的触发路径就是「暂停 → 继续」：暂停只在下一个小块边界才生效，而下载线程
+     * 可能正卡在重试 Sleep（429 + Retry-After，最长可到 1 小时）或一个大请求里。
+     * 这时状态是 PAUSED，上面那句 RUNNING 判断挡不住，于是同一个任务出现两代线程同时
+     * 盯同一份 chunks[] 和同一个 .idmtmp；而改名要求文件句柄已经关闭，实测结果是
+     * 「保存文件（重命名）失败：文件被其他程序占用」—— 任务显示失败，字节却早就下完了
+     * （回归用例见 tools/engine_selftest.c 的 [25]）。
+     * 这里只做一件事：把状态从「暂停」改回来，旧线程在下一个块边界自己接着下；
+     * 万一它们已经因为上次暂停提前收工，resume_pending 会让旧组的监督线程退出时
+     * 补起新一代（见 start_task_threads 尾部的 resume_later）。 */
+    if (t->worker_alive > 0) {
+        t->status            = TASK_RUNNING;
+        t->resume_pending    = 1;
+        t->throttle_until_ms = 0;    /* 已经继续了，不该还挂着上一轮「N 秒后重试」 */
+        t->throttle_http     = 0;
+        apply_site_auth(t);          /* 与老路径一致：改过的代理/站点登录对「继续」也要生效 */
+        LeaveCriticalSection(&g_lock);
+        return 0;
+    }
 
     /* 是否需要先探测文件大小并计算分片。
      * ⚠️ 判据必须是「本任务还没分过段」而**不是**「状态是 PENDING」：
