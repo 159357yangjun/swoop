@@ -205,6 +205,7 @@ static int clean_outputs(const char *outdir)
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
                                    "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
+                                   "reuse.bin",
                                    "px1.bin", "px2.bin", "stall.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
@@ -1980,6 +1981,62 @@ int main(int argc, char **argv)
             snprintf(d29, sizeof(d29), "stall.bin 命中=%d（期望 ≥2：探测 + 取回）", hits);
             check("探测与下载都真的发出去了", hits >= 2, d29);
             utf8_delete(sp); utf8_delete(spt);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── [30] 分块下载必须复用连接，不能每 1MiB 重连一次 ──────────────
+     * download_one_chunk 每取一个 DOWNLOAD_BLOCK_SIZE（1MiB）小块就发一个请求
+     * （块边界要能暂停/取消，这个设计要留）。但若每个请求都新建一个 easy handle，
+     * 每块就得重做一遍 TCP 握手（HTTPS 再叠一次 TLS 握手 + 证书校验）：
+     * 12MiB ⇒ 12 次握手。慢链路看不出来，快链路上握手就是吞吐瓶颈，
+     * 而用户在界面上完全看不出"为什么慢"。
+     * 现在每个分片开一个 handle 复用到分片结束。判据用服务端两个计数：
+     *   conns    = TCP 连接数（Handler.setup 每连接只调一次）
+     *   big_reqs = /big.bin 的 GET 次数（12MiB ⇒ 每块一次）
+     * 刻意用 1 条线程，排除并发对计数的干扰。
+     * conns 允许是 0：更早的用例可能已经把到同一 host:port 的连接留在某条线程的
+     * handle 里 —— 那同样是"没有重连"，是期望结果而不是异常。 */
+    printf("\n[30] 分块下载复用连接（每 1MiB 重连 = 快链路上白等握手）\n");
+    {
+        char bu[512], path[MAX_PATH + 64], tmppath[MAX_PATH + 64];
+        snprintf(bu, sizeof(bu), "http://127.0.0.1:%d/big.bin", port);
+        snprintf(path, sizeof(path), "%s\\reuse.bin", outdir);
+        snprintf(tmppath, sizeof(tmppath), "%s.idmtmp", path);
+        utf8_delete(path); utf8_delete(tmppath);
+
+        server_reset(port);
+        int id = dlmgr_add(bu, outdir, "reuse.bin", 1, NULL, NULL, NULL, NULL);
+        check("任务创建成功（单线程，排除并发对计数的干扰）", id >= 0, "");
+        if (id >= 0) {
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 120000, &st, &dl);
+            int reqs  = server_stat(port, "big_reqs");
+            int conns = server_stat(port, "conns");
+            TaskInfo ti30;
+            int chunks = (dlmgr_get_task_info(id, &ti30) == 0) ? ti30.chunk_count : -1;
+            char d30[240];
+            /* 先证明"确实分了很多块"，否则 conns 小只是因为只发了一次请求 = 假阳性 */
+            snprintf(d30, sizeof(d30), "status=%d 块请求数=%d 连接数=%d", st, reqs, conns);
+            check("12MiB 确实被拆成多块请求（≥6 次，本用例真的在测复用）",
+                  st == 3 && reqs >= 6, d30);
+
+            /* 判据说的是设计性质：连接数跟着**分片数**走，而不是跟着块数走。
+               留 2 条余量是因为这台夹具的测试服务器自己就会在连续请求之间重连
+               （实测 curl 单进程连取 3 次也要 2 条连接），拿不到"1 条连接"这个理想值；
+               不复用的话连接数≈块数（12），远超这个上限。 */
+            int conn_cap = (chunks + 1) * 2;
+            snprintf(d30, sizeof(d30), "连接数=%d 块请求数=%d 分片数=%d（上限 %d）",
+                     conns, reqs, chunks, conn_cap);
+            check("连接跟着分片走而不是跟着块走（握手次数不再等于块数）",
+                  chunks > 0 && conns <= conn_cap, d30);
+
+            int mc = content_matches_pattern(path, 12LL * 1024 * 1024);
+            snprintf(d30, sizeof(d30), "内容比对=%d（1=逐字节一致）", mc);
+            check("复用连接之后落盘内容仍逐字节正确", mc == 1, d30);
+
+            utf8_delete(path); utf8_delete(tmppath);
             dlmgr_remove(id);
         }
     }

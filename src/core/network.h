@@ -101,6 +101,15 @@ NetResponse network_post(const char *url, const char *post_data,
 /* 进度回调：已下字节、总字节、userdata，返回非0中断下载 */
 typedef int (*NetProgressCb)(int64_t downloaded, int64_t total, void *userdata);
 
+/* 跨块复用的传输句柄（不透明，内部就是一个 libcurl easy handle）。
+ * 分片下载要每 1MiB 一个小请求才能在块边界响应暂停/取消，但独立请求意味着
+ * 每块重做一次 TCP/TLS 握手。调用方（一个分片线程）在分片开始时 open、
+ * 结束时 close，中间每块把同一个 handle 传进来 → 同一条连接用到底。
+ * ⚠️ 只在 open 它的那条线程上用，绝不跨线程共享（共享会需要锁，实测不安全）。 */
+typedef struct NetHandle NetHandle;
+NetHandle *net_handle_open(void);
+void       net_handle_close(NetHandle *h);
+
 typedef struct {
     const char    *url;
     const char    *save_path;      /* 写入的本地文件路径 */
@@ -116,6 +125,7 @@ typedef struct {
      * 回调在下载线程上、且不持有任何引擎锁的状态下调用。 */
     void (*notice_wait)(int http_code, long wait_ms, void *userdata);
     void  *notice_ud;
+    NetHandle *handle;             /* 可选：跨块复用连接；NULL = 本函数自己建/销（旧行为） */
 } NetDownloadTask;
 
 typedef struct {

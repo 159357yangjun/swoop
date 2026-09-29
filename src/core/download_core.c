@@ -710,6 +710,13 @@ static int download_one_chunk(DownloadTask *t, int cid) {
         return 1;
     }
 
+    /* 连接复用：本分片开一个 easy handle，块与块之间用它，分片结束才关。
+       分片下载必须每 1MiB 发一个请求才能在块边界响应暂停/取消，
+       但「每块一个新 handle」等于每块重做 TCP（+TLS）握手 —— 12MiB 就是 12 次。
+       handle 只属于这条分片线程，绝不跨线程传，所以不需要任何锁。
+       拿不到 handle 时 nh 为 NULL，下面原样退回旧行为，不影响正确性。 */
+    NetHandle *nh = net_handle_open();
+
     for (int r = 0; r <= max_retry; r++) {
         int any_failure = 0;
         int fatal_no_retry = 0;   /* 磁盘满/无权限这类确定性失败：重试不会变好 */
@@ -723,6 +730,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
             if (t->status == TASK_PAUSED || t->status == TASK_CANCELLED) {
                 LeaveCriticalSection(&g_lock);
                 fclose(fp);
+                net_handle_close(nh);
                 return 0;  /* 优雅退出，保留 c->downloaded 作为断点 */
             }
             LeaveCriticalSection(&g_lock);
@@ -741,6 +749,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
             nd.range_start = block_start;
             nd.range_end   = block_end;
             nd.opt         = &t->net_opts;   /* 本任务选项（含代理 + 站点认证） */
+            nd.handle      = nh;              /* 复用同一条连接 */
             nd.notice_wait = on_net_wait;    /* 429/503 的等待要在界面上看得见，见其注释 */
             nd.notice_ud   = t;
 
@@ -754,6 +763,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
                 LeaveCriticalSection(&g_lock);
                 TRACE("chunk %d: 服务器不支持 Range，降级为单连接重下", cid);
                 fclose(fp);
+                net_handle_close(nh);
                 return 0;
             }
             if (!result.success) {
@@ -867,6 +877,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
             c->done = 1;
             LeaveCriticalSection(&g_lock);
             fclose(fp);
+            net_handle_close(nh);
             return 0;
         }
 
@@ -897,6 +908,7 @@ static int download_one_chunk(DownloadTask *t, int cid) {
     if (cb_fn) cb_fn(cb_id, 0, cb_ud);
 
     fclose(fp);
+    net_handle_close(nh);
     return 1;
 }
 

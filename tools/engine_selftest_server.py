@@ -133,12 +133,16 @@ _lock = threading.Lock()
 _hits = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
          "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
          "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0,
-         "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0, "stall_hits": 0}
+         "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0, "stall_hits": 0,
+         # conns = 真正建立的 TCP 连接数（setup 每连接只调一次）；
+         # big_reqs = /big.bin 的 GET 次数（12MiB 分片下载 ⇒ 每 1MiB 一次）。
+         # 两者之比就是复用率：修好之前 conns ≈ big_reqs（每块重连一次）。
+         "conns": 0, "big_reqs": 0}
 _RESET_KEYS = {"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0,
                "norange_get": 0, "norange_range": 0, "retryafter_gets": 0,
                "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0,
                "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0,
-               "stall_hits": 0}
+               "stall_hits": 0, "conns": 0, "big_reqs": 0}
 
 
 def _enter():
@@ -158,6 +162,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):   # 安静一点
         pass
+
+    def setup(self):
+        """每个 TCP 连接只调一次 —— 用它数「握手了几次」。
+
+        keep-alive 下连接数远小于请求数是期望；反过来（两者几乎相等）
+        就说明客户端每取一块都重连一次。"""
+        BaseHTTPRequestHandler.setup(self)
+        with _lock:
+            _hits["conns"] += 1
 
     def _auth_ok(self) -> bool:
         got = self.headers.get("Authorization", "")
@@ -423,6 +436,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         data = FILES.get(path)
+        if path == "/big.bin" and data is not None:
+            with _lock:
+                _hits["big_reqs"] += 1
         if data is None:
             body = b"not found\n"
             self.send_response(404)

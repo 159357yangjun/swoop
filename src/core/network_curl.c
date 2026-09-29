@@ -270,6 +270,29 @@ static const char *http_user_reason(long code) {
     }
 }
 
+/* ── 跨块复用的 easy handle ────────────────────────────────────────
+ * 关键性质：curl_easy_reset() 只把选项恢复默认，**不清空 live connections /
+ * DNS 缓存 / 连接里的 TLS 会话**（libcurl 文档明确列出这些是保留项）。
+ * 所以每块 reset 一次再重新 setopt，既不会让选项串味，又能把连接留住。 */
+struct NetHandle {
+    CURL *curl;
+};
+
+NetHandle *net_handle_open(void) {
+    CURL *h = curl_easy_init();
+    if (!h) return NULL;
+    NetHandle *n = (NetHandle *)calloc(1, sizeof(*n));
+    if (!n) { curl_easy_cleanup(h); return NULL; }
+    n->curl = h;
+    return n;
+}
+
+void net_handle_close(NetHandle *n) {
+    if (!n) return;
+    if (n->curl) curl_easy_cleanup(n->curl);
+    free(n);
+}
+
 static size_t write_file_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     RangeCtx *c = (RangeCtx*)userdata;
     size_t total = size * nmemb;
@@ -477,7 +500,11 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
 
     for (int attempt = 0; attempt <= max_retry; attempt++) {
         mb_free(&hdr); mb_init(&hdr);   /* 每个 attempt 重置响应头缓冲（捕获 Retry-After） */
-        CURL *h = curl_easy_init();
+        /* 有外部 handle 就复用：连接留在它自己的缓存里，块与块之间不再重连。
+           reset 恢复默认选项但保留 live connection，避免上一块的选项串进这一块。 */
+        const int reused = (task->handle && task->handle->curl);
+        CURL *h = reused ? task->handle->curl : curl_easy_init();
+        if (reused) curl_easy_reset(h);
         if (!h) {
             strncpy(res.error_msg, "curl_easy_init 失败", sizeof(res.error_msg) - 1);
             break;
@@ -511,7 +538,7 @@ static NetDownloadResult range_write(const NetDownloadTask *task, FILE *fp) {
         long ver  = 0; curl_easy_getinfo(h, CURLINFO_HTTP_VERSION, &ver);
         proto_string(ver, res.http_version, sizeof(res.http_version));
         res.http_code = code;
-        curl_easy_cleanup(h);
+        if (!reused) curl_easy_cleanup(h);   /* 外部 handle 由 open 的一方负责关 */
 
         /* 服务器无视了 Range、直接回 200 + 整份文件，而我们要的是中段（range_start > 0）：
          * 此时按 range_start 定位再顺序写，等于把「从 0 开始的全量数据」灌进分片偏移处，
