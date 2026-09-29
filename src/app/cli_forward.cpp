@@ -74,9 +74,11 @@ static void reportFailure(const QString& reason, bool printToStderr)
 /* 一次往返，**绝不重发**。
  * 为什么不重发：CI 现场证明「服务端处理了、回话却落在客户端 3 秒死线之后」是真实存在的
  * 时序（服务端日志里的「排队 Nms」就是为它加的）。那种情况下重发等于让同一件事做两遍 ——
- * add 会下两份任务。这里曾经加过「幂等命令再问一次」，已撤回：它的根因是 GUI 线程被
- * 组件自愈的 tar 解压阻塞（见 utils/off_thread.cpp），用重发兜住只会把下一次冻结藏起来。
- * 现在慢会照实报出来，而不是被第二次尝试掩盖。 */
+ * add 会下两份任务。这里曾经加过「幂等命令再问一次」，已撤回（CI 观察窗也从 9s 退回 5s）：
+ * 一是它没治好那个红（带重发的那一轮第 13 步照样失败），二是它会把真问题盖住。
+ * 而现场数字（排队 51ms、处理 0ms，客户端却什么都没收到）指向"回话没推出去"而不是"慢"——
+ * 那条假设的判据在 utils/socket_drain.h 与日志字段 `送达=0/1` 上，本机还证不也证不伪。
+ * 总之：慢也好、丢也好，都要照实报出来，而不是被第二次尝试掩盖。 */
 ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
                            const QString& serverName)
 {
