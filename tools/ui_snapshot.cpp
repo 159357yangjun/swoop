@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QLocalSocket>
 #include <QLocalServer>
+#include <QEventLoop>
 #include <QTableWidget>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -986,6 +987,26 @@ int main(int argc, char** argv) {
             MainWindow w;
             QCoreApplication::processEvents();          /* singleShot(0) → IpcServer::start() */
 
+            /* 前置：等到管道真的可连，而不是"泵一圈事件循环就算起好了"。
+             * 一次 processEvents() 之后 listen 是否已经完成，取决于当轮机器负载 ——
+             * 在闸门里连跑十几个模式之后，第一次投递就有拿不到 ack 的观测（40 次里 1 次量级）。
+             * 测具自己不满足前置就该明说，不能让产品断言去背这个锅。 */
+            bool pipeReady = false;
+            for (int i = 0; i < 60 && !pipeReady; ++i) {
+                QLocalSocket g;
+                g.connectToServer(ipcServerName());
+                pipeReady = g.waitForConnected(200);
+                if (!pipeReady) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                    QThread::msleep(50);
+                }
+                g.abort();
+            }
+            if (!pipeReady) {
+                printf("[FAIL] 前置不成立：3 秒内 IPC 管道一直没开始监听（测具问题，不是产品断言）\n");
+                return 1;
+            }
+
             TaskListModel* model = w.findChild<TaskListModel*>();
             rowsBefore = model ? model->rowCount() : -1;
             {
@@ -1000,26 +1021,43 @@ int main(int argc, char** argv) {
                 std::atomic<bool> done { false };
                 QThread* t = QThread::create([&] {
                     QElapsedTimer et; et.start();
-                    QLocalSocket s;
-                    s.connectToServer(ipcServerName());
-                    if (s.waitForConnected(2000)) {
-                        QJsonObject req;
-                        req[QStringLiteral("command")] = QStringLiteral("activate");
-                        req[QStringLiteral("t0")] =
-                            static_cast<double>(QDateTime::currentMSecsSinceEpoch());
-                        s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
-                        s.flush();
-                        s.waitForBytesWritten(2000);
-                        if (wantReply && s.waitForReadyRead(5000)) {
-                            const QJsonObject resp =
-                                QJsonDocument::fromJson(s.readAll()).object();
-                            if (ackOut)
-                                *ackOut = resp.value(QStringLiteral("success")).toBool(false);
+                    {
+                        QLocalSocket s;
+                        s.connectToServer(ipcServerName());
+                        if (s.waitForConnected(2000)) {
+                            QJsonObject req;
+                            req[QStringLiteral("command")] = QStringLiteral("activate");
+                            req[QStringLiteral("t0")] =
+                                static_cast<double>(QDateTime::currentMSecsSinceEpoch());
+                            s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                            s.flush();
+                            if (wantReply) {
+                                /* ⚠️ 这里必须起一个**本线程的**事件循环，不能用
+                                   waitForBytesWritten + waitForReadyRead 了事：
+                                   Windows 上 QLocalSocket 的写出走 QWindowsPipeWriter
+                                   （异步，需要事件循环才真正把字节推进管道）。
+                                   这条线程没有循环 ⇒ 实测约每隔几轮第一条请求的字节
+                                   根本没出去，5 秒后 ack=0/1 —— 红的是测具，不是产品。 */
+                                QEventLoop loop;
+                                QTimer deadline;
+                                deadline.setSingleShot(true);
+                                QObject::connect(&s, &QLocalSocket::readyRead,
+                                                 &loop, &QEventLoop::quit);
+                                QObject::connect(&deadline, &QTimer::timeout,
+                                                 &loop, &QEventLoop::quit);
+                                deadline.start(5000);
+                                loop.exec();
+                                const QJsonObject resp =
+                                    QJsonDocument::fromJson(s.readAll()).object();
+                                if (ackOut)
+                                    *ackOut = resp.value(QStringLiteral("success")).toBool(false);
+                                s.disconnectFromServer();
+                            } else {
+                                s.abort();      // 故意不等回话就走（模拟超时离开的客户端）
+                            }
+                        } else if (ackOut) {
+                            *ackOut = false;
                         }
-                        if (wantReply) s.disconnectFromServer();
-                        else s.abort();
-                    } else if (ackOut) {
-                        *ackOut = false;
                     }
                     if (msOut) *msOut = et.elapsed();
                     done = true;
