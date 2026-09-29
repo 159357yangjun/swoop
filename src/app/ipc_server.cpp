@@ -277,6 +277,13 @@ void IpcServer::handleClient(QLocalSocket* client)
     } else if (command == "activate") {
         // 第二次启动程序时不再创建另一套下载引擎/IPC server，而是把现有主窗口恢复到前台。
         // IpcServer 的 parent 在 MainWindow 中创建，因此这里可安全恢复其顶层窗口。
+        /* ⚠️ 这个分支必须是**幂等**的：同一个请求被投两次（客户端超时后重发、
+         * 用户连点两次图标、副实例没等到回话就退出）不得产生第二份副作用。
+         * 这条不是约定俗成的推理，是被断言的：`IDM_ACTIVATE_PROBE`
+         * （tools/ui_snapshot.cpp）连投两次、各自读到 success，再断言
+         * 任务列表行数与引擎任务数不变、窗口状态不变。
+         * 想在这里加"顺手做点别的"（建任务、弹通知、记一次数、发一个信号）之前先看那条测试，
+         * 加了就会红 —— 那正是它存在的理由。 */
         QWidget* window = qobject_cast<QWidget*>(parent());
         if (window) {
             window->showNormal();
