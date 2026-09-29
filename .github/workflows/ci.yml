@@ -412,10 +412,14 @@ jobs:
                           ((Get-Date) - $t0).TotalSeconds, $losers[0].Id)
 
             # 稳态普通二次启动必须激活已有窗口并迅速退出。
+            # 窗口 5s → 9s：副实例对幂等命令（activate）现在最多问两次、
+            # 每次给赢家 3 秒回话（90ac237 那次红就是赢家「处理了但回话晚于 3 秒」）。
+            # 判据一个字没松 —— 仍然必须复用现有实例并以 0 退出；只是不再把
+            # 「它终究会答」的那次成功误判成失败。健康路径仍然是毫秒级。
             $third = Start-Logged 'third'
             $t3 = Get-Date
             try {
-              if (-not $third.Proc.WaitForExit(5000)) {
+              if (-not $third.Proc.WaitForExit(9000)) {
                 Fail-WithLogs 'steady-state IDM Next launch did not reuse the existing GUI instance' `
                               @($third; $byId[$winner.Id])
               }
@@ -423,7 +427,7 @@ jobs:
                 Fail-WithLogs "steady-state IDM Next launch exited with code $($third.Proc.ExitCode)" `
                               @($third; $byId[$winner.Id])
               }
-              Add-Timing '稳态二次启动（上限 5s）' `
+              Add-Timing '稳态二次启动（上限 9s）' `
                          ('{0:N1}s / 退出码 {1}' -f ((Get-Date) - $t3).TotalSeconds,
                           $third.Proc.ExitCode)
             }

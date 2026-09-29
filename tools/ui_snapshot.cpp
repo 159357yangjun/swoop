@@ -804,11 +804,13 @@ int main(int argc, char** argv) {
      *      这是「本机根本没开 GUI」的正常首启路径，这时候唠叨一句「IPC 失败」
      *      等于给每一次正常用法都加一条假报警。
      *   ② 连上、送出、不回话  → Failure，stderr 要说得出「没有回话」，
-     *      并且服务端只看到**一次**连接 —— 旧代码与此处注释的契约是「绝不重发」，
-     *      因为 add 重发就是下两遍。以后谁想靠「加个重试」糊弄这个红，这条先红。
+     *      并且服务端只看到**一次**连接 —— add 有副作用，重发就是下两遍。
      *   ③ 对方回了失败        → Failure，stderr 是**对方给的原因**，而不是「没有回话」。
      *   ④ 对方回了成功        → Success，stderr 干净。
-     * ②③④ 都要求 stderr 非空或有指定内容，所以「把报错删掉」会立刻红。 */
+     *   ⑤ activate 第一次装不响 → 再问一次并拿到 Success（连接数=2）：
+     *      CI 实测到赢家「已经处理了、回话却落在副实例 3 秒放弃之后」，
+     *      幂等命令因此可以再问；②与⑤合起来把「谁可以重发」这条界线钉住。
+     * ②③④⑤ 都要求 stderr 非空或有指定内容，所以「把报错删掉」会立刻红。 */
     if (qEnvironmentVariableIsSet("IDM_FORWARD_PROBE")) {
         const QString base = QStringLiteral("idm-forward-probe-%1")
                                  .arg(QCoreApplication::applicationPid());
@@ -838,18 +840,22 @@ int main(int argc, char** argv) {
         int bad = 0;
         const QStringList addArgs { QStringLiteral("add"), QStringLiteral("http://example.com/a.bin") };
         const QStringList helpArgs { QStringLiteral("help") };
+        const QStringList actArgs { QStringLiteral("activate") };
 
         struct Case {
             QString name;
             QString pipe;                 // 空串 = 用探针的假服务
             QStringList args;
-            int mode;                     // 0=silent 1=reject 2=ok
-            QString want;                 // stderr 必须包含（NotConnected 用 "<empty>"）
+            int mode;                     // 0=silent 1=reject 2=ok 3=装不响、第二次才回话
+            QString want;                 // stderr 必须包含（"<empty>" = 必须为空）
             ForwardResult wantResult;
+            int wantConns;                // 服务端应当看到几次连接
         };
 
         /* 假服务：newConnection 里按当前 mode 决定「不回话 / 回失败 / 回成功」，
-           并数着连接次数。silent 模式必须把 socket 留着不删，否则对端立刻看到断开。 */
+           并数着连接次数。silent 模式必须把 socket 留着不删，否则对端立刻看到断开。
+           mode 3 复现 CI 实测到的那种现场：请求**被处理了**，但第一次的回话
+           落在客户端 3 秒放弃之后 —— 这里用「第一条连接故意装不响」代表它。 */
         QLocalServer::removeServer(base);
         QLocalServer srv;
         if (!srv.listen(base)) {
@@ -863,9 +869,9 @@ int main(int argc, char** argv) {
             while (srv.hasPendingConnections()) {
                 QLocalSocket* c = srv.nextPendingConnection();
                 if (!c) continue;
-                ++conns;
+                const int seen = ++conns;
                 const int m = mode.load();
-                if (m == 0) { held.append(c); continue; }        // 连上但不回话
+                if (m == 0 || (m == 3 && seen == 1)) { held.append(c); continue; }   // 连上但不回话
                 QJsonObject resp;
                 if (m == 1) {
                     resp[QStringLiteral("success")] = false;
@@ -881,10 +887,11 @@ int main(int argc, char** argv) {
         });
 
         const Case cases[] = {
-            { u8"没人监听 ⇒ NotConnected，且不往 stderr 吐任何字", base + "-absent", helpArgs, 0, "<empty>", ForwardResult::NotConnected },
-            { u8"连上但不回话 ⇒ Failure，stderr 说得出「没有回话」",   QString(),        addArgs,  0, u8"没有回话", ForwardResult::Failure },
-            { u8"对方回了失败 ⇒ stderr 用对方给的原因",                QString(),        helpArgs, 1, u8"任务不存在", ForwardResult::Failure },
-            { u8"对方回了成功 ⇒ Success 且 stderr 干净",               QString(),        helpArgs, 2, "<empty>", ForwardResult::Success },
+            { u8"没人监听 ⇒ NotConnected，且不往 stderr 吐任何字", base + "-absent", helpArgs, 0, "<empty>", ForwardResult::NotConnected, 0 },
+            { u8"连上但不回话 ⇒ Failure，stderr 说得出「没有回话」",   QString(),        addArgs,  0, u8"没有回话", ForwardResult::Failure, 1 },
+            { u8"对方回了失败 ⇒ stderr 用对方给的原因",                QString(),        helpArgs, 1, u8"任务不存在", ForwardResult::Failure, 1 },
+            { u8"对方回了成功 ⇒ Success 且 stderr 干净",               QString(),        helpArgs, 2, "<empty>", ForwardResult::Success, 1 },
+            { u8"activate 第一次装不响 ⇒ 再问一次并成功（幂等才敢重发）", QString(),      actArgs,  3, "<empty>", ForwardResult::Success, 2 },
         };
 
         for (const Case& c : cases) {
@@ -902,11 +909,11 @@ int main(int argc, char** argv) {
                 done = true;
             });
             worker->start();
-            for (int i = 0; i < 1200 && !done.load(); ++i) {
+            for (int i = 0; i < 2400 && !done.load(); ++i) {
                 QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
                 QThread::msleep(5);
             }
-            worker->wait(8000);
+            worker->wait(20000);
             delete worker;
             const QString err = cap.finish();
 
@@ -915,16 +922,18 @@ int main(int argc, char** argv) {
                 ok = ok && err.trimmed().isEmpty();
             else
                 ok = ok && err.contains(c.want);
-            /* 「绝不重发」只对连上了之后的路有效；① 压根没连上，服务端当然没计数。 */
+            /* 连接次数就是「重发策略」的读数：
+               add 必须 1 次（对方可能已经处理过，重发就是下两遍），
+               activate 在第一次装不响之后必须问到第 2 次。 */
             const int seen = conns.load();
-            const bool connOk = c.pipe.isEmpty() ? (seen == 1) : (seen == 0);
-            ok = ok && connOk;
+            ok = ok && (seen == c.wantConns);
             if (!ok) ++bad;
 
             printf("%s %s\n", ok ? "[PASS]" : "[FAIL]", c.name.toUtf8().constData());
             if (!ok) {
-                printf("       结果=%d 期望=%d 服务端看到连接=%d stderr=%d 字节: %s\n",
+                printf("       结果=%d 期望=%d 服务端看到连接=%d（期望 %d）stderr=%d 字节: %s\n",
                        static_cast<int>(result), static_cast<int>(c.wantResult), seen,
+                       c.wantConns,
                        int(err.size()),
                        err.toUtf8().constData());
             }
