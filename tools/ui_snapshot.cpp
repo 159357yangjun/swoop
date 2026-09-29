@@ -1024,8 +1024,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false, ok6 = false;
+        bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false, ok6 = false, ok7 = false;
         bool firstAbandonedAck = false;
+        bool okIdleAck = false;
+        qint64 idleBehindMs = -1;
         int stressAcks = 0, stressTotal = 0;
         qint64 roundTripMs = -1;
         int rowsBefore = -1, rowsAfter = -1;
@@ -1160,10 +1162,52 @@ int main(int argc, char** argv) {
             }
             ok6 = (stressAcks == stressTotal);
 
+            /* ── D 段：一条"连上但一个字节都不发、也不断开"的客户端 ──
+             * 这是 handleClient 那个 10×100ms 有界读循环的直接测量。循环跑在 GUI 线程上，
+             * 而 onNewConnection 里是 `while (hasPendingConnections()) handleClient(...)`
+             * ⇒ 一条空转的连接能让 GUI 线程整秒不回事件循环，后面每条连接都跟着排队。
+             * 真实场景：浏览器扩展的原生消息轮询、被杀掉的副实例留下的半开连接。
+             *
+             * ⚠️ 第一版我把"空转连接之后再问一次、量它的往返"，测出来 14ms —— 那是测具错了：
+             * 阻塞整个发生在某一次 processEvents() 调用**内部**，我那 150ms 的等待循环
+             * 正好把这一秒吞在自己的计时之外，量到的是"事后"。改测直接量：
+             * 事件循环单轮的最大耗时（= GUI 线程被独占多久）。 */
+            std::atomic<bool> idleClosed { false };
+            QThread* idle = QThread::create([&] {
+                QLocalSocket s;
+                s.connectToServer(ipcServerName());
+                if (s.waitForConnected(3000)) {
+                    QThread::msleep(2500);      // 连上就什么都不发，2.5s 后才走
+                    s.abort();
+                }
+                idleClosed = true;
+            });
+            idle->start();
+            QElapsedTimer idleWindow;
+            idleWindow.start();
+            qint64 worstLoopMs = 0;
+            const qint64 sampleStart = idleWindow.elapsed();
+            while (idleWindow.elapsed() - sampleStart < 2000 && !idleClosed.load()) {
+                QElapsedTimer one;
+                one.start();
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                worstLoopMs = qMax(worstLoopMs, one.elapsed());
+            }
+            while (!idleClosed.load()) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+            idle->wait(5000);
+            delete idle;
+            okIdleAck = (worstLoopMs > 0);      // 采到样本才算这条测试跑过
+            idleBehindMs = worstLoopMs;
+
             printf("[act] A 段两次 ack=%d/%d 模型行数 %d→%d 引擎任务数 %d→%d | "
-                   "B 段放弃后往返=%lldms（需 <1500） | C 段 ack %d/%d\n",
+                   "B 段放弃后往返=%lldms（需 <1500） | C 段 ack %d/%d | "
+                   "D 段 事件循环单轮最长=%lldms（需 <500）\n",
                    ack1, ack2, rowsBefore, rowsAfter, engBefore, engAfter,
-                   (long long)roundTripMs, stressAcks, stressTotal);
+                   (long long)roundTripMs, stressAcks, stressTotal,
+                   (long long)worstLoopMs);
         }
 
         printf("%s activate 连投两次都被服务端确认处理（success=true×2，"
@@ -1178,7 +1222,10 @@ int main(int argc, char** argv) {
                (ok5 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
         printf("%s 连续投递 %d 次全部拿到回话（%d/%d；回话被丢掉就在这里红）\n",
                ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
-        return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+        ok7 = (okIdleAck && idleBehindMs >= 0 && idleBehindMs < 500);
+        printf("%s 一条空转连接占着 GUI 线程时，后面那条正常请求仍 <500ms 拿到回话（实测 %lldms）\n",
+               ok7 ? "[PASS]" : "[FAIL]", (long long)idleBehindMs);
+        return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
                 && roundTripMs >= 0 && roundTripMs < 1500) ? 0 : 1;
     }
 
