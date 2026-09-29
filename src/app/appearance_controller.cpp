@@ -58,11 +58,28 @@ void AppearanceController::applyZoom()
     if (m_toolBar) m_toolBar->setIconSize(QSize(iconSz, iconSz));
 }
 
+void AppearanceController::setZoomLevel(int level)
+{
+    /* 启动时从设置里恢复。夹到 [ZOOM_MIN, ZOOM_MAX]：配置是明文可改的，
+       越界值不该让字体算出负字号。 */
+    if (level > ZOOM_MAX) level = ZOOM_MAX;
+    if (level < ZOOM_MIN) level = ZOOM_MIN;
+    m_zoomLevel = level;
+}
+
+void AppearanceController::saveZoom()
+{
+    if (!m_settings) return;
+    m_settings->setViewZoom(m_zoomLevel);
+    m_settings->save();
+}
+
 void AppearanceController::zoomIn()
 {
     if (m_zoomLevel < ZOOM_MAX) {
         ++m_zoomLevel;
         applyZoom();
+        saveZoom();
         Log::info(QStringLiteral("视图放大: %1pt").arg(BASE_FONT_PT + m_zoomLevel));
     }
 }
@@ -72,6 +89,7 @@ void AppearanceController::zoomOut()
     if (m_zoomLevel > ZOOM_MIN) {
         --m_zoomLevel;
         applyZoom();
+        saveZoom();
         Log::info(QStringLiteral("视图缩小: %1pt").arg(BASE_FONT_PT + m_zoomLevel));
     }
 }
@@ -80,5 +98,6 @@ void AppearanceController::zoomReset()
 {
     m_zoomLevel = 0;
     applyZoom();
+    saveZoom();
     Log::info(QStringLiteral("视图缩放重置"));
 }

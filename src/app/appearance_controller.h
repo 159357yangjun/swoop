@@ -23,12 +23,17 @@ public:
     void applyTheme();   // 依据设置加载 light/dark QSS 并同步自绘委托 + 触发重绘
     void applyZoom();    // 依据缩放级数应用全局字体 + 工具栏图标尺寸
 
+    // 启动时从设置恢复缩放级数（越界会被夹到合法区间）；不触发 applyZoom()。
+    void setZoomLevel(int level);
+    int  zoomLevel() const { return m_zoomLevel; }
+
 public slots:
     void zoomIn();
     void zoomOut();
     void zoomReset();
 
 private:
+    void saveZoom();   // 把当前级数写回设置并落盘
     Settings* m_settings = nullptr;
     QToolBar* m_toolBar = nullptr;
     std::function<void()> m_repaintSink;

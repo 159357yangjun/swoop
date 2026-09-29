@@ -36,6 +36,7 @@ void Settings::load()
         m_trafficMode = (m_speedLimitKBps == 0) ? 0 : -1;  // 0=自动, 非0=自定义
     m_theme          = s.value(QStringLiteral("theme"), QStringLiteral("light")).toString();
     m_groupMode      = s.value(QStringLiteral("groupMode"), 0).toInt();
+    m_viewZoom       = s.value(QStringLiteral("viewZoom"), 0).toInt();
     m_clipboardMonitor = s.value(QStringLiteral("clipboardMonitor"), true).toBool();
     m_closeToTray    = s.value(QStringLiteral("closeToTray"), false).toBool();
     m_autoDownloadYtDlp = s.value(QStringLiteral("autoDownloadYtDlp"), true).toBool();
@@ -105,6 +106,7 @@ void Settings::save() const
     s.setValue(QStringLiteral("http2Enabled"), m_http2Enabled);
     s.setValue(QStringLiteral("trafficMode"), m_trafficMode);
     s.setValue(QStringLiteral("groupMode"), m_groupMode);
+    s.setValue(QStringLiteral("viewZoom"), m_viewZoom);
     s.setValue(QStringLiteral("theme"), m_theme);
     s.setValue(QStringLiteral("clipboardMonitor"), m_clipboardMonitor);
     s.setValue(QStringLiteral("closeToTray"), m_closeToTray);

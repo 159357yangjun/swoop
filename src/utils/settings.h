@@ -114,6 +114,10 @@ public:
     int groupMode() const { return m_groupMode; }
     void setGroupMode(int m) { m_groupMode = m; }
 
+    // 任务列表视图缩放级数（每级 ±1pt，界面上是「视图 → 放大/缩小/重置缩放」）
+    int viewZoom() const { return m_viewZoom; }
+    void setViewZoom(int z) { m_viewZoom = z; }
+
     int connectionsPerServer() const { return m_connectionsPerServer; }
     void setConnectionsPerServer(int n) { m_connectionsPerServer = n; }
 
@@ -171,6 +175,7 @@ private:
     int         m_speedLimitKBps = 0;       // 0 = 不限速
     int         m_trafficMode    = 0;       // 流量档位：0=自动 1=轻量 2=中等 3=重量 -1=自定义
     int         m_groupMode      = 0;       // 任务列表分组：0=不分组 1=按类型 2=按队列
+    int         m_viewZoom       = 0;       // 视图缩放级数（每级 ±1pt）
     bool        m_http2Enabled   = true;    // 启用 HTTP/2 协商（HTTPS/ALPN 自动提速）
     int         m_connectionsPerServer = 8; // 每服务器连接数：封顶单个任务并发到同一主机的连接数
                                             // （引擎侧与 maxThreads 取较小值生效，见 effective_threads()）

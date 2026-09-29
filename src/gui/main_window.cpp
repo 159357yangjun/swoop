@@ -345,6 +345,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_categoryTree) m_categoryTree->viewport()->update();
     });
     m_appearanceController->applyTheme();  // 根据设置应用 QSS 主题样式
+    // 恢复上次的视图缩放。以前 m_zoomLevel 只是组件里的一个成员，从不落盘也不读取，
+    // 于是「视图→放大」调好的字号一重启就回到默认（与 groupMode 当年同一个毛病）。
+    // 必须在 m_settings.load()（本函数更早处）之后，且在 applyZoom() 之前。
+    m_appearanceController->setZoomLevel(m_settings.viewZoom());
     m_appearanceController->applyZoom();   // 应用初始视图缩放（字体 + 工具栏图标）
     applyNetworkProxy();  // 应用代理（站点抓取器等 Qt 网络）
 

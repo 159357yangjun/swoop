@@ -40,6 +40,8 @@
 #include <QDateTime>
 #include <QStatusBar>
 #include <QToolButton>
+#include <QToolBar>
+#include <QFont>
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -811,6 +813,69 @@ int main(int argc, char** argv) {
 
         QNetworkProxy::setApplicationProxy(prev);   // 还原，别把探针的代理留在进程里
         return (okOn && okSocks && okOff && okNoHost && okZero) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_ZOOM_PROBE=1 ──
+     * 「视图 → 放大/缩小/重置缩放」以前只改组件内存里的 m_zoomLevel，
+     * 既不写盘也不读盘 → 用户调好的字号一重启就回到默认。
+     * 这里断言的是**用户看得见的量**：全局字号点值（13+级数）与工具栏图标边长（22+2×级数），
+     * 以及点一次缩放之后设置里确实换了值（新 Settings 实例从盘上读回来）。 */
+    if (qEnvironmentVariableIsSet("IDM_ZOOM_PROBE")) {
+        auto fontPt  = [] { return qApp->font().pointSize(); };
+        auto stored  = [] { Settings s; s.load(); return s.viewZoom(); };
+        auto toolbar = [](MainWindow& w, int* hits) {
+            *hits = 0;
+            QToolBar* found = nullptr;
+            for (QToolBar* b : w.findChildren<QToolBar*>()) { found = b; (*hits)++; }
+            return *hits == 1 ? found : nullptr;
+        };
+
+        { Settings s; s.setViewZoom(3); s.save(); }
+        int zoomAfterRestore = -99, iconAfterRestore = -99;
+        int zoomAfterOut = -99, zoomAfterReset = -99, zoomClamp = -99;
+        {
+            /* 只建一个 MainWindow：同一进程里建第二个会再跑一次 dlmgr_load_state，
+               那是本项目踩过的「任务成对重复」坑。越界那条改用同一个实例走
+               setZoomLevel()+applyZoom()——正是构造函数用的那两步。 */
+            MainWindow w;
+            AppearanceController* ac = w.findChild<AppearanceController*>();
+            int hits = 0;
+            QToolBar* bar = toolbar(w, &hits);
+            if (!ac || !bar) {
+                printf("[FAIL] 没找到 AppearanceController 或工具栏（命中 %d 个工具栏），"
+                       "本探针其余判据无意义\n", hits);
+                return 1;
+            }
+            zoomAfterRestore = fontPt();
+            iconAfterRestore = bar->iconSize().height();
+
+            ac->zoomOut();                     /* 3 → 2，必须同时改字号并落盘 */
+            zoomAfterOut = stored();
+            ac->zoomReset();                   /* → 0 */
+            zoomAfterReset = stored();
+
+            { Settings s; s.setViewZoom(99); s.save(); }
+            ac->setZoomLevel(stored());        /* 越界配置必须被夹住 */
+            ac->applyZoom();
+            zoomClamp = fontPt();
+        }
+        { Settings s; s.setViewZoom(0); s.save(); }   /* 还原，别把探针字号留下 */
+
+        const bool okRestore = (zoomAfterRestore == 16 && iconAfterRestore == 28);
+        const bool okPersist = (zoomAfterOut == 2);
+        const bool okReset   = (zoomAfterReset == 0);
+        const bool okClamp   = (zoomClamp == 19);      /* 夹到 ZOOM_MAX=6 → 13+6 */
+
+        printf("[zoom] 恢复后 字号=%d 图标=%d | zoomOut 后存储=%d | 重置后存储=%d | 99 越界后字号=%d\n",
+               zoomAfterRestore, iconAfterRestore, zoomAfterOut, zoomAfterReset, zoomClamp);
+        printf("%s 启动时按设置恢复字号与工具栏图标（存 3 → 16pt / 28px）\n",
+               okRestore ? "[PASS]" : "[FAIL]");
+        printf("%s 点「缩小」后新级数落盘（3→2，新实例读得到）\n",
+               okPersist ? "[PASS]" : "[FAIL]");
+        printf("%s 点「重置缩放」后落回 0\n", okReset ? "[PASS]" : "[FAIL]");
+        printf("%s 越界的 viewZoom=99 被夹到上限，不会算出离谱字号\n",
+               okClamp ? "[PASS]" : "[FAIL]");
+        return (okRestore && okPersist && okReset && okClamp) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_TEXT_PROBE=1 ──
