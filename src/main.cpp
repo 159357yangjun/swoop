@@ -30,6 +30,22 @@
 static const char* IPC_SERVER_NAME = "idm-next-ipc";
 #ifdef Q_OS_WIN
 static const wchar_t* GUI_MUTEX_NAME = L"Local\\IDMNext.Gui.SingleInstance.v1";
+
+/* 等「另一个正在启动的 GUI」就绪的预算，两个 waitForGui 调用点共用。
+   数字来自 CI 第 11 步自己报回来的实测计时：同一份代码两轮分别收敛于 5.7s 与 8.7s
+   —— 共享 runner 上 Qt 应用冷启动本身就有 ±3s 抖动。这段时间里副实例拿到的
+   一直是 NotConnected（赢家的 listen 已推迟到事件循环第一轮，见 main_window.cpp），
+   所以预算必须盖住**赢家整个启动**，而不是只盖住某一次 IPC 往返。
+   原来写死 10s，对着 8.7s 只剩 1.3s 余量 → 慢一点就误判"没有 GUI"并退出 1，
+   那就是 108abde / 4cd1f57 两次间歇性红。上限受 CI 观察窗（80×250ms=20s）约束，
+   取 15s：既盖住抖动，又不会拖到观察窗之外、换成一种更难查的红。 */
+static const DWORD GUI_READY_WAIT_MS = 15000;
+
+/* 把这个预算和 CI 观察窗的契约钉在编译期：第 11 步只观察 80×250ms = 20s，
+   副实例必须在那之前给出退出码；否则断言会退化成
+   「只有一个进程退出」这种看不出根因的红。留 4s 给进程自身启动开销。 */
+static_assert(GUI_READY_WAIT_MS + 4000 < 20000,
+              "GUI_READY_WAIT_MS 必须留在 CI 第 11 步的 20s 观察窗之内");
 #endif
 
 enum class ForwardResult {
@@ -185,7 +201,7 @@ int main(int argc, char* argv[])
         // GUI 可能刚拿到 mutex、尚未建立 local socket。此时等待它就绪，不能启动独立引擎
         // 与正在启动的 GUI 同时读写任务状态。
         if (guiMutexExists()) {
-            forwarded = waitForGui(cliArgs, true, 10000);
+            forwarded = waitForGui(cliArgs, true, GUI_READY_WAIT_MS);
             if (forwarded != ForwardResult::NotConnected)
                 return forwarded == ForwardResult::Success ? 0 : 1;
             QTextStream(stderr) << QStringLiteral("IDM Next GUI 正在启动，但 IPC 未能就绪。\n");
@@ -241,7 +257,7 @@ int main(int argc, char* argv[])
     const bool anotherGuiStarting = (GetLastError() == ERROR_ALREADY_EXISTS);
 
     if (anotherGuiStarting) {
-        ForwardResult forwarded = waitForGui(forwardArgs, false, 10000);
+        ForwardResult forwarded = waitForGui(forwardArgs, false, GUI_READY_WAIT_MS);
         CloseHandle(guiMutex);
         if (forwarded != ForwardResult::NotConnected)
             return forwarded == ForwardResult::Success ? 0 : 1;
@@ -251,8 +267,9 @@ int main(int argc, char* argv[])
          *   · 对用户也没有信息量——双击图标两次后弹一句"IPC 未能就绪"，他只能点确定。
          * 注意：这条分支不是 CI 那次红的原因（它报的是退出码 1，说明走的是 Failure，
          * 也就是连上了但没回话，见上面 waitForReadyRead 的注释）；这里改的是
-         * 「10 秒压根连不上」那条路，退出码保持非 0，让调用方照样能察觉。 */
-        Log::error(QStringLiteral("已有 IDM Next 正在启动，但 IPC 在 10 秒内未就绪；本次启动放弃。"));
+         * 「压根连不上」那条路，退出码保持非 0，让调用方照样能察觉。 */
+        Log::error(QStringLiteral("已有 IDM Next 正在启动，但 IPC 在 %1 秒内未就绪；本次启动放弃。")
+                       .arg(GUI_READY_WAIT_MS / 1000));
         QTextStream(stderr) << QStringLiteral("IDM Next: 另一个实例正在启动，但 IPC 未能就绪。\n");
         return 1;
     }
