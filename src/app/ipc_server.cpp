@@ -1,6 +1,7 @@
 #include "ipc_server.h"
 #include "cli_forward.h"
 #include "logger.h"
+#include "socket_drain.h"
 #include "task_controller.h"
 #include "task_list_model.h"
 #include "download_manager.h"
@@ -315,12 +316,9 @@ void IpcServer::handleClient(QLocalSocket* client)
     const bool clientStillHere = (client->state() == QLocalSocket::ConnectedState);
     client->write(respData);
     client->flush();
-    qint64 flushedFor = 0;
-    while (client->bytesToWrite() > 0 && flushedFor < 2000) {
-        client->waitForBytesWritten(100);
-        flushedFor += 100;
-    }
-    const bool delivered = (client->bytesToWrite() == 0);
+    /* 推到没有待发字节才允许关 —— 判据与机制都在 utils/socket_drain.h，
+     * 由 IDM_FLUSH_PROBE 用 2MB 回话做双向证明（旧写法必丢、这个必达）。 */
+    const bool delivered = drainSocketBeforeClose(client, 2000);
     client->disconnectFromServer();
     client->deleteLater();
 

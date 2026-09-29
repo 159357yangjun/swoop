@@ -136,6 +136,8 @@ set(UTILS_SOURCES
     src/utils/tool_probe.cpp
     src/utils/off_thread.cpp
     src/utils/off_thread.h
+    src/utils/socket_drain.cpp
+    src/utils/socket_drain.h
 )
 
 # ── 共享静态库：聚合应用层源码，供 idm-next 与可选 ui_snapshot 复用 ──
