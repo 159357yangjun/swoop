@@ -205,7 +205,7 @@ static int clean_outputs(const char *outdir)
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
                                    "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
-                                   "reuse.bin",
+                                   "reuse.bin", "cap0.bin", "cap1.bin", "cap2.bin", "cap3.bin",
                                    "px1.bin", "px2.bin", "stall.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
     int leftover = 0;
@@ -2039,6 +2039,129 @@ int main(int argc, char **argv)
             utf8_delete(path); utf8_delete(tmppath);
             dlmgr_remove(id);
         }
+    }
+
+    /* ── [31] 「同时下载的任务数」必须有读者 ───────────────────────────
+     * 这个设置以前在引擎里**只有一处写入**（dlmgr_set_config 存进 g_cfg），无人读。
+     * 于是「全部开始」（托盘走 dlmgr_start_all、CLI 走 `start all`）把列表里所有待下载
+     * 一次性全拉起来：上限设 2、四个任务就是 4 个同时跑，每个只分到约 1/4 带宽 ——
+     * 用户看到的正是「设置了没用，而且越点越慢」。
+     * 现在 start_all 起满上限，其余进等待表，由先结束的任务腾出空位时补起。
+     * 拆两个场景，因为有一种越界只有场景 A 测得到：
+     *   A. 上限=1、三个任务：一个结束时会同时有**两个**候选在等位。补位如果不给
+     *      自己刚交出去的那个记账（那时 worker_alive 还是 0、status 还是 PENDING，
+     *      running 计数看不见它），一轮就把整张表放行，峰值直接变成 3。
+     *   B. 上限=2、四个任务，暂停其中排队的一个：验「等待空位」那个数字是真话。 */
+    printf("\n[31] 「同时下载的任务数」真的约束「全部开始」\n");
+    {
+        char cu[512];
+        snprintf(cu, sizeof(cu), "http://127.0.0.1:%d/big.bin", port);
+        char d31[300];
+        DownloadConfig cfg = dlmgr_get_config();
+
+        /* ── A. 上限 1：一次只放行一个 ── */
+        enum { A_LIMIT = 1, A_N = 3 };
+        int  aids[A_N];
+        char apaths[A_N][MAX_PATH + 64];
+        int  acreated = 0;
+        for (int k = 0; k < A_N; k++) {
+            char nm[32], tmpp[MAX_PATH + 80];
+            snprintf(nm, sizeof(nm), "cap%d.bin", k);
+            snprintf(apaths[k], sizeof(apaths[k]), "%s\%s", outdir, nm);
+            snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", apaths[k]);
+            utf8_delete(apaths[k]);
+            utf8_delete(tmpp);
+            /* 每任务 1 条线程：让「同时占位的个数」就等于「同时下载的任务数」，
+               不把每任务多连接这层变量混进来。 */
+            int id = dlmgr_add(cu, outdir, nm, 1, NULL, NULL, NULL, NULL);
+            if (id >= 0) aids[acreated++] = id;
+        }
+        snprintf(d31, sizeof(d31), "创建成功=%d/%d", acreated, A_N);
+        check("三个 12MiB 单线程任务创建成功（场景 A 前提）", acreated == A_N, d31);
+
+        cfg.max_concurrent = A_LIMIT;
+        dlmgr_set_config(&cfg);
+        int astart = (acreated == A_N) ? dlmgr_start_all() : -1;
+        int adefer = dlmgr_deferred_count();
+        snprintf(d31, sizeof(d31), "start_all 起走=%d（期望 1），等待表=%d（期望 2）", astart, adefer);
+        check("上限 1 时「全部开始」只起走 1 个，其余进等待表而不是被丢弃",
+              astart == A_LIMIT && adefer == A_N - A_LIMIT, d31);
+
+        int apeak = 0, adone = 0;
+        for (int waited = 0; waited < 90000 && !adone; waited += 20) {
+            int live = 0, settled = 0;
+            for (int k = 0; k < acreated; k++) {
+                TaskInfo ti;
+                if (dlmgr_get_task_info(aids[k], &ti) != 0) { settled++; continue; }
+                if (ti.status == 1) live++;
+                if (ti.status == 3 || ti.status == 4 || ti.status == 5) settled++;
+            }
+            if (live > apeak) apeak = live;
+            if (settled == acreated) adone = 1;
+            Sleep(20);
+        }
+        snprintf(d31, sizeof(d31), "峰值同时下载中=%d（上限 1），三个全部落定=%d", apeak, adone);
+        check("补位一次只放行一个（不给刚交出去的那个记账就会在这里红）",
+              apeak <= A_LIMIT && adone, d31);
+
+        int aok = 1;
+        for (int k = 0; k < acreated; k++) {
+            TaskInfo ti;
+            int st = (dlmgr_get_task_info(aids[k], &ti) == 0) ? ti.status : -1;
+            if (st != 3 || !content_matches_pattern(apaths[k], 12LL * 1024 * 1024)) aok = 0;
+        }
+        snprintf(d31, sizeof(d31), "三个全部 status=3 且逐字节一致=%d", aok);
+        check("等待表里的任务后来被逐个补起并下完（限制没变成丢任务）", aok, d31);
+
+        for (int k = 0; k < acreated; k++) {
+            char tmpp[MAX_PATH + 80];
+            snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", apaths[k]);
+            utf8_delete(apaths[k]);
+            utf8_delete(tmpp);
+            dlmgr_remove(aids[k]);
+        }
+
+        /* ── B. 上限 2 且暂停一个排队任务：等待数量要报真话 ──
+         * 只看「有没有被拉起来」测不到 dlmgr_pause 里那句摘表（status 检查本来就
+         * 挡住了补位）。摘表兜住的是报出去的数字：状态栏与 CLI 的「另有 N 个在等
+         * 空位」读的就是它 —— 用户刚按下暂停的任务还被算在里面，就是谎报队列。 */
+        enum { B_LIMIT = 2, B_N = 4 };
+        int  bids[B_N];
+        int  bcreated = 0;
+        for (int k = 0; k < B_N; k++) {
+            char nm[32], fp[MAX_PATH + 64], tmpp[MAX_PATH + 80];
+            snprintf(nm, sizeof(nm), "cap%d.bin", k);      /* A 已把这些文件删净 */
+            snprintf(fp, sizeof(fp), "%s\%s", outdir, nm);
+            snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", fp);
+            utf8_delete(fp);
+            utf8_delete(tmpp);
+            int id = dlmgr_add(cu, outdir, nm, 1, NULL, NULL, NULL, NULL);
+            if (id >= 0) bids[bcreated++] = id;
+        }
+        cfg.max_concurrent = B_LIMIT;
+        dlmgr_set_config(&cfg);
+        int bstart = (bcreated == B_N) ? dlmgr_start_all() : -1;
+        int bdefer = dlmgr_deferred_count();
+        if (bcreated == B_N) dlmgr_pause(bids[B_N - 1]);
+        int bdefer2 = dlmgr_deferred_count();
+        snprintf(d31, sizeof(d31), "起走=%d（期望 2），等待=%d（期望 2），暂停一个排队的后等待=%d（期望 1）",
+                 bstart, bdefer, bdefer2);
+        check("排队任务被暂停后不再算进「等待空位」的数量",
+              bstart == B_LIMIT && bdefer == B_N - B_LIMIT && bdefer2 == B_N - B_LIMIT - 1, d31);
+
+        for (int k = 0; k < bcreated; k++) {
+            char fp[MAX_PATH + 64], tmpp[MAX_PATH + 80];
+            dlmgr_cancel(bids[k]);
+            snprintf(fp, sizeof(fp), "%s\cap%d.bin", outdir, k);
+            snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", fp);
+            utf8_delete(fp);
+            utf8_delete(tmpp);
+            dlmgr_remove(bids[k]);
+        }
+        /* 恢复引擎默认的并发档，别把这次的上限留给后面的用例 */
+        cfg = dlmgr_get_config();
+        cfg.max_concurrent = 3;
+        dlmgr_set_config(&cfg);
     }
 
     dlmgr_destroy();

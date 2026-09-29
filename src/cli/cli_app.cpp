@@ -149,8 +149,15 @@ int CliApp::cmdStart(const QStringList& args)
 {
     if (args.size() >= 2 && args[1] == QStringLiteral("all")) {
         int k = dlmgr_start_all();
+        const int deferred = dlmgr_deferred_count();
         QTextStream out(stdout);
-        out << QStringLiteral("已启动 %1 个任务\n").arg(k);
+        /* 报清楚「这次真的起了几个」和「还有几个在等空位」——
+         * 上限生效以后 start all 不再等于全部开跑，只说 k 会让人以为剩下的丢了。 */
+        out << QStringLiteral("已启动 %1 个任务%2\n")
+                   .arg(k)
+                   .arg(deferred > 0
+                            ? QStringLiteral("，另有 %1 个在等「同时下载的任务数」空位").arg(deferred)
+                            : QString());
         out.flush();
         return 0;
     }

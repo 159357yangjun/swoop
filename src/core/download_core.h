@@ -275,8 +275,13 @@ DownloadConfig dlmgr_get_config(void);
 /* 更新配置（运行时生效） */
 void dlmgr_set_config(const DownloadConfig *cfg);
 
-/* 开始所有排队/暂停中的任务，返回已启动数量 */
+/* 开始所有排队/暂停中的任务，返回**这次真正起走**的数量。
+ * 受配置里的「同时下载的任务数」约束：起满上限后剩下的进等待表，
+ * 由先结束的任务腾出空位时自动补起（不再是一次全开）。 */
 int  dlmgr_start_all(void);
+
+/* 有多少任务因为上面那个上限正在等空位（-1 = 引擎未初始化）。 */
+int  dlmgr_deferred_count(void);
 
 /* 暂停所有正在运行的任务，返回已暂停数量 */
 int  dlmgr_stop_all(void);

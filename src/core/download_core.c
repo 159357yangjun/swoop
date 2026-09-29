@@ -48,6 +48,11 @@ typedef DWORD (WINAPI *LPTHREAD_START_ROUTINE)(LPVOID);
  * ───────────────────────────────────── */
 static DownloadTask    g_tasks[MAX_TASKS];
 static int             g_task_count = 0;
+/* 「同时下载的任务数」的等待表：谁被上限挡住，就记在这里等空位。
+ * 只有**用户明确要「全部开始」**才会进这张表，开机恢复出来的 PENDING 不会
+ * 被擅自拉起 —— 那是另一回事（他还没说要下）。 */
+static int             g_wanted[MAX_TASKS];
+static int             g_wanted_count = 0;
 static DownloadConfig  g_cfg;
 static CRITICAL_SECTION g_lock;
 
@@ -532,6 +537,89 @@ static DownloadTask *find_task(int task_id) {
     return NULL;
 }
 
+/* ── 「同时下载的任务数」的读者 ────────────────────────
+ * 这个设置以前只有一处**写入**（dlmgr_set_config 把值存进 g_cfg），全引擎无人读，
+ * 所以「全部开始」（托盘菜单走 dlmgr_start_all、CLI 走 `start all`）会把列表里
+ * 所有待下载一次性全拉起来：上限设 2、8 个任务就是 8 个同时跑，每个只有 1/4 的带宽，
+ * 看起来就像设置没生效 + 下载变慢。现在它有两个读者：start_all 起满上限，
+ * 剩下的进 g_wanted；任何任务到达终态时由监督线程收尾处补起下一个。
+ * 以下三个 helper 都要求**调用者已持有 g_lock**。 */
+static int concurrent_limit(void) {
+    /* <=0 视为不限：设置页的 QSpinBox 范围是 1..16，正常拿不到 0，
+     * 只有手改配置文件才会有 —— 那种情况下不该把下载全卡死。 */
+    return g_cfg.max_concurrent > 0 ? g_cfg.max_concurrent : 0;
+}
+
+static int running_count_locked(void) {
+    int n = 0;
+    for (int i = 0; i < g_task_count; i++) {
+        /* 占一个并发位的判据用 worker_alive，不用 status：
+         * start_task_threads 开头第一件事就是 worker_alive++（见该函数注释），
+         * 而 status 要等它跑完 HEAD 探测才写 RUNNING —— 那段窗口里如果只认 RUNNING，
+         * 一次 start_all 会把刚交出去的几个数漏掉，上限就形同虚设。
+         * RUNNING 也一并算：dlmgr_start 的 worker_alive 守卫会先把状态改回 RUNNING，
+         * 线程要下一轮才起，这时它也确实占着位。 */
+        if (g_tasks[i].status == TASK_RUNNING || g_tasks[i].worker_alive > 0) n++;
+    }
+    return n;
+}
+
+static void want_add_locked(int task_id) {
+    for (int i = 0; i < g_wanted_count; i++)
+        if (g_wanted[i] == task_id) return;
+    if (g_wanted_count < MAX_TASKS) g_wanted[g_wanted_count++] = task_id;
+}
+
+static void want_del_locked(int task_id) {
+    for (int i = 0; i < g_wanted_count; i++) {
+        if (g_wanted[i] == task_id) {
+            memmove(&g_wanted[i], &g_wanted[i + 1],
+                    (size_t)(g_wanted_count - i - 1) * sizeof(int));
+            g_wanted_count--;
+            return;
+        }
+    }
+}
+
+/* 有空位就把排队表里最早的那个补上去。必须**在锁外**调用：
+ * dlmgr_start 自己会拿锁，还会 CreateThread。
+ * 表里凡是「已经不是 PENDING」的条目一律摘掉 —— 任务被用户暂停/取消/删除，
+ * 或者已经被 GUI 的队列调度器抢先起走了，都不该再由这里重复决定。 */
+static void advance_wanted(void) {
+    if (g_shutdown || !g_initialized) return;
+    /* 本次已经交出去几个。必须自己记账：dlmgr_start 只是建好线程就返回，
+     * 而 worker_alive 要等新线程真跑起来才 ++、status 要等它做完 HEAD 探测才写 RUNNING，
+     * 所以刚交出去的那个在这一轮里 running_count_locked() 还看不见 ——
+     * 不记这个数，一次补位会把整张表全放行，上限形同虚设。 */
+    int mine = 0;
+    for (;;) {
+        int next = -1;
+        EnterCriticalSection(&g_lock);
+        if (g_wanted_count == 0) { LeaveCriticalSection(&g_lock); return; }
+        const int limit = concurrent_limit();
+        if (limit > 0 && running_count_locked() + mine >= limit) {
+            LeaveCriticalSection(&g_lock); return;
+        }
+        for (int w = 0; w < g_wanted_count; ) {
+            const int id = g_wanted[w];
+            DownloadTask* t = find_task(id);
+            /* 只认「还在队列里、且一个线程都没起」的：worker_alive>0 说明它已经在起
+             * （status 仍是 PENDING，要等探测完才写 RUNNING），那种不该重复交下去。 */
+            if (!t || t->status != TASK_PENDING || t->worker_alive > 0) {
+                want_del_locked(id);
+                continue;
+            }
+            next = id;
+            want_del_locked(id);
+            break;
+        }
+        LeaveCriticalSection(&g_lock);
+        if (next < 0) return;
+        if (dlmgr_start(next) != 0) continue;   /* 起不来就试下一个，别整条卡住 */
+        mine++;
+    }
+}
+
 /* 就地摘除某个槽位（memmove 保序）。**调用者必须已持有 g_lock**，
  * 且必须确认该槽位没有活动线程（worker_alive == 0）——有线程时挪动槽位会让
  * 线程手里的指针指向别的任务。 */
@@ -541,6 +629,10 @@ static int detach_slot(int task_id) {
             memmove(&g_tasks[i], &g_tasks[i + 1],
                     (size_t)(g_task_count - i - 1) * sizeof(DownloadTask));
             g_task_count--;
+            /* 任务没了，它排的那个数也该从等待表里撤走 ——
+             * 否则表里留着一个不存在的 id，advance 时才第一次发现，
+             * 白等一轮，而且 dlmgr_deferred_count 会虚报。 */
+            want_del_locked(task_id);
             return 1;
         }
     }
@@ -1184,6 +1276,11 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
         dlmgr_restart(tid);
     else if (resume_later)
         dlmgr_start(tid);
+    /* 腾出来的并发位要让给排队里的下一个 —— 「同时下载的任务数」在这里有读者。
+     * 放在最后：relaunch/resume 会立刻把同一个槽占回去，那时补新的就超了上限。
+     * 三个终态都要补：失败也算「这一个不再占位」，否则队列会卡死在半路。 */
+    else if (st == TASK_COMPLETED || st == TASK_FAILED || st == TASK_CANCELLED)
+        advance_wanted();
     return 0;
 }
 
@@ -1195,6 +1292,7 @@ int dlmgr_init(const DownloadConfig *cfg) {
     if (g_initialized) return 0;
     memset(g_tasks, 0, sizeof(g_tasks));
     g_task_count = 0;
+    g_wanted_count = 0;   /* 上一轮的等待表不能带进新引擎 */
     g_shutdown = 0;   /* 允许 init → destroy → init 循环复用 */
     if (cfg) g_cfg = *cfg;
     else {
@@ -1391,6 +1489,9 @@ int dlmgr_pause(int task_id) {
          * 底层那一觉可能还在睡，但界面上说的必须是当前真话。 */
         t->throttle_until_ms = 0;
         t->throttle_http     = 0;
+        /* 暂停也要把它从「等空位」的表里摘掉：否则空位一到，
+         * 引擎会把用户刚刚按下暂停的任务又自作主张地拉起来。 */
+        want_del_locked(t->task_id);
     }
     LeaveCriticalSection(&g_lock);
     return t ? 0 : -1;
@@ -1401,6 +1502,7 @@ int dlmgr_cancel(int task_id) {
     DownloadTask *t = find_task(task_id);
     if (t) {
         t->status = TASK_CANCELLED;
+        want_del_locked(t->task_id);      /* 取消了就不该再被补位补起来 */
         /* 临时文件只能在没有活动线程时删：有线程还开着这个文件时 DeleteFileW 会因
          * 占用而失败（fopen 不共享删除权限），于是「取消」看着成功、.idmtmp 却留着。
          * 有线程的情况交给 start_task_threads 收尾时删。 */
@@ -1811,6 +1913,7 @@ static void reset_all_tasks(void) {
     EnterCriticalSection(&g_lock);
     memset(g_tasks, 0, sizeof(g_tasks));
     g_task_count = 0;
+    g_wanted_count = 0;
     g_next_id = 1;      /* 新任务从 1 重新编号，与清空后的空队列保持一致 */
     LeaveCriticalSection(&g_lock);
 }
@@ -2055,14 +2158,40 @@ void dlmgr_set_config(const DownloadConfig *cfg) {
 /* 开始所有排队中的任务 */
 int dlmgr_start_all(void) {
     if (!g_initialized) return -1;
-    int started = 0;
+
+    /* 持锁只做「点名」：谁这次能起、谁进等待表。dlmgr_start 自己在锁里拿锁
+     * 并 CreateThread，所以必须在锁外交付。 */
+    int ids[MAX_TASKS];
+    int n = 0;
+    EnterCriticalSection(&g_lock);
+    const int limit = concurrent_limit();
+    int running = running_count_locked();
     for (int i = 0; i < g_task_count; i++) {
-        if (g_tasks[i].status == TASK_PENDING || g_tasks[i].status == TASK_PAUSED) {
-            dlmgr_start(g_tasks[i].task_id);
-            started++;
+        const int st = g_tasks[i].status;
+        if (st != TASK_PENDING && st != TASK_PAUSED) continue;
+        if (limit > 0 && running >= limit) {
+            want_add_locked(g_tasks[i].task_id);      /* 等空位，不是一次全开 */
+            continue;
         }
+        want_del_locked(g_tasks[i].task_id);          /* 之前被挡过，现在亲手起 */
+        if (n < MAX_TASKS) ids[n++] = g_tasks[i].task_id;
+        running++;
     }
+    LeaveCriticalSection(&g_lock);
+
+    int started = 0;
+    for (int k = 0; k < n; k++)
+        if (dlmgr_start(ids[k]) == 0) started++;
     return started;
+}
+
+/* 被「同时下载的任务数」挡在门外、正在等空位的任务数（给 CLI 报话用）。 */
+int dlmgr_deferred_count(void) {
+    if (!g_initialized) return -1;
+    EnterCriticalSection(&g_lock);
+    const int n = g_wanted_count;
+    LeaveCriticalSection(&g_lock);
+    return n;
 }
 
 /* 停止所有运行中的任务 */
@@ -2075,6 +2204,11 @@ int dlmgr_stop_all(void) {
             stopped++;
         }
     }
+    /* 「全部暂停」之后不能还有人在等空位 —— 空位一腾出来就被自动补起来，
+     * 用户看到的就是「按了全部暂停，任务却又开始跑」。 */
+    EnterCriticalSection(&g_lock);
+    g_wanted_count = 0;
+    LeaveCriticalSection(&g_lock);
     return stopped;
 }
 
