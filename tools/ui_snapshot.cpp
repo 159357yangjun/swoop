@@ -950,12 +950,19 @@ int main(int argc, char** argv) {
     }
 
     /* ── 诊断模式：IDM_ACTIVATE_PROBE=1 ──
-     * 回答两个问题，都不靠推理：
-     *  (a) activate 被处理**两次**（客户端超时后重发）到底落不落下双份副作用；
-     *  (b) 第一个客户端「连上、送出、不等回话就走」时，服务端要把 GUI 线程钉住多久 ——
-     *      这决定重发是不是真能救回来（要是第二个请求得排在死管道写不上的 2 秒后面，
-     *      那病根在服务端，不在客户端的 3 秒死线）。
-     * 判据全部取"用户看得见的量"：任务数、还在听的实例数、窗口可见性、往返耗时。 */
+     * 被测契约：**activate 重复投递不产生第二次副作用**（幂等）。
+     * 这条是被断言的，不是被推理的 —— 上一轮我只在对话里说过"它是置状态不是累加"，
+     * 那等于没有；而且第一版探针有个真漏洞：第一条客户端故意不等回话就断开，
+     * 于是"确实被处理了两次"从没被证明，测到的其实可能是"投递两次、只处理一次"。
+     *
+     * 现在分两段，各测各的：
+     *   A 段（幂等）：两条客户端**各自读到 success** ⇒ 服务端确实把这条命令做了两遍；
+     *      然后断言模型行数、引擎任务数、窗口可见/正常态与做之前一致
+     *      ⇒ 两遍没有攒成双份（不建任务、不多开实例、不把窗口弄成别的状态）。
+     *   B 段（排队代价）：第一条"连上、送出、不等回话就走"，量第二条的往返 ——
+     *      回答"服务端一旦被拖住，后面的请求要不要排队"，也就是**为什么重发救不了这类 bug**。
+     *      M8 变异（在 activate 处理里 msleep(2000)）把它打红：往返 5ms → 2021ms。
+     * 所有判据取"用户看得见的量"，不读内部计数器。 */
     if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")) {
         {
             QLocalSocket guard;
@@ -970,9 +977,11 @@ int main(int argc, char** argv) {
         }
 
         bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false;
-        qint64 roundTripMs = -1, abandonedMs = -1;
+        bool firstAbandonedAck = false;
+        qint64 roundTripMs = -1;
         int rowsBefore = -1, rowsAfter = -1;
         int engBefore = -1, engAfter = -1;
+
         {
             MainWindow w;
             QCoreApplication::processEvents();          /* singleShot(0) → IpcServer::start() */
@@ -984,104 +993,92 @@ int main(int argc, char** argv) {
                 engBefore = dlmgr_list(ids0, 64);
             }
 
-            /* 第一个客户端：连上、送出 activate、**不读回话就断开**（= 客户端 3 秒超时后的样子） */
-            std::atomic<bool> firstDone { false };
-            QThread* c1 = QThread::create([&firstDone] {
-                QElapsedTimer et; et.start();
-                QLocalSocket s;
-                s.connectToServer(ipcServerName());
-                if (s.waitForConnected(1000)) {
-                    QJsonObject req;
-                    req[QStringLiteral("command")] = QStringLiteral("activate");
-                    req[QStringLiteral("t0")] =
-                        static_cast<double>(QDateTime::currentMSecsSinceEpoch());
-                    s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
-                    s.flush();
-                    s.waitForBytesWritten(1000);
-                }
-                s.abort();                       /* 立刻走，留一个写不出去的回复在服务端 */
-                firstDone = true;
-            });
-            c1->start();
-            QElapsedTimer outer; outer.start();
-            while (!firstDone.load() && outer.elapsed() < 5000) {
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-                QThread::msleep(5);
-            }
-            c1->wait(3000); delete c1;
-            abandonedMs = outer.elapsed();       /* 服务端把这条死连接伺候完用了多久 */
-
-            /* 第二个客户端：正常地问一次 activate，量它拿到回话要多久 */
-            std::atomic<bool> secondDone { false };
-            QThread* c2 = QThread::create([&] {
-                QElapsedTimer et; et.start();
-                QLocalSocket s;
-                s.connectToServer(ipcServerName());
-                if (s.waitForConnected(2000)) {
-                    QJsonObject req;
-                    req[QStringLiteral("command")] = QStringLiteral("activate");
-                    req[QStringLiteral("t0")] =
-                        static_cast<double>(QDateTime::currentMSecsSinceEpoch());
-                    s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
-                    s.flush();
-                    if (s.waitForBytesWritten(2000) && s.waitForReadyRead(5000)) {
-                        const QJsonObject resp = QJsonDocument::fromJson(s.readAll()).object();
-                        roundTripMs = et.elapsed();
-                        ok1 = resp.value(QStringLiteral("success")).toBool(false);
+            /* 在另一条线程上问一次 activate，主线程只管泵事件 ——
+               同线程既当服务端又当客户端会让"字节能不能推进去"取决于测具自己的时序。
+               wantReply=false 时故意不等回话就 abort，模拟超时走掉的客户端。 */
+            auto askActivate = [&](bool wantReply, qint64* msOut, bool* ackOut) {
+                std::atomic<bool> done { false };
+                QThread* t = QThread::create([&] {
+                    QElapsedTimer et; et.start();
+                    QLocalSocket s;
+                    s.connectToServer(ipcServerName());
+                    if (s.waitForConnected(2000)) {
+                        QJsonObject req;
+                        req[QStringLiteral("command")] = QStringLiteral("activate");
+                        req[QStringLiteral("t0")] =
+                            static_cast<double>(QDateTime::currentMSecsSinceEpoch());
+                        s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                        s.flush();
+                        s.waitForBytesWritten(2000);
+                        if (wantReply && s.waitForReadyRead(5000)) {
+                            const QJsonObject resp =
+                                QJsonDocument::fromJson(s.readAll()).object();
+                            if (ackOut)
+                                *ackOut = resp.value(QStringLiteral("success")).toBool(false);
+                        }
+                        if (wantReply) s.disconnectFromServer();
+                        else s.abort();
+                    } else if (ackOut) {
+                        *ackOut = false;
                     }
-                    s.disconnectFromServer();
+                    if (msOut) *msOut = et.elapsed();
+                    done = true;
+                });
+                t->start();
+                while (!done.load()) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                    QThread::msleep(5);
                 }
-                secondDone = true;
-            });
-            c2->start();
-            while (!secondDone.load()) {
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-                QThread::msleep(5);
-            }
-            c2->wait(8000); delete c2;
-            /* 再让服务端把第二条伺候干净（回话写在泵里完成） */
-            for (int i = 0; i < 20; ++i) QCoreApplication::processEvents();
+                t->wait(8000);
+                delete t;
+                for (int i = 0; i < 20; ++i) QCoreApplication::processEvents();
+            };
+
+            /* ── A 段：两次都要拿到 success，才谈得上"处理了两遍" ── */
+            bool ack1 = false, ack2 = false;
+            askActivate(true,  nullptr, &ack1);
+            askActivate(true,  nullptr, &ack2);
+            ok1 = ack1 && ack2;
 
             rowsAfter = model ? model->rowCount() : -2;
-
-            /* 两次 activate 之后：①还能不能连上（服务端没被搞坏）②任务数没变 */
-            QLocalSocket third;
-            third.connectToServer(ipcServerName());
-            ok2 = third.waitForConnected(1500);
-            third.disconnectFromServer();
-
-            ok3 = (rowsAfter == rowsBefore);
-
-            /* 窗口可见性/正常态：两次激活的结果应与一次相同（这里只验"没被搞坏"，
-               离屏平台不模拟真实前台，故不断言"在最前面"） */
-            w.showNormal();
-            ok4 = w.isVisible() && !w.isMinimized() && !w.isMaximized();
-
-            /* 幂等性的另一半：重发不能多出一个任务。
-               判据取"前后之差"而不是"等于 0" —— 隔离数据目录里可能本来就存着上轮
-               恢复出来的任务（并发探针就会留 5 个），断言绝对值测的就不是本行了。 */
             {
                 int ids[64] = {0};
                 engAfter = dlmgr_list(ids, 64);
             }
-            ok5 = (engAfter == engBefore);
+            /* 判据取前后之差，不是绝对值：隔离数据目录里本来就可能存着上轮恢复的
+               任务（并发探针会留 5 个），断绝对值测的就不是"重复投递"这件事。 */
+            ok2 = (rowsAfter == rowsBefore && engAfter == engBefore);
 
-            printf("[act] 第一条死连接伺候用时=%lldms  第二条往返=%lldms  "
-                   "模型行数 %d→%d  引擎任务数 %d→%d\n",
-                   (long long)abandonedMs, (long long)roundTripMs,
-                   rowsBefore, rowsAfter, engBefore, engAfter);
+            /* 两次激活之后窗口仍是"可见 + 正常态"：证明第二遍没有把它改成
+               最小化/最大化/隐藏之类的别的状态。 */
+            ok3 = w.isVisible() && !w.isMinimized() && !w.isMaximized();
+
+            /* 服务端没被搞坏：还能连（也没人会去起第二套实例） */
+            QLocalSocket probe;
+            probe.connectToServer(ipcServerName());
+            ok4 = probe.waitForConnected(1500);
+            probe.disconnectFromServer();
+
+            /* ── B 段：先留一条"不等回话"的连接，再量正常请求的往返 ── */
+            askActivate(false, nullptr, &firstAbandonedAck);
+            askActivate(true, &roundTripMs, &ok5);
+
+            printf("[act] A 段两次 ack=%d/%d 模型行数 %d→%d 引擎任务数 %d→%d | "
+                   "B 段放弃后往返=%lldms（需 <1500）\n",
+                   ack1, ack2, rowsBefore, rowsAfter, engBefore, engAfter,
+                   (long long)roundTripMs);
         }
 
-        printf("%s 放弃回话的第一个客户端之后，第二次 activate 仍拿到 success=true\n",
-               ok1 ? "[PASS]" : "[FAIL]");
-        printf("%s 第二次请求的往返 < 1500ms（服务端没被死连接的写拖住；否则病根在服务端）\n",
-               (ok1 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
-        printf("%s 两次 activate 不新增任务（模型行数与引擎任务数都不变）\n",
-               (ok3 && ok5) ? "[PASS]" : "[FAIL]");
-        printf("%s 两次 activate 之后管道仍可被新客户端连上（没有第二套实例、服务没坏）\n",
+        printf("%s activate 连投两次都被服务端确认处理（success=true×2，"
+               "否则下条「没双份副作用」就是假的）\n", ok1 ? "[PASS]" : "[FAIL]");
+        printf("%s 重复投递不产生第二次副作用（任务列表行数与引擎任务数都不变）\n",
                ok2 ? "[PASS]" : "[FAIL]");
-        printf("%s 激活是状态设置而非累加：窗口仍可见且处于正常态\n",
+        printf("%s 第二遍投递没有把窗口改成别的状态（仍可见、正常态）\n",
+               ok3 ? "[PASS]" : "[FAIL]");
+        printf("%s 两次投递之后 IPC 服务仍可用（没有第二套实例、服务没坏）\n",
                ok4 ? "[PASS]" : "[FAIL]");
+        printf("%s 有一条不等回话的死连接在前，后续请求的往返仍 <1500ms（服务端没被拖住）\n",
+               (ok5 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
         return (ok1 && ok2 && ok3 && ok4 && ok5
                 && roundTripMs >= 0 && roundTripMs < 1500) ? 0 : 1;
     }
