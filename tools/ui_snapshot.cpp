@@ -1023,8 +1023,9 @@ int main(int argc, char** argv) {
             }
         }
 
-        bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false;
+        bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false, ok6 = false;
         bool firstAbandonedAck = false;
+        int stressAcks = 0, stressTotal = 0;
         qint64 roundTripMs = -1;
         int rowsBefore = -1, rowsAfter = -1;
         int engBefore = -1, engAfter = -1;
@@ -1147,10 +1148,21 @@ int main(int argc, char** argv) {
             askActivate(false, nullptr, &firstAbandonedAck);
             askActivate(true, &roundTripMs, &ok5);
 
+            /* ── C 段：连续投递 N 次必须全部拿到 ack ──
+             * 丢回话是概率性的（CI 上几轮碰上一次），投两次量不出来；
+             * 这一段把它变成一个可数的比率。默认 50 次，IDM_ACT_STRESS 可调大做 A/B。 */
+            stressTotal = qEnvironmentVariable("IDM_ACT_STRESS", "50").toInt();
+            for (int k = 0; k < stressTotal; ++k) {
+                bool a = false;
+                askActivate(true, nullptr, &a);
+                if (a) ++stressAcks;
+            }
+            ok6 = (stressAcks == stressTotal);
+
             printf("[act] A 段两次 ack=%d/%d 模型行数 %d→%d 引擎任务数 %d→%d | "
-                   "B 段放弃后往返=%lldms（需 <1500）\n",
+                   "B 段放弃后往返=%lldms（需 <1500） | C 段 ack %d/%d\n",
                    ack1, ack2, rowsBefore, rowsAfter, engBefore, engAfter,
-                   (long long)roundTripMs);
+                   (long long)roundTripMs, stressAcks, stressTotal);
         }
 
         printf("%s activate 连投两次都被服务端确认处理（success=true×2，"
@@ -1163,7 +1175,9 @@ int main(int argc, char** argv) {
                ok4 ? "[PASS]" : "[FAIL]");
         printf("%s 有一条不等回话的死连接在前，后续请求的往返仍 <1500ms（服务端没被拖住）\n",
                (ok5 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
-        return (ok1 && ok2 && ok3 && ok4 && ok5
+        printf("%s 连续投递 %d 次全部拿到回话（%d/%d；回话被丢掉就在这里红）\n",
+               ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
+        return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6
                 && roundTripMs >= 0 && roundTripMs < 1500) ? 0 : 1;
     }
 
