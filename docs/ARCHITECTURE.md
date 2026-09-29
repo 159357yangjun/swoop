@@ -317,3 +317,38 @@ bash --noprofile --norc -eo pipefail <UI probes 步骤原文>
    这台机器上没有账本可查，我只知道自己这轮之后不再写。
 3. `--match` 的判定用同名数为主：同一份代码连跑两次，部分面板的 PNG 也会有噪声差异，
    所以"逐字节不同"不能当"界面变了"的证据（本轮实测：与当前渲染同名 14、逐字节同 6）。
+
+### 2026-09-29（再续）— IPC「没回话」不是慢，是回话被丢掉；更正我上一轮的判断
+
+上一段加的取证字段第一次跑就推翻了我自己的结论。CI 第 13 步（`2e54031`）同一份 annotation 里：
+```
+服务端  IPC 请求: activate → 成功（排队 51ms，处理 0ms，…）
+副实例  IPC 转发失败: 已连上运行中的实例并送出 39 字节，3 秒内没有回话
+```
+51ms 就答了，客户端却没收到 ⇒ 不是"服务端慢"，是"答了没发出去"。
+机制：Windows 上 QLocalSocket 写出异步（QWindowsPipeWriter），旧代码 `write → flush →
+waitForBytesWritten(2000)` **只等一次**就 `disconnectFromServer()` + `deleteLater()`，
+没推完的字节随 socket 一起没了。改法：循环推到 `bytesToWrite()==0`（上限 2s），
+并新增 `送达=0/1` 字段作为这条机制的现行信号（`b0562b7`）。
+
+同时更正我写进记忆里的一句话：上一轮我根据本机观测说
+"`waitForBytesWritten` 返回值不能当交付证明，实测客户端读到回话时它仍返回 false" ——
+因果说反了：返回 false 正是没推完，而"没推完就销毁"就是丢回话的方式。
+
+测具侧配套（`2a30f83`）：`IDM_ACTIVATE_PROBE` 加 C 段，连续投递默认 50 次
+（`IDM_ACT_STRESS` 可调）必须全部拿到回话 —— 概率性丢失量两次是量不出来的。
+
+验证输出：
+```
+IDM_ACT_STRESS=300 ./build/ui_snapshot.exe   # 修好的服务端
+  → [act] … C 段 ack 300/300，rc=0
+IDM_ACT_STRESS=300 ./build/ui_snapshot.exe   # 临时退回旧写法（只等一次）
+  → [act] … C 段 ack 300/300 ×2 轮，rc=0
+bash --noprofile --norc -eo pipefail <UI probes 步骤原文>
+  → 13 模式全绿，共 51 条断言；引擎自测 142/0
+```
+
+仍然没证明的：**本地复现不出这个丢弃**（旧写法两轮各 300 次，600/600 全 ack）。
+所以这条是按"CI 现场数字 + Qt 异步写出语义"做的收窄，不是被变异证明过的定论。
+判据留在 `送达` 字段上：CI 再出现 `送达=0` 就是同一条路；
+若全是 `送达=1` 而客户端仍超时，就得转去查客户端收包侧。
