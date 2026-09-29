@@ -16,6 +16,8 @@ CMakeFiles/
 
 # ── 打包产物（installer/ 只版本化脚本本身）──────────
 installer/dist/
+# 便携 ZIP + SHA256SUMS：86MB 二进制，一次 git add -A 就把它们提交进库了
+installer/out/
 installer/*.exe
 
 # ── 运行时产生的临时文件 ───────────────────────────
