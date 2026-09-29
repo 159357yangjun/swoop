@@ -1,4 +1,5 @@
 #include "ipc_server.h"
+#include "cli_forward.h"
 #include "logger.h"
 #include "task_controller.h"
 #include "task_list_model.h"
@@ -11,7 +12,9 @@
 #include <QJsonObject>
 #include <QWidget>
 
-static const char* IPC_SERVER_NAME = "idm-next-ipc";
+/* 管道名只有 cli_forward.h 的 ipcServerName() 一个来源：
+   客户端（CLI、副实例）与服务端以前各自写一遍同一个字面量，改一处不会报错，
+   只表现为「永远连不上」—— 那和真正的 IPC bug 长得一模一样。 */
 
 namespace {
 const TaskRow* findTask(const QVector<TaskRow>& tasks, int id)
@@ -56,9 +59,9 @@ bool IpcServer::start()
     // 如果有残留的旧服务端（上次崩溃），先移除。
     // 正常的第二个 GUI 实例会在 main() 中先通过 activate 命令退出，不会走到这里，
     // 因而不会误删仍在运行实例的 IPC endpoint。
-    QLocalServer::removeServer(QLatin1String(IPC_SERVER_NAME));
+    QLocalServer::removeServer(ipcServerName());
 
-    if (!m_server->listen(QLatin1String(IPC_SERVER_NAME))) {
+    if (!m_server->listen(ipcServerName())) {
         Log::warn(QStringLiteral("IPC server 启动失败: %1").arg(m_server->errorString()));
         return false;
     }
@@ -66,7 +69,7 @@ bool IpcServer::start()
     connect(m_server, &QLocalServer::newConnection,
             this, &IpcServer::onNewConnection);
 
-    Log::info(QStringLiteral("IPC server 已启动，监听 %1").arg(QLatin1String(IPC_SERVER_NAME)));
+    Log::info(QStringLiteral("IPC server 已启动，监听 %1").arg(ipcServerName()));
     return true;
 }
 

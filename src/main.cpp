@@ -15,6 +15,7 @@
 
 #include "main_window.h"
 #include "cli_app.h"
+#include "cli_forward.h"
 #include "settings.h"
 #include "download_core.h"
 #include "logger.h"
@@ -27,7 +28,9 @@
 // ── IPC 单实例通信 ──────────────────────────────
 // 当 GUI 已在运行时，CLI/第二个 GUI 实例通过 local socket 把命令转发给现有 GUI，
 // 避免重复 dlmgr_init 和第二个实例抢占 IPC server。
-static const char* IPC_SERVER_NAME = "idm-next-ipc";
+// 转发本身搬到了 cli_forward.{h,cpp} —— 放在 main.cpp 里它是 static，
+// ui_snapshot 的探针 link 不到，也就没法对「失败时说不说得出原因」这条
+// 定出断言；搬出去之后那条红才测得出来。
 #ifdef Q_OS_WIN
 static const wchar_t* GUI_MUTEX_NAME = L"Local\\IDMNext.Gui.SingleInstance.v1";
 
@@ -48,104 +51,7 @@ static_assert(GUI_READY_WAIT_MS + 4000 < 20000,
               "GUI_READY_WAIT_MS 必须留在 CI 第 11 步的 20s 观察窗之内");
 #endif
 
-enum class ForwardResult {
-    NotConnected,
-    Success,
-    Failure
-};
-
-/**
- * 尝试连接正在运行的 GUI 实例。
- * NotConnected 表示当前没有 GUI，可继续启动本实例；Success/Failure 都表示已存在 GUI，
- * 调用方不应再启动第二套引擎。CLI 可据 Success/Failure 返回正确进程退出码。
- */
-static ForwardResult tryForwardToGui(const QStringList& cliArgs, bool printResponse = true)
-{
-    QLocalSocket socket;
-    socket.connectToServer(QLatin1String(IPC_SERVER_NAME));
-    if (!socket.waitForConnected(500))
-        return ForwardResult::NotConnected;
-
-    QJsonObject obj;
-    obj["command"] = "add";
-
-    // 解析 CLI 参数：add <url> [--dir DIR] [--name NAME] [--threads N] [--no-wait]
-    for (int i = 0; i < cliArgs.size(); ++i) {
-        const QString& a = cliArgs[i];
-        if (a == QStringLiteral("add"))
-            continue;
-        if (a == QStringLiteral("--dir") && i + 1 < cliArgs.size())
-            obj["dir"] = cliArgs[++i];
-        else if (a == QStringLiteral("--name") && i + 1 < cliArgs.size())
-            obj["filename"] = cliArgs[++i];
-        else if (a == QStringLiteral("--threads") && i + 1 < cliArgs.size())
-            obj["threads"] = cliArgs[++i].toInt();
-        else if (a == QStringLiteral("--format") && i + 1 < cliArgs.size())
-            obj["format"] = cliArgs[++i];
-        else if (a == QStringLiteral("--no-wait"))
-            obj["no_wait"] = true;
-        else if (!a.startsWith(QLatin1String("--")))
-            obj["url"] = a;
-    }
-
-    // 如果命令不是 add（比如 list/start/pause/activate），直接按首参数转发
-    if (!cliArgs.isEmpty() && cliArgs.first() != QStringLiteral("add")) {
-        obj["command"] = cliArgs.first();
-        if (cliArgs.size() > 1)
-            obj["args"] = cliArgs.mid(1).join(QLatin1Char(' '));
-    }
-
-    QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-    socket.write(data);
-    socket.flush();
-    if (!socket.waitForBytesWritten(2000)) {
-        socket.disconnectFromServer();
-        return ForwardResult::Failure;
-    }
-
-    /* 「连上了、也写出去了，但对方暂时没回话」不能按失败重发：
-     * 重发更糟——对方可能已经处理过这条请求，activate 幂等还好，add 就是下两遍。
-     * 超时上限必须留在调用方的观察窗之内：CI 用 WaitForExit(5000) 判定稳态二次启动，
-     * 这里若放到 8 秒，同一个竞态只会换一种更难查的红法（「没复用实例」而不是「退出码 1」）。
-     * 真正的黑洞窗口在 MainWindow 构造里同步 listen，已由 main_window.cpp 的
-     * QTimer::singleShot(0) 消掉：现在连得上就等于事件循环已经在转、马上有回话。 */
-    if (socket.waitForReadyRead(3000)) {
-        QByteArray response = socket.readAll();
-        QJsonDocument doc = QJsonDocument::fromJson(response);
-        QJsonObject respObj = doc.object();
-        const bool success = respObj.value("success").toBool(false);
-        QString message = respObj.value("message").toString();
-        if (printResponse && !message.isEmpty()) {
-            QTextStream stream(success ? stdout : stderr);
-            stream << message << "\n";
-            stream.flush();
-        }
-        socket.disconnectFromServer();
-        return success ? ForwardResult::Success : ForwardResult::Failure;
-    }
-
-    socket.disconnectFromServer();
-    return ForwardResult::Failure;
-}
-
 #ifdef Q_OS_WIN
-// 已拿到命名 mutex 的另一个 GUI 可能还在 MainWindow 构造前，IPC server 尚未 listen。
-// 第二实例/CLI 此时只能等待，不能把“暂时连不上”误判成“没有 GUI”再初始化第二套引擎。
-static ForwardResult waitForGui(const QStringList& args, bool printResponse, DWORD timeoutMs)
-{
-    const DWORD stepMs = 100;
-    DWORD waited = 0;
-    for (;;) {
-        ForwardResult r = tryForwardToGui(args, printResponse);
-        if (r != ForwardResult::NotConnected)
-            return r;
-        if (waited >= timeoutMs)
-            return ForwardResult::NotConnected;
-        Sleep(stepMs);
-        waited += stepMs;
-    }
-}
-
 static bool guiMutexExists()
 {
     HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, GUI_MUTEX_NAME);
@@ -193,7 +99,7 @@ int main(int argc, char* argv[])
             cliArgs.append(a);
         }
 
-        ForwardResult forwarded = tryForwardToGui(cliArgs);
+        ForwardResult forwarded = forwardToGui(cliArgs);
         if (forwarded != ForwardResult::NotConnected)
             return forwarded == ForwardResult::Success ? 0 : 1;
 
@@ -278,7 +184,7 @@ int main(int argc, char* argv[])
 #endif
 
     // 兼容升级场景：旧版本 GUI 可能已运行但没有上述命名 mutex。
-    ForwardResult forwarded = tryForwardToGui(forwardArgs, false);
+    ForwardResult forwarded = forwardToGui(forwardArgs, false);
     if (forwarded != ForwardResult::NotConnected) {
 #ifdef Q_OS_WIN
         CloseHandle(guiMutex);

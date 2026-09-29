@@ -86,6 +86,8 @@ set(WEB_SOURCES
 set(APP_SOURCES
     src/app/auto_power.cpp
     src/app/auto_power.h
+    src/app/cli_forward.cpp
+    src/app/cli_forward.h
     src/app/ipc_server.cpp
     src/app/ipc_server.h
     src/app/schedule_service.cpp

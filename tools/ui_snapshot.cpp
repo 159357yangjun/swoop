@@ -10,6 +10,7 @@
 #include <QThread>
 #include <QDir>
 #include <QLocalSocket>
+#include <QLocalServer>
 #include <QTableWidget>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -37,7 +38,12 @@
 #include "app_paths.h"
 #include "schedule_service.h"
 #include "tool_probe.h"
+#include "cli_forward.h"   // IDM_FORWARD_PROBE：转发的四条出口各自该留下什么证据
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>        // dup/dup2/freopen：把 stderr 临时挪走，好断言「失败时说不说得清」
+#include <fcntl.h>
+#include <QList>
 #include <QDateTime>
 #include <QStatusBar>
 #include <QToolButton>
@@ -785,6 +791,148 @@ int main(int argc, char** argv) {
         printf("%s 回话里 success=true（交接成功 ⇒ 第二实例退出码 0）\n",
                replySaysSuccess ? "[PASS]" : "[FAIL]");
         return (notListeningYet && listeningAfterLoop && gotReply && replySaysSuccess) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_FORWARD_PROBE=1 ──
+     * forwardToGui 的四条出口各自要留下什么证据。这条探针是为一个真实缺陷写的：
+     * CLI 与「再点一次图标」的副实例在失败时**只留下退出码 1，stderr 是空的**。
+     * CI 第 11 步的 remote-help 因此红过之后查不下去 —— annotations 里
+     * stdout/stderr 双双「<空>」，连「连上了没」「等了几秒」都看不出来。
+     *
+     * 四条出口分别断言（假服务由本探针自己起，管道名带 pid，绝不碰用户正在跑的实例）：
+     *   ① 没人监听            → NotConnected，而且 stderr 必须**为空**：
+     *      这是「本机根本没开 GUI」的正常首启路径，这时候唠叨一句「IPC 失败」
+     *      等于给每一次正常用法都加一条假报警。
+     *   ② 连上、送出、不回话  → Failure，stderr 要说得出「没有回话」，
+     *      并且服务端只看到**一次**连接 —— 旧代码与此处注释的契约是「绝不重发」，
+     *      因为 add 重发就是下两遍。以后谁想靠「加个重试」糊弄这个红，这条先红。
+     *   ③ 对方回了失败        → Failure，stderr 是**对方给的原因**，而不是「没有回话」。
+     *   ④ 对方回了成功        → Success，stderr 干净。
+     * ②③④ 都要求 stderr 非空或有指定内容，所以「把报错删掉」会立刻红。 */
+    if (qEnvironmentVariableIsSet("IDM_FORWARD_PROBE")) {
+        const QString base = QStringLiteral("idm-forward-probe-%1")
+                                 .arg(QCoreApplication::applicationPid());
+
+        struct Capture {                 // 把 stderr 临时挪到临时文件（进程级，主线程做）
+            int saved = -1;
+            QString path;
+            explicit Capture(const QString& p) : path(p) {
+                saved = dup(fileno(stderr));
+                freopen(p.toLocal8Bit().constData(), "w", stderr);
+            }
+            QString finish() {
+                fflush(stderr);
+                if (saved >= 0) { dup2(saved, fileno(stderr)); close(saved); saved = -1; }
+                QFile f(path);
+                if (!f.open(QIODevice::ReadOnly)) return QString();
+                const QByteArray raw = f.readAll();
+                f.close();
+                QFile::remove(path);
+                /* QTextStream 往 stderr 写的是 UTF-8，不是本地代码页：按 fromLocal8Bit
+                   解会把中文解成一串假字符，于是「说得出原因」这条断言永远匹配不上 ——
+                   先红的是探针自己，不是被测代码。 */
+                return QString::fromUtf8(raw);
+            }
+        };
+
+        int bad = 0;
+        const QStringList addArgs { QStringLiteral("add"), QStringLiteral("http://example.com/a.bin") };
+        const QStringList helpArgs { QStringLiteral("help") };
+
+        struct Case {
+            QString name;
+            QString pipe;                 // 空串 = 用探针的假服务
+            QStringList args;
+            int mode;                     // 0=silent 1=reject 2=ok
+            QString want;                 // stderr 必须包含（NotConnected 用 "<empty>"）
+            ForwardResult wantResult;
+        };
+
+        /* 假服务：newConnection 里按当前 mode 决定「不回话 / 回失败 / 回成功」，
+           并数着连接次数。silent 模式必须把 socket 留着不删，否则对端立刻看到断开。 */
+        QLocalServer::removeServer(base);
+        QLocalServer srv;
+        if (!srv.listen(base)) {
+            printf("[FAIL] 探针的假 IPC 服务起不来：%s\n", srv.errorString().toUtf8().constData());
+            return 1;
+        }
+        std::atomic<int> mode { 0 };
+        std::atomic<int> conns { 0 };
+        QList<QLocalSocket*> held;
+        QObject::connect(&srv, &QLocalServer::newConnection, [&srv, &mode, &conns, &held] {
+            while (srv.hasPendingConnections()) {
+                QLocalSocket* c = srv.nextPendingConnection();
+                if (!c) continue;
+                ++conns;
+                const int m = mode.load();
+                if (m == 0) { held.append(c); continue; }        // 连上但不回话
+                QJsonObject resp;
+                if (m == 1) {
+                    resp[QStringLiteral("success")] = false;
+                    resp[QStringLiteral("message")] = QStringLiteral("任务不存在: 2147483647");
+                } else {
+                    resp[QStringLiteral("success")] = true;
+                    resp[QStringLiteral("message")] = QStringLiteral("IDM Next 命令行：add/list/help …");
+                }
+                c->write(QJsonDocument(resp).toJson(QJsonDocument::Compact));
+                c->flush();
+                c->deleteLater();
+            }
+        });
+
+        const Case cases[] = {
+            { u8"没人监听 ⇒ NotConnected，且不往 stderr 吐任何字", base + "-absent", helpArgs, 0, "<empty>", ForwardResult::NotConnected },
+            { u8"连上但不回话 ⇒ Failure，stderr 说得出「没有回话」",   QString(),        addArgs,  0, u8"没有回话", ForwardResult::Failure },
+            { u8"对方回了失败 ⇒ stderr 用对方给的原因",                QString(),        helpArgs, 1, u8"任务不存在", ForwardResult::Failure },
+            { u8"对方回了成功 ⇒ Success 且 stderr 干净",               QString(),        helpArgs, 2, "<empty>", ForwardResult::Success },
+        };
+
+        for (const Case& c : cases) {
+            const QString target = c.pipe.isEmpty() ? base : c.pipe;
+            mode.store(c.mode);
+            conns.store(0);
+
+            ForwardResult result = ForwardResult::NotConnected;
+            const QString errPath = QDir::tempPath() + QStringLiteral("/idm_fwd_probe_%1.log")
+                                        .arg(QCoreApplication::applicationPid());
+            Capture cap(errPath);
+            std::atomic<bool> done { false };
+            QThread* worker = QThread::create([&] {
+                result = forwardToGui(c.args, true, target);
+                done = true;
+            });
+            worker->start();
+            for (int i = 0; i < 1200 && !done.load(); ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+            worker->wait(8000);
+            delete worker;
+            const QString err = cap.finish();
+
+            bool ok = (result == c.wantResult);
+            if (c.want == QLatin1String("<empty>"))
+                ok = ok && err.trimmed().isEmpty();
+            else
+                ok = ok && err.contains(c.want);
+            /* 「绝不重发」只对连上了之后的路有效；① 压根没连上，服务端当然没计数。 */
+            const int seen = conns.load();
+            const bool connOk = c.pipe.isEmpty() ? (seen == 1) : (seen == 0);
+            ok = ok && connOk;
+            if (!ok) ++bad;
+
+            printf("%s %s\n", ok ? "[PASS]" : "[FAIL]", c.name.toUtf8().constData());
+            if (!ok) {
+                printf("       结果=%d 期望=%d 服务端看到连接=%d stderr=%d 字节: %s\n",
+                       static_cast<int>(result), static_cast<int>(c.wantResult), seen,
+                       int(err.size()),
+                       err.toUtf8().constData());
+            }
+        }
+
+        for (QLocalSocket* c : held) c->deleteLater();
+        QLocalServer::removeServer(base);
+        return bad == 0 ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_PROXY_PROBE=1 ──
