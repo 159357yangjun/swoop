@@ -124,7 +124,26 @@ jobs:
             return ($tail -join "`n")
           }
 
+          # 这一步测的是时序竞态，而"绿了一次"并不说明余量够：共享 runner 上慢一点就会翻。
+          # 所以每个环节的实际耗时都记下来、连同退出码一起写进 summary，
+          # 让绿灯也能被读成一组数据（离 5s/10s 窗口还有多远），而不是一个对勾。
+          $script:timings = @()
+          $summaryPath = $env:GITHUB_STEP_SUMMARY
+          function Add-Timing([string]$label, $value) {
+            $script:timings += ("| {0} | {1} |" -f $label, $value)
+          }
+          function Write-Timings {
+            if ($script:timings.Count -eq 0) { return }
+            $lines = @('### step 11 计时（无论红绿都记）', '', '| 环节 | 实测 |', '| --- | --- |')
+            $lines += $script:timings
+            if ($summaryPath) { $lines | Out-File -FilePath $summaryPath -Append -Encoding utf8 }
+          }
+
           # $entries 是 Start-Logged 的返回值（带 Name/Out/Err），不是 Process。
+          # 同一份内容还写进 $GITHUB_STEP_SUMMARY：作业日志端点对非管理员返回 403、
+          # annotations 又只有「Process completed with exit code 1」，
+          # 而 check-run 的 output 是公开可读的 —— 只有落到 summary，
+          # 红的时候才能真正看到是哪条断言、哪个进程、哪句 stderr。
           function Fail-WithLogs([string]$message, $entries) {
             $parts = @($message)
             foreach ($e in $entries) {
@@ -132,7 +151,12 @@ jobs:
               $parts += ("--- {0} stdout ---`n{1}" -f $e.Name, (Get-StreamTail $e.Out))
               $parts += ("--- {0} stderr ---`n{1}" -f $e.Name, (Get-StreamTail $e.Err))
             }
-            throw ($parts -join "`n")
+            $text = $parts -join "`n"
+            if ($summaryPath) {
+              ("### step 11 FAILED`n" + $text) |
+                Out-File -FilePath $summaryPath -Append -Encoding utf8
+            }
+            throw $text
           }
 
           function Start-Logged {
@@ -152,6 +176,7 @@ jobs:
           }
 
           # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
+          $t0 = Get-Date
           $first = Start-Logged 'first'
           $second = Start-Logged 'second'
           $byId = @{}
@@ -188,9 +213,13 @@ jobs:
               Fail-WithLogs "secondary IDM Next launch exited with code $($losers[0].ExitCode)" `
                             @($byId[$losers[0].Id]; $first; $second)
             }
+            Add-Timing '启动竞态收敛（一个窗口就绪 + 副实例退出码 0）' `
+                       ('{0:N1}s / 副实例 pid={1}' -f `
+                          ((Get-Date) - $t0).TotalSeconds, $losers[0].Id)
 
             # 稳态普通二次启动必须激活已有窗口并迅速退出。
             $third = Start-Logged 'third'
+            $t3 = Get-Date
             try {
               if (-not $third.Proc.WaitForExit(5000)) {
                 Fail-WithLogs 'steady-state IDM Next launch did not reuse the existing GUI instance' `
@@ -200,6 +229,9 @@ jobs:
                 Fail-WithLogs "steady-state IDM Next launch exited with code $($third.Proc.ExitCode)" `
                               @($third; $byId[$winner.Id])
               }
+              Add-Timing '稳态二次启动（上限 5s）' `
+                         ('{0:N1}s / 退出码 {1}' -f ((Get-Date) - $t3).TotalSeconds,
+                          $third.Proc.ExitCode)
             }
             finally {
               if (-not $third.Proc.HasExited) { Stop-Process -Id $third.Proc.Id -Force -ErrorAction SilentlyContinue }
@@ -207,10 +239,14 @@ jobs:
 
             # GUI 已运行时 CLI 必须通过 IPC，而不是另起独立引擎。
             $remoteHelp = Start-Logged 'remote-help' @('--cli', 'help')
+            $th = Get-Date
             $remoteHelp.Proc.WaitForExit()
             if ($remoteHelp.Proc.ExitCode -ne 0) {
               Fail-WithLogs "remote CLI help failed with exit code $($remoteHelp.Proc.ExitCode)" @($remoteHelp)
             }
+            Add-Timing 'GUI 在跑时 CLI 经 IPC 出 help' `
+                       ('{0:N1}s / 退出码 {1}' -f ((Get-Date) - $th).TotalSeconds,
+                        $remoteHelp.Proc.ExitCode)
 
             # 远端业务错误要传播为非 0 退出码，不能“连接成功就一律 exit 0”。
             $remoteMissing = Start-Logged 'remote-missing' @('--cli', 'info', '2147483647')
@@ -220,6 +256,7 @@ jobs:
             }
           }
           finally {
+            Write-Timings
             foreach ($p in $pair) {
               if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
