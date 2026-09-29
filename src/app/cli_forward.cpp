@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalSocket>
+#include <QDateTime>
 #include <QTextStream>
 #include <QThread>
 
@@ -21,6 +22,11 @@ static QJsonObject buildRequest(const QStringList& cliArgs)
 {
     QJsonObject obj;
     obj[QStringLiteral("command")] = QStringLiteral("add");
+    /* 客户端送出的墙钟时刻：服务端把它原样算成「排队多久」。
+     * 两个进程没法共享 QElapsedTimer，但同一台机器上墙钟是同一把尺 ——
+     * CI 那个「连上了、3 秒没回话」的红需要这个数才能定性到
+     * 「是事件循环没空理这条连接」还是「服务端处理本身就慢」。 */
+    obj[QStringLiteral("t0")] = static_cast<double>(QDateTime::currentMSecsSinceEpoch());
 
     // add <url> [--dir DIR] [--name NAME] [--threads N] [--format F] [--no-wait]
     for (int i = 0; i < cliArgs.size(); ++i) {
@@ -65,86 +71,67 @@ static void reportFailure(const QString& reason, bool printToStderr)
     }
 }
 
-/* 幂等命令：处理两次与处理一次的结果相同，所以「送出去了但没听到回话」可以再问一次。
- * 为什么需要再问 —— CI 第 13 步那次红（90ac237）的现场把因果钉死了：副实例报
- * 「送出 50 字节、3 秒内没有回话」，而**赢家自己的日志里写着
- * 「IPC server 已启动」→「IPC 请求: activate → 成功」**——请求被处理了，
- * 只是回话落在副实例已经放弃之后。副实例就此 exit 1，用户看到的是
- * 「GUI 正在启动时再点图标，什么都没发生」。
- * 反面是 add：同一次「处理了但没赶上回话」如果发生在 add 上，重发就是下两遍，
- * 所以带副作用的命令一律只发一次。 */
-static bool isIdempotentCommand(const QString& command)
-{
-    return command == QLatin1String("activate")
-        || command == QLatin1String("help")
-        || command == QLatin1String("?")
-        || command == QLatin1String("list")
-        || command == QLatin1String("info");
-}
-
+/* 一次往返，**绝不重发**。
+ * 为什么不重发：CI 现场证明「服务端处理了、回话却落在客户端 3 秒死线之后」是真实存在的
+ * 时序（服务端日志里的「排队 Nms」就是为它加的）。那种情况下重发等于让同一件事做两遍 ——
+ * add 会下两份任务。这里曾经加过「幂等命令再问一次」，已撤回：它的根因是 GUI 线程被
+ * 组件自愈的 tar 解压阻塞（见 utils/off_thread.cpp），用重发兜住只会把下一次冻结藏起来。
+ * 现在慢会照实报出来，而不是被第二次尝试掩盖。 */
 ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
                            const QString& serverName)
 {
     const QString pipe = serverName.isEmpty() ? ipcServerName() : serverName;
     const QByteArray data = QJsonDocument(buildRequest(cliArgs)).toJson(QJsonDocument::Compact);
-    const QString command = cliArgs.isEmpty() ? QStringLiteral("add") : cliArgs.first();
-    const int attempts = isIdempotentCommand(command) ? 2 : 1;
 
-    QString lastWhy;
-    for (int attempt = 0; attempt < attempts; ++attempt) {
-        QLocalSocket socket;
-        socket.connectToServer(pipe);
-        if (!socket.waitForConnected(500)) {
-            /* 压根没人监听 —— 这不是失败，是「本机还没有 GUI」，
-             * 调用方要据此自己起一套，所以一个字都不报。 */
-            return ForwardResult::NotConnected;
-        }
-
-        socket.write(data);
-        socket.flush();
-        if (!socket.waitForBytesWritten(2000)) {
-            lastWhy = QStringLiteral("已连上运行中的实例，但请求没写进去（%1）")
-                          .arg(socket.errorString());
-            socket.disconnectFromServer();
-            reportFailure(lastWhy, printResponse);
-            return ForwardResult::Failure;
-        }
-
-        if (socket.waitForReadyRead(3000)) {
-            const QByteArray response = socket.readAll();
-            const QJsonObject respObj = QJsonDocument::fromJson(response).object();
-            const bool success = respObj.value(QStringLiteral("success")).toBool(false);
-            const QString message = respObj.value(QStringLiteral("message")).toString();
-            if (printResponse && !message.isEmpty()) {
-                QTextStream stream(success ? stdout : stderr);
-                stream << message << "\n";
-                stream.flush();
-            }
-            socket.disconnectFromServer();
-            if (!success) {
-                if (message.isEmpty()) {
-                    reportFailure(QStringLiteral("运行中的实例回了话，但结果是失败，而且没给原因"),
-                                  printResponse);
-                }
-                return ForwardResult::Failure;
-            }
-            return ForwardResult::Success;
-        }
-
-        /* 3 秒内一个字节都没回来。把现场攒着：幂等命令先重来一次，
-         * 全部用完还在「没回话」才报出去。 */
-        lastWhy = QStringLiteral("已连上运行中的实例并送出 %1 字节，%2 秒内没有回话"
-                                 "（管道状态 %3，错误：%4；共尝试 %5 次）；这条命令**没有**被确认执行")
-                      .arg(data.size())
-                      .arg(3)
-                      .arg(static_cast<int>(socket.state()))
-                      .arg(socket.errorString().isEmpty()
-                               ? QStringLiteral("无") : socket.errorString())
-                      .arg(attempt + 1);
-        socket.disconnectFromServer();
+    QLocalSocket socket;
+    socket.connectToServer(pipe);
+    if (!socket.waitForConnected(500)) {
+        /* 压根没人监听 —— 这不是失败，是「本机还没有 GUI」，
+         * 调用方要据此自己起一套，所以一个字都不报。 */
+        return ForwardResult::NotConnected;
     }
 
-    reportFailure(lastWhy, printResponse);
+    socket.write(data);
+    socket.flush();
+    if (!socket.waitForBytesWritten(2000)) {
+        const QString why = QStringLiteral("已连上运行中的实例，但请求没写进去（%1）")
+                                .arg(socket.errorString());
+        socket.disconnectFromServer();
+        reportFailure(why, printResponse);
+        return ForwardResult::Failure;
+    }
+
+    if (socket.waitForReadyRead(3000)) {
+        const QByteArray response = socket.readAll();
+        const QJsonObject respObj = QJsonDocument::fromJson(response).object();
+        const bool success = respObj.value(QStringLiteral("success")).toBool(false);
+        const QString message = respObj.value(QStringLiteral("message")).toString();
+        if (printResponse && !message.isEmpty()) {
+            QTextStream stream(success ? stdout : stderr);
+            stream << message << "\n";
+            stream.flush();
+        }
+        socket.disconnectFromServer();
+        if (!success) {
+            if (message.isEmpty()) {
+                reportFailure(QStringLiteral("运行中的实例回了话，但结果是失败，而且没给原因"),
+                              printResponse);
+            }
+            return ForwardResult::Failure;
+        }
+        return ForwardResult::Success;
+    }
+
+    /* 3 秒内一个字节都没回来：把现场报出来，别再让它只是一句「exit 1」。 */
+    const QString why = QStringLiteral("已连上运行中的实例并送出 %1 字节，3 秒内没有回话"
+                                       "（管道状态 %2，错误：%3）；这条命令**没有**被确认执行。"
+                                       "运行中的实例可能正忙，其日志里的「排队 Nms」能定到哪一步")
+                            .arg(data.size())
+                            .arg(static_cast<int>(socket.state()))
+                            .arg(socket.errorString().isEmpty()
+                                     ? QStringLiteral("无") : socket.errorString());
+    socket.disconnectFromServer();
+    reportFailure(why, printResponse);
     return ForwardResult::Failure;
 }
 

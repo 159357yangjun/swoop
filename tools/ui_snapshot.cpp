@@ -38,7 +38,8 @@
 #include "app_paths.h"
 #include "schedule_service.h"
 #include "tool_probe.h"
-#include "cli_forward.h"   // IDM_FORWARD_PROBE：转发的四条出口各自该留下什么证据
+#include "cli_forward.h"
+#include "off_thread.h"   // IDM_OFFTHREAD_PROBE：自愈不再冻住 GUI 线程   // IDM_FORWARD_PROBE：转发的四条出口各自该留下什么证据
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>        // dup/dup2/freopen：把 stderr 临时挪走，好断言「失败时说不说得清」
@@ -807,9 +808,10 @@ int main(int argc, char** argv) {
      *      并且服务端只看到**一次**连接 —— add 有副作用，重发就是下两遍。
      *   ③ 对方回了失败        → Failure，stderr 是**对方给的原因**，而不是「没有回话」。
      *   ④ 对方回了成功        → Success，stderr 干净。
-     *   ⑤ activate 第一次装不响 → 再问一次并拿到 Success（连接数=2）：
-     *      CI 实测到赢家「已经处理了、回话却落在副实例 3 秒放弃之后」，
-     *      幂等命令因此可以再问；②与⑤合起来把「谁可以重发」这条界线钉住。
+     *   ⑤ activate 即使幂等、即使服务端第一条故意装不响，也**只发一次**：
+     *      CI 实测到「请求被处理了、回话落在客户端 3 秒死线之后」，那种时刻重发
+     *      等于让同一件事做两遍（add 就是下两份）。曾经的"幂等就再问一次"已撤回，
+     *      根因是 GUI 线程被组件自愈的 tar 解压阻塞（见 utils/off_thread.cpp）。
      * ②③④⑤ 都要求 stderr 非空或有指定内容，所以「把报错删掉」会立刻红。 */
     if (qEnvironmentVariableIsSet("IDM_FORWARD_PROBE")) {
         const QString base = QStringLiteral("idm-forward-probe-%1")
@@ -891,7 +893,10 @@ int main(int argc, char** argv) {
             { u8"连上但不回话 ⇒ Failure，stderr 说得出「没有回话」",   QString(),        addArgs,  0, u8"没有回话", ForwardResult::Failure, 1 },
             { u8"对方回了失败 ⇒ stderr 用对方给的原因",                QString(),        helpArgs, 1, u8"任务不存在", ForwardResult::Failure, 1 },
             { u8"对方回了成功 ⇒ Success 且 stderr 干净",               QString(),        helpArgs, 2, "<empty>", ForwardResult::Success, 1 },
-            { u8"activate 第一次装不响 ⇒ 再问一次并成功（幂等才敢重发）", QString(),      actArgs,  3, "<empty>", ForwardResult::Success, 2 },
+            /* activate 是幂等的，但也**只发一次**：服务端可能已经处理完只是回话晚了，
+               再问一次等于把同一件事做两遍。这条与第 2 条（add）一起把
+               「绝不重发」钉死 —— 以后谁想靠加次数糊弄超时，这两条先红。 */
+            { u8"activate 第一次装不响 ⇒ 仍然只发一次（绝不重发）",     QString(),        actArgs,  3, u8"没有回话", ForwardResult::Failure, 1 },
         };
 
         for (const Case& c : cases) {
@@ -942,6 +947,200 @@ int main(int argc, char** argv) {
         for (QLocalSocket* c : held) c->deleteLater();
         QLocalServer::removeServer(base);
         return bad == 0 ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_ACTIVATE_PROBE=1 ──
+     * 回答两个问题，都不靠推理：
+     *  (a) activate 被处理**两次**（客户端超时后重发）到底落不落下双份副作用；
+     *  (b) 第一个客户端「连上、送出、不等回话就走」时，服务端要把 GUI 线程钉住多久 ——
+     *      这决定重发是不是真能救回来（要是第二个请求得排在死管道写不上的 2 秒后面，
+     *      那病根在服务端，不在客户端的 3 秒死线）。
+     * 判据全部取"用户看得见的量"：任务数、还在听的实例数、窗口可见性、往返耗时。 */
+    if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")) {
+        {
+            QLocalSocket guard;
+            guard.connectToServer(ipcServerName());
+            const bool occupied = guard.waitForConnected(200);
+            guard.disconnectFromServer();
+            if (occupied) {
+                printf("[FAIL] %s 已被别的 IDM Next 实例占用，请先关闭它再跑本探针\n",
+                       ipcServerName().toUtf8().constData());
+                return 1;
+            }
+        }
+
+        bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false;
+        qint64 roundTripMs = -1, abandonedMs = -1;
+        int rowsBefore = -1, rowsAfter = -1;
+        int engBefore = -1, engAfter = -1;
+        {
+            MainWindow w;
+            QCoreApplication::processEvents();          /* singleShot(0) → IpcServer::start() */
+
+            TaskListModel* model = w.findChild<TaskListModel*>();
+            rowsBefore = model ? model->rowCount() : -1;
+            {
+                int ids0[64] = {0};
+                engBefore = dlmgr_list(ids0, 64);
+            }
+
+            /* 第一个客户端：连上、送出 activate、**不读回话就断开**（= 客户端 3 秒超时后的样子） */
+            std::atomic<bool> firstDone { false };
+            QThread* c1 = QThread::create([&firstDone] {
+                QElapsedTimer et; et.start();
+                QLocalSocket s;
+                s.connectToServer(ipcServerName());
+                if (s.waitForConnected(1000)) {
+                    QJsonObject req;
+                    req[QStringLiteral("command")] = QStringLiteral("activate");
+                    req[QStringLiteral("t0")] =
+                        static_cast<double>(QDateTime::currentMSecsSinceEpoch());
+                    s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                    s.flush();
+                    s.waitForBytesWritten(1000);
+                }
+                s.abort();                       /* 立刻走，留一个写不出去的回复在服务端 */
+                firstDone = true;
+            });
+            c1->start();
+            QElapsedTimer outer; outer.start();
+            while (!firstDone.load() && outer.elapsed() < 5000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(5);
+            }
+            c1->wait(3000); delete c1;
+            abandonedMs = outer.elapsed();       /* 服务端把这条死连接伺候完用了多久 */
+
+            /* 第二个客户端：正常地问一次 activate，量它拿到回话要多久 */
+            std::atomic<bool> secondDone { false };
+            QThread* c2 = QThread::create([&] {
+                QElapsedTimer et; et.start();
+                QLocalSocket s;
+                s.connectToServer(ipcServerName());
+                if (s.waitForConnected(2000)) {
+                    QJsonObject req;
+                    req[QStringLiteral("command")] = QStringLiteral("activate");
+                    req[QStringLiteral("t0")] =
+                        static_cast<double>(QDateTime::currentMSecsSinceEpoch());
+                    s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                    s.flush();
+                    if (s.waitForBytesWritten(2000) && s.waitForReadyRead(5000)) {
+                        const QJsonObject resp = QJsonDocument::fromJson(s.readAll()).object();
+                        roundTripMs = et.elapsed();
+                        ok1 = resp.value(QStringLiteral("success")).toBool(false);
+                    }
+                    s.disconnectFromServer();
+                }
+                secondDone = true;
+            });
+            c2->start();
+            while (!secondDone.load()) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(5);
+            }
+            c2->wait(8000); delete c2;
+            /* 再让服务端把第二条伺候干净（回话写在泵里完成） */
+            for (int i = 0; i < 20; ++i) QCoreApplication::processEvents();
+
+            rowsAfter = model ? model->rowCount() : -2;
+
+            /* 两次 activate 之后：①还能不能连上（服务端没被搞坏）②任务数没变 */
+            QLocalSocket third;
+            third.connectToServer(ipcServerName());
+            ok2 = third.waitForConnected(1500);
+            third.disconnectFromServer();
+
+            ok3 = (rowsAfter == rowsBefore);
+
+            /* 窗口可见性/正常态：两次激活的结果应与一次相同（这里只验"没被搞坏"，
+               离屏平台不模拟真实前台，故不断言"在最前面"） */
+            w.showNormal();
+            ok4 = w.isVisible() && !w.isMinimized() && !w.isMaximized();
+
+            /* 幂等性的另一半：重发不能多出一个任务。
+               判据取"前后之差"而不是"等于 0" —— 隔离数据目录里可能本来就存着上轮
+               恢复出来的任务（并发探针就会留 5 个），断言绝对值测的就不是本行了。 */
+            {
+                int ids[64] = {0};
+                engAfter = dlmgr_list(ids, 64);
+            }
+            ok5 = (engAfter == engBefore);
+
+            printf("[act] 第一条死连接伺候用时=%lldms  第二条往返=%lldms  "
+                   "模型行数 %d→%d  引擎任务数 %d→%d\n",
+                   (long long)abandonedMs, (long long)roundTripMs,
+                   rowsBefore, rowsAfter, engBefore, engAfter);
+        }
+
+        printf("%s 放弃回话的第一个客户端之后，第二次 activate 仍拿到 success=true\n",
+               ok1 ? "[PASS]" : "[FAIL]");
+        printf("%s 第二次请求的往返 < 1500ms（服务端没被死连接的写拖住；否则病根在服务端）\n",
+               (ok1 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
+        printf("%s 两次 activate 不新增任务（模型行数与引擎任务数都不变）\n",
+               (ok3 && ok5) ? "[PASS]" : "[FAIL]");
+        printf("%s 两次 activate 之后管道仍可被新客户端连上（没有第二套实例、服务没坏）\n",
+               ok2 ? "[PASS]" : "[FAIL]");
+        printf("%s 激活是状态设置而非累加：窗口仍可见且处于正常态\n",
+               ok4 ? "[PASS]" : "[FAIL]");
+        return (ok1 && ok2 && ok3 && ok4 && ok5
+                && roundTripMs >= 0 && roundTripMs < 1500) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_OFFTHREAD_PROBE=1 ──
+     * runOffThread 是组件自愈不再冻住 GUI 线程的唯一依赖，所以它自己要能被证伪。
+     * 四条各管一半，缺一条就可能"看着对其实同步跑完了"：
+     *   ① job 真的跑在**另一条**线程上；
+     *   ② done 回到 context 所在线程（UI 与回调只能在那儿做）；
+     *   ③ job 睡着的这 400ms 里，GUI 线程的事件循环**仍在走**（计时器有 tick）——
+     *      这条才是"用户还点得动"的代理量，只看①②不足以证明没冻结；
+     *   ④ done 恰好被调一次（不多不少，防止既同步调一次又投递一次）。 */
+    if (qEnvironmentVariableIsSet("IDM_OFFTHREAD_PROBE")) {
+        QThread* guiThread = QThread::currentThread();
+        QThread* jobThread = nullptr;
+        QThread* doneThread = nullptr;
+        int doneCalls = 0;
+        int ticks = 0;
+
+        QTimer pulse;
+        QObject::connect(&pulse, &QTimer::timeout, [&ticks] { ++ticks; });
+        pulse.start(40);
+
+        QElapsedTimer wait;
+        wait.start();
+        runOffThread(
+            &pulse,
+            [&jobThread] {
+                jobThread = QThread::currentThread();
+                QThread::msleep(400);
+            },
+            [&doneThread, &doneCalls] {
+                doneThread = QThread::currentThread();
+                ++doneCalls;
+            });
+
+        while (doneCalls == 0 && wait.elapsed() < 5000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        /* done 之后再多转一会儿，确认没有第二条重复投递 */
+        for (int i = 0; i < 15; ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+            QThread::msleep(20);
+        }
+        pulse.stop();
+
+        const bool okJob = (jobThread && jobThread != guiThread);
+        const bool okDone = (doneThread == guiThread);
+        const bool okLoop = (ticks >= 4);          // 400ms / 40ms ⇒ 正常应有 ~10 次
+        const bool okOnce = (doneCalls == 1);
+
+        printf("[offthread] job=%p gui=%p done=%p ticks=%d doneCalls=%d 用时=%lldms\n",
+               (void*)jobThread, (void*)guiThread, (void*)doneThread,
+               ticks, doneCalls, (long long)wait.elapsed());
+        printf("%s job 跑在工作线程，不在 GUI 线程上\n", okJob ? "[PASS]" : "[FAIL]");
+        printf("%s done 回到 context 所在线程（UI 只能在那儿做）\n", okDone ? "[PASS]" : "[FAIL]");
+        printf("%s 睡着的 400ms 里 GUI 事件循环仍在走（tick=%d，需 ≥4）\n",
+               okLoop ? "[PASS]" : "[FAIL]", ticks);
+        printf("%s done 恰好一次\n", okOnce ? "[PASS]" : "[FAIL]");
+        return (okJob && okDone && okLoop && okOnce) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_PROXY_PROBE=1 ──

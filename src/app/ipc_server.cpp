@@ -10,6 +10,8 @@
 #include <QLocalSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QWidget>
 
 /* 管道名只有 cli_forward.h 的 ipcServerName() 一个来源：
@@ -104,6 +106,16 @@ void IpcServer::handleClient(QLocalSocket* client)
 
     QJsonDocument doc = QJsonDocument::fromJson(data);
     QJsonObject msg = doc.object();
+
+    /* 延迟取证（每一步红过一次都拿不到原因，就是因为缺这两个数）：
+     *   排队 = 进入本函数时刻 − 客户端 t0  → 大 ⇒ 事件循环没空理这条连接
+     *   处理 = 回话写完时刻 − 进入本函数时刻 → 大 ⇒ 命令本身在 GUI 线程上慢
+     * 老客户端不带 t0 时记 -1，不参与统计。 */
+    const double t0 = msg.value(QStringLiteral("t0")).toDouble(0.0);
+    const qint64 enterMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 queueMs = (t0 > 0.0) ? (enterMs - static_cast<qint64>(t0)) : -1;
+    QElapsedTimer handledClock;
+    handledClock.start();
 
     QString command = msg.value("command").toString().trimmed().toLower();
     QString args = msg.value("args").toString().trimmed();
@@ -283,12 +295,24 @@ void IpcServer::handleClient(QLocalSocket* client)
 
     // 发送响应
     QByteArray respData = QJsonDocument(response).toJson(QJsonDocument::Compact);
+    /* 写之前先记下客户端还在不在：**这才是"客户端是否已经超时走了"的判据**。
+     * waitForBytesWritten 的返回值不能当交付证明 —— 实测客户端好好读完回话时它仍返回
+     * false（QLocalSocket 在 Windows 上的写出是异步的，字节在 disconnect 期间才推完），
+     * 拿它当"没写出去"看会把人带偏。 */
+    const bool clientStillHere = (client->state() == QLocalSocket::ConnectedState);
     client->write(respData);
     client->flush();
     client->waitForBytesWritten(2000);
     client->disconnectFromServer();
     client->deleteLater();
 
-    Log::info(QStringLiteral("IPC 请求: %1 → %2")
-                  .arg(command, response.value("success").toBool() ? "成功" : "失败"));
+    /* 这行是「为什么慢」的唯一取证入口，CI 第 13 步会把它抓进 annotation：
+     * 排队大 ⇒ 事件循环被别的东西占住（首次绘制、磁盘、以前的组件自愈）；
+     * 处理大 ⇒ 命令本身在 GUI 线程上慢；客户端=已走 ⇒ 它没等到这句回话。 */
+    Log::info(QStringLiteral("IPC 请求: %1 → %2（排队 %3ms，处理 %4ms，回话时客户端=%5）")
+                  .arg(command,
+                       response.value("success").toBool() ? QStringLiteral("成功") : QStringLiteral("失败"))
+                  .arg(queueMs)
+                  .arg(handledClock.elapsed())
+                  .arg(clientStillHere ? QStringLiteral("在") : QStringLiteral("已走")));
 }

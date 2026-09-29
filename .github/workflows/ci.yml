@@ -70,7 +70,8 @@ jobs:
           PROBES="IDM_SCHEDULE_PROBE IDM_SETTINGS_PROBE IDM_SITEAUTH_PROBE
                   IDM_NOTICE_PROBE IDM_IPC_PROBE IDM_FORWARD_PROBE
                   IDM_PROXY_PROBE IDM_ZOOM_PROBE IDM_TOOLPROBE_PROBE
-                  IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE"
+                  IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE
+                  IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE"
           BAD=""
           TOTAL_PASS=0
           for P in $PROBES; do
@@ -99,14 +100,14 @@ jobs:
             echo "::error::UI 探针未全绿：$BAD"
             exit 1
           fi
-          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 11 个模式共 40 条，
-          # 留 5 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
+          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 13 个模式共 50 条，
+          # 留 6 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
           # 但整段被删空、或大面积退化仍然会红。
-          if [ "$TOTAL_PASS" -lt 35 ]; then
-            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥35）—— 断言被删了还是根本没跑？"
+          if [ "$TOTAL_PASS" -lt 44 ]; then
+            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥44）—— 断言被删了还是根本没跑？"
             exit 1
           fi
-          echo "UI 探针全绿：11 个模式共 $TOTAL_PASS 条断言"
+          echo "UI 探针全绿：13 个模式共 $TOTAL_PASS 条断言"
 
       - name: Engine self-test (local authenticated HTTP server)
         shell: msys2 {0}
@@ -332,6 +333,31 @@ jobs:
             Write-Annotation ('计时: ' + ($script:timings -join '   '))
           }
 
+          # 「连上了、3 秒没回话」那次红留下的教训：光有客户端的报错还不够，
+          # 要知道服务端那条连接**排了多久**才被事件循环理到。服务端现在每次回话都写
+          # 「IPC 请求: X → 成功（排队 Nms，处理 Mms，回话时客户端=在/已走）」，
+          # 这里把它从每个实例的日志里捞出来记成数据 —— 绿的一次也不放过，
+          # 因为"这次绿但排队已经 2.4s"正是下一次红的预告片。
+          function Add-IpcLatencies {
+            $found = @()
+            foreach ($f in (Get-ChildItem -LiteralPath $logDir -Filter '*.err' -ErrorAction SilentlyContinue)) {
+              $lines = Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue |
+                       Where-Object { $_ -match 'IPC .+ (\-?\d+)ms .+ (\d+)ms' }
+              foreach ($ln in $lines) {
+                $m = [regex]::Match($ln, 'IPC [^:]*: (\S+) .*?(\-?\d+)ms\D+(\d+)ms')
+                if ($m.Success) {
+                  $found += ('{0}={1}/{2}ms@{3}' -f $f.BaseName, $m.Groups[1].Value,
+                                                    $m.Groups[2].Value, $m.Groups[3].Value)
+                }
+              }
+            }
+            if ($found.Count -gt 0) {
+              Add-Timing 'IPC 服务端 排队ms/命令（每条请求）' (($found -join ' , '))
+            } else {
+              Add-Timing 'IPC 服务端 排队ms/命令（每条请求）' '<没抓到：日志里没有计时字段>'
+            }
+          }
+
           # $entries 是 Start-Logged 的返回值（带 Name/Out/Err），不是 Process。
           # 同一份内容还写进 $GITHUB_STEP_SUMMARY：作业日志端点对非管理员返回 403、
           # annotations 又只有「Process completed with exit code 1」，
@@ -412,14 +438,14 @@ jobs:
                           ((Get-Date) - $t0).TotalSeconds, $losers[0].Id)
 
             # 稳态普通二次启动必须激活已有窗口并迅速退出。
-            # 窗口 5s → 9s：副实例对幂等命令（activate）现在最多问两次、
-            # 每次给赢家 3 秒回话（90ac237 那次红就是赢家「处理了但回话晚于 3 秒」）。
-            # 判据一个字没松 —— 仍然必须复用现有实例并以 0 退出；只是不再把
-            # 「它终究会答」的那次成功误判成失败。健康路径仍然是毫秒级。
+            # 窗口维持 5s 不放宽：副实例对同一条命令**只发一次**（绝不重发），
+            # 3 秒回话预算 + 连接开销就是它的上限。放宽到 9s 曾短暂存在过，
+            # 那是给"没回话就再问一次"打的补丁；根因（GUI 线程被组件自愈的 tar
+            # 解压阻塞）修好后补丁已撤 —— 留着它只会让下一次冻结悄悄变绿。
             $third = Start-Logged 'third'
             $t3 = Get-Date
             try {
-              if (-not $third.Proc.WaitForExit(9000)) {
+              if (-not $third.Proc.WaitForExit(5000)) {
                 Fail-WithLogs 'steady-state IDM Next launch did not reuse the existing GUI instance' `
                               @($third; $byId[$winner.Id])
               }
@@ -427,7 +453,7 @@ jobs:
                 Fail-WithLogs "steady-state IDM Next launch exited with code $($third.Proc.ExitCode)" `
                               @($third; $byId[$winner.Id])
               }
-              Add-Timing '稳态二次启动（上限 9s）' `
+              Add-Timing '稳态二次启动（上限 5s）' `
                          ('{0:N1}s / 退出码 {1}' -f ((Get-Date) - $t3).TotalSeconds,
                           $third.Proc.ExitCode)
             }
@@ -454,6 +480,7 @@ jobs:
             }
           }
           finally {
+            Add-IpcLatencies
             Write-Timings
             foreach ($p in $pair) {
               if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }

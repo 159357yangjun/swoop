@@ -1,6 +1,7 @@
 #include "torrent_backend.h"
 #include "torrent_downloader.h"
 #include "app_paths.h"
+#include "off_thread.h"   // 自愈的写盘/解压/复制挪出 GUI 线程
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -11,6 +12,7 @@
 #include <QCoreApplication>
 #include <QProcess>
 #include <QMessageBox>
+#include <memory>
 #include <QWidget>
 
 const char* const TorrentBackend::ARIA2_ZIP_URL =
@@ -93,55 +95,72 @@ void TorrentBackend::ensureAvailable(QObject* context, std::function<void(bool)>
             return;
         }
         QByteArray data = reply->readAll();
-        QFile f(tmpZip);
-        if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
-            if (warnOnError)
-                QMessageBox::warning(qobject_cast<QWidget*>(context),
-                                     QStringLiteral("写入失败"),
-                                     QStringLiteral("无法写入：%1").arg(tmpZip));
-            if (cb) cb(false);
-            return;
-        }
-        f.close();
 
-        // 用系统 tar 解压（Windows 10+ 自带 tar.exe），无需额外依赖
-        QString extractDir = QDir::temp().absoluteFilePath(QStringLiteral("aria2-extract"));
-        QDir(extractDir).removeRecursively();
-        QDir().mkpath(extractDir);
-        QProcess tar;
-        tar.start(QStringLiteral("tar"),
-                  QStringList() << QStringLiteral("-xf") << tmpZip
-                                << QStringLiteral("-C") << extractDir);
-        if (!tar.waitForFinished(30000)) {
-            if (warnOnError)
-                QMessageBox::warning(qobject_cast<QWidget*>(context),
-                                     QStringLiteral("解压失败"),
-                                     QStringLiteral("aria2 压缩包解压超时"));
-            if (cb) cb(false);
-            return;
-        }
-        QString srcExe = findAria2c(extractDir);
-        if (srcExe.isEmpty()) {
-            if (warnOnError)
-                QMessageBox::warning(qobject_cast<QWidget*>(context),
-                                     QStringLiteral("解压失败"),
-                                     QStringLiteral("未在压缩包中找到 aria2c.exe"));
-            if (cb) cb(false);
-            return;
-        }
-        if (!QFile::copy(srcExe, destExe)) {
-            if (warnOnError)
-                QMessageBox::warning(qobject_cast<QWidget*>(context),
-                                     QStringLiteral("安装失败"),
-                                     QStringLiteral("无法复制 aria2c 到：%1").arg(destExe));
-            if (cb) cb(false);
-            return;
-        }
-        QFile::remove(tmpZip);
-        QDir(extractDir).removeRecursively();
+        /* 写盘 / tar 解压（waitForFinished 上限 30 秒）/ 复制 / 清理 ——
+         * 整段以前都跑在 GUI 线程上（这个 lambda 的接收者是 context），
+         * 于是首次安装的自愈把界面冻住数秒到数十秒；同一段时间里
+         * MainWindow 的 IPC 服务端也接不到新连接（第二实例就等不到回话）。
+         * 现在挪进工作线程，只有 UI 提示、路径登记与回调回到 GUI 线程。 */
+        struct Result { int stage = 0; };   // 0=成功 1=写盘 2=解压超时 3=找不到 exe 4=复制失败
+        auto res = std::make_shared<Result>();
+        runOffThread(context,
+            [res, data, tmpZip, destExe]() {
+                QFile f(tmpZip);
+                if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
+                    res->stage = 1;
+                    return;
+                }
+                f.close();
 
-        TorrentDownloader::setAria2Path(destExe);
-        bool ok = TorrentDownloader::isAvailable();
-        if (cb) cb(ok);
+                // 用系统 tar 解压（Windows 10+ 自带 tar.exe），无需额外依赖
+                const QString extractDir =
+                    QDir::temp().absoluteFilePath(QStringLiteral("aria2-extract"));
+                QDir(extractDir).removeRecursively();
+                QDir().mkpath(extractDir);
+                QProcess tar;
+                tar.start(QStringLiteral("tar"),
+                          QStringList() << QStringLiteral("-xf") << tmpZip
+                                        << QStringLiteral("-C") << extractDir);
+                if (!tar.waitForFinished(30000)) {
+                    res->stage = 2;
+                    return;
+                }
+                const QString srcExe = findAria2c(extractDir);
+                if (srcExe.isEmpty()) {
+                    res->stage = 3;
+                    return;
+                }
+                if (QFile::exists(destExe))
+                    QFile::remove(destExe);
+                if (!QFile::copy(srcExe, destExe)) {
+                    res->stage = 4;
+                    return;
+                }
+                QFile::remove(tmpZip);
+                QDir(extractDir).removeRecursively();
+            },
+            [context, cb, warnOnError, res, tmpZip, destExe]() {
+            if (res->stage != 0) {
+                QString title, detail;
+                switch (res->stage) {
+                case 1:  title = QStringLiteral("写入失败");
+                         detail = QStringLiteral("无法写入：%1").arg(tmpZip); break;
+                case 2:  title = QStringLiteral("解压失败");
+                         detail = QStringLiteral("aria2 压缩包解压超时"); break;
+                case 3:  title = QStringLiteral("解压失败");
+                         detail = QStringLiteral("未在压缩包中找到 aria2c.exe"); break;
+                default: title = QStringLiteral("安装失败");
+                         detail = QStringLiteral("无法复制 aria2c 到：%1").arg(destExe); break;
+                }
+                if (warnOnError)
+                    QMessageBox::warning(qobject_cast<QWidget*>(context), title, detail);
+                if (cb) cb(false);
+                return;
+            }
+
+            TorrentDownloader::setAria2Path(destExe);
+            const bool ok = TorrentDownloader::isAvailable();
+            if (cb) cb(ok);
+            });
     });
 }
