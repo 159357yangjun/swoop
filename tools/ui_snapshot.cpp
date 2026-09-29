@@ -1100,10 +1100,20 @@ int main(int argc, char** argv) {
         QThread* doneThread = nullptr;
         int doneCalls = 0;
         int ticks = 0;
+        qint64 maxGapMs = 0;
 
+        /* 判据必须是「相邻两次 tick 的最大间隔」，不是 tick 总数：
+           总数在"先冻 400ms 再继续转"的场景下照样能攒到十几次，
+           我第一版就是这么写错了 —— 同步执行的变异只红了①，③照样绿。 */
         QTimer pulse;
-        QObject::connect(&pulse, &QTimer::timeout, [&ticks] { ++ticks; });
+        QElapsedTimer sinceLast;
+        QObject::connect(&pulse, &QTimer::timeout, [&] {
+            ++ticks;
+            if (sinceLast.isValid()) maxGapMs = qMax(maxGapMs, sinceLast.elapsed());
+            sinceLast.restart();
+        });
         pulse.start(40);
+        sinceLast.start();
 
         QElapsedTimer wait;
         wait.start();
@@ -1129,16 +1139,16 @@ int main(int argc, char** argv) {
 
         const bool okJob = (jobThread && jobThread != guiThread);
         const bool okDone = (doneThread == guiThread);
-        const bool okLoop = (ticks >= 4);          // 400ms / 40ms ⇒ 正常应有 ~10 次
+        const bool okLoop = (maxGapMs < 150);     // 40ms 心跳；阻塞 400ms 会直接顶到 ~400
         const bool okOnce = (doneCalls == 1);
 
-        printf("[offthread] job=%p gui=%p done=%p ticks=%d doneCalls=%d 用时=%lldms\n",
+        printf("[offthread] job=%p gui=%p done=%p ticks=%d maxGap=%lldms doneCalls=%d 用时=%lldms\n",
                (void*)jobThread, (void*)guiThread, (void*)doneThread,
-               ticks, doneCalls, (long long)wait.elapsed());
+               ticks, (long long)maxGapMs, doneCalls, (long long)wait.elapsed());
         printf("%s job 跑在工作线程，不在 GUI 线程上\n", okJob ? "[PASS]" : "[FAIL]");
         printf("%s done 回到 context 所在线程（UI 只能在那儿做）\n", okDone ? "[PASS]" : "[FAIL]");
-        printf("%s 睡着的 400ms 里 GUI 事件循环仍在走（tick=%d，需 ≥4）\n",
-               okLoop ? "[PASS]" : "[FAIL]", ticks);
+        printf("%s GUI 事件循环没被打断（tick 最大间隔=%lldms，需 <150）\n",
+               okLoop ? "[PASS]" : "[FAIL]", (long long)maxGapMs);
         printf("%s done 恰好一次\n", okOnce ? "[PASS]" : "[FAIL]");
         return (okJob && okDone && okLoop && okOnce) ? 0 : 1;
     }
