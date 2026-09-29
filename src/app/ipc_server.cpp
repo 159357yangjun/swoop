@@ -94,8 +94,18 @@ void IpcServer::handleClient(QLocalSocket* client)
     // 避免单次 readAll 截断导致命令解析失败。
     QByteArray data;
     for (int i = 0; i < 10; ++i) {
-        if (client->bytesAvailable() == 0)
+        if (client->bytesAvailable() == 0) {
+            /* ⚠️ 只有"已经收到半条消息"才值得继续等下一片 —— 这个循环存在的理由就是
+             * 原生消息可能分片到达。一个字节都没到过 ⇒ 对端是空转/半开连接，
+             * 再等 9×100ms 也等不来东西，却是把 **GUI 线程** 独占掉：
+             * 实测一条连上不发消息的客户端让事件循环单轮跑到 1090ms（IDM_ACTIVATE_PROBE D 段，
+             * 3/3 次都是 1088~1090ms）。两条三条排队（扩展轮询 + 被杀掉的副实例）
+             * 就越过客户端那 3 秒死线 —— 这是与"回话没推完"并列的第二条机制，
+             * 而且它能解释"服务端日志显示处理很快、客户端却什么都没等到"。 */
+            if (data.isEmpty() && i > 1)     // 留 200ms 宽限：慢一点的首包仍然收得到
+                break;
             client->waitForReadyRead(100);   // 最多约 1s，正常情况首轮即有数据
+        }
         QByteArray chunk = client->readAll();
         if (!chunk.isEmpty())
             data.append(chunk);
@@ -303,21 +313,16 @@ void IpcServer::handleClient(QLocalSocket* client)
 
     // 发送响应
     QByteArray respData = QJsonDocument(response).toJson(QJsonDocument::Compact);
-    /* ⚠️ 必须把字节真的推完再关 —— 这条是 CI 第 13 步那个间歇红的真因。
-     * Windows 上 QLocalSocket 的写出走 QWindowsPipeWriter（异步），而旧代码是
-     * write → flush → waitForBytesWritten(2000) 一次 → disconnectFromServer() → deleteLater()：
-     * 只要那一次等待没等到写完，socket 就被销毁，挂起的回话静默丢弃。
-     * 现场证据是 CI 自己报回来的两个数（2e54031）：
-     *   服务端 "IPC 请求: activate → 成功（排队 51ms，处理 0ms）"
-     *   副实例 "已连上运行中的实例并送出 39 字节，3 秒内没有回话"
-     * —— 51 毫秒就答了，客户端却什么都没收到；不是"服务端慢"，是"答了没发出去"。
-     * 我上一轮把 `waitForBytesWritten` 返回 false 解读成"不能当送达证明"，
-     * 方向反了：它就是没推完，而推不完还被销毁正是丢回话的机制。 */
+    /* 发回话前不猜"对端会读完"：Windows 上 QLocalSocket 的写出是异步的
+     * （QWindowsPipeWriter），所以关掉之前要把队列推空 —— 这是**保守做法**，
+     * 但注意它**没有被本地证明过**：IDM_FLUSH_PROBE 拿 2MB 回话、对端晚 300ms 读做 A/B，
+     * "只等一次"与"推到空"两边都把 2MB 发完了（销毁前 bytesToWrite()=0），
+     * 本机造不出"返回时仍有待发字节"。它的判据是下面这个 `送达` 字段：
+     * CI 出现 送达=0 才坐实"回话没推完就被销毁"这条。
+     * 与之并列、且**本地已测到**的第二条机制在上面那个读循环里（1090ms → 217ms）。 */
     const bool clientStillHere = (client->state() == QLocalSocket::ConnectedState);
     client->write(respData);
     client->flush();
-    /* 推到没有待发字节才允许关 —— 判据与机制都在 utils/socket_drain.h，
-     * 由 IDM_FLUSH_PROBE 用 2MB 回话做双向证明（旧写法必丢、这个必达）。 */
     const bool delivered = drainSocketBeforeClose(client, 2000);
     client->disconnectFromServer();
     client->deleteLater();
