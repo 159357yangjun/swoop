@@ -14,7 +14,7 @@
 | 最大文件 | `src/gui/main_window.cpp` **1,836 行**（Stage 3 抽 traffic+web+appearance 后；Stage 2 末 2,004，初始 2,883） |
 | 次大 | `core/download_core.c` 1,597 · `storage/html_parser.c` 901 · `core/network_curl.c` 573 |
 | 目录 | core 7 · gui 41 · utils 5 · storage 6 · protocols 23 · cli 1 · host 1 · tools 8 |
-| 死代码 | `core/network.c`（WinHTTP 874 行）**未编译**；`gui/glass_effect.cpp` 已停用但**仍在编译** |
+| 死代码 | 2026-09-19 当时：`core/network.c`（WinHTTP 874 行）**未编译**；`gui/glass_effect.cpp` 已停用但**仍在编译**。2026-09-29 复核：两个路径都已搬迁（现 `src/core/legacy/network_winhttp.c`、`src/gui/legacy/glass_effect.cpp`），`glass_effect.cpp` **也不再编译**（`grep -c glass_effect build/build.ninja` = 0，原表这一格已过期）；但 `src/gui/main_window.h:10` 仍 `#include "legacy/glass_effect.h"` ⇒ "完全断开"不成立。逐条命令与命中数见 §7「否定式断言全表核」 |
 | 构建 | 两个目标（`idm-next`、`ui_snapshot`）各抄一份源清单，易漂移 |
 | 版本控制 | 重构前**无 `.git`**，本次已 `git init` 建基线（`874427e`） |
 
@@ -33,6 +33,9 @@
 | **gui → core/protocols/storage/utils** | 向下 | ✓ 唯一允许的方向 |
 
 **结论**：依赖箭头方向整体合规，没有"下层回头依赖上层"的倒挂。
+（2026-09-29 复核更正：六条"= 0"逐条重跑仍然成立（见 §7 第 6 条 V8），但**"没有倒挂"这半句已过期**
+—— 阶段 1 把 `task_list_model` 搬进 `model/` 之后，`src/model/task_list_model.cpp:2` 仍
+`#include "app_icons.h"`（gui 头），这是一条真实的 L1 → L4 反向依赖，本轮只记录、未修。）
 真正的结构性问题不是方向，而是**①上帝类（main_window 承担了应用编排）②文件归位错误③死代码入编④构建清单重复**。
 
 ### 1.2 边界违规（文件摆错层）
