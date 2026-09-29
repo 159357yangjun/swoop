@@ -47,6 +47,94 @@ jobs:
           if (-not (Test-Path build/idm-next.exe)) { throw 'idm-next.exe missing' }
           if (-not (Test-Path build/idm-next-host.exe)) { throw 'idm-next-host.exe missing' }
 
+      - name: Engine self-test (local authenticated HTTP server)
+        shell: msys2 {0}
+        run: |
+          # 这套引擎自测是仓库里最强的闸门（137 条断言：截断续传、限流倒计时、
+          # 暂停/继续的单代线程、代理 407、写盘失败、Range 被无视时降级、连接复用……），
+          # 但 IDM_BUILD_ENGINE_SELFTEST 默认 OFF、以前工作流一次都没提它 ——
+          # 引擎回归全靠人记得手动跑。这一步把它变成闸门。
+          #
+          # 三条反「永久绿」设计，都是本会话真踩过的坑而不是假想：
+          #   ① 没有 python 就装一个（runner 上装工具与本机不是一回事），
+          #      装不到就红着退出 —— 绝不 skip，skip 等于这一步从此永远绿。
+          #   ② 除了退出码，还必须从日志里解析出「结果：N 通过，M 失败」这一行，
+          #      并要求 N≥100、M=0。光看退出码不够：程序压根没跑起来时，
+          #      管道与 tail 会把真实状态盖掉（本会话在 ext_shot 上就是这么永久绿的）。
+          #   ③ 服务进程按 PID 收尾（绝不按镜像名一刀切），临时产物当场删。
+          PORT=18080
+          SUSER=idmuser
+          SPASS=idmpass
+          ST_BUILD=build-selftest
+          ST_LOG=selftest.log
+
+          if ! command -v python >/dev/null 2>&1; then
+            echo "runner 上没有 python，用 choco 装（与 NSIS 那一步同一套办法）"
+            choco install python3 -y --no-progress || choco install python -y --no-progress
+            export PATH="/c/Python312:/c/Python311:/c/Python310:$PATH"
+          fi
+          if ! command -v python >/dev/null 2>&1; then
+            echo "::error::runner 上拿不到 python —— 引擎自测需要它起本地 HTTP 服务。禁止静默跳过。"
+            exit 1
+          fi
+          python --version
+
+          # 单独一个构建目录：只编 core + 自测，不碰发行用的 build/，对打包零影响。
+          cmake -S . -B "$ST_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DIDM_BUILD_ENGINE_SELFTEST=ON
+          cmake --build "$ST_BUILD" --target engine_selftest
+          if [ ! -f "$ST_BUILD/engine_selftest.exe" ]; then
+            echo "::error::engine_selftest.exe 没生成"
+            exit 1
+          fi
+
+          python tools/engine_selftest_server.py "$PORT" "$SUSER" "$SPASS" > server.log 2>&1 &
+          SRV=$!
+          echo "server pid=$SRV"
+
+          # 等服务器真的在 listen：没这一步的话，「进程已启动但 socket 还没开」
+          # 会变成一条与代码无关的假失败（甚至让「无凭据必须失败」那类用例假通过）。
+          READY=0
+          for i in $(seq 1 60); do
+            CODE=$(curl -s --noproxy '*' --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/_stats" || echo 000)
+            if [ "$CODE" = "200" ]; then READY=1; break; fi
+            if ! kill -0 $SRV 2>/dev/null; then
+              echo "::error::python 服务提前退出，最后 40 行："
+              tail -40 server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$READY" != "1" ]; then
+            echo "::error::等了 60 秒服务仍没监听 $PORT"
+            tail -40 server.log
+            kill -9 $SRV 2>/dev/null
+            exit 1
+          fi
+
+          "./$ST_BUILD/engine_selftest.exe" "$PORT" "$SUSER" "$SPASS" > "$ST_LOG" 2>&1
+          RC=$?
+          kill $SRV 2>/dev/null
+          if kill -0 $SRV 2>/dev/null; then kill -9 $SRV 2>/dev/null; fi
+          wait $SRV 2>/dev/null
+
+          TMPD=$(cygpath -u "$TEMP" 2>/dev/null || echo "$TEMP")
+          rm -rf "$TMPD/idm_selftest_out" "$ST_BUILD"
+
+          tail -40 "$ST_LOG"
+
+          PASS_N=$(grep -oE '结果：[0-9]+' "$ST_LOG" | tail -1 | grep -oE '[0-9]+')
+          FAIL_N=$(grep -oE '[0-9]+ 失败' "$ST_LOG" | tail -1 | grep -oE '[0-9]+')
+          echo "引擎自测：通过=${PASS_N:-无} 失败=${FAIL_N:-无} 退出码=$RC"
+          if [ -z "$PASS_N" ] || [ -z "$FAIL_N" ]; then
+            echo "::error::日志里没有「结果：N 通过，M 失败」这一行 —— 自测压根没跑完，不能算通过。"
+            exit 1
+          fi
+          if [ "$FAIL_N" != "0" ] || [ "$RC" -ne 0 ] || [ "$PASS_N" -lt 100 ]; then
+            echo "::error::引擎自测未通过（通过=$PASS_N 需≥100，失败=$FAIL_N 需=0，退出码=$RC 需=0）"
+            exit 1
+          fi
+          echo "引擎自测通过：$PASS_N 条断言全绿"
+
       - name: Install NSIS for installer validation
         shell: pwsh
         run: choco install nsis -y --no-progress
