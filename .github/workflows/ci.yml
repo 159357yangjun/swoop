@@ -125,10 +125,20 @@ jobs:
           }
 
           # 这一步测的是时序竞态，而"绿了一次"并不说明余量够：共享 runner 上慢一点就会翻。
-          # 所以每个环节的实际耗时都记下来、连同退出码一起写进 summary，
+          # 所以每个环节的实际耗时都记下来、连同退出码一起报出去，
           # 让绿灯也能被读成一组数据（离 5s/10s 窗口还有多远），而不是一个对勾。
+          #
+          # ⚠️ 通道选择：作业日志要 admin 权限（403），job summary 没有任何公开端点
+          # （/actions/jobs/<id>/summary 返回 404），annotations 是唯一未认证也能读的，
+          # 所以同一份内容既写 summary（给人看）也发 ::notice::（给排查的人用 API 读）。
+          # 换行必须折成 " | "：workflow command 的 message 是单行的。
           $script:timings = @()
           $summaryPath = $env:GITHUB_STEP_SUMMARY
+          function Write-Annotation([string]$text) {
+            $one = $text -replace "`r?`n", ' | '
+            if ($one.Length -gt 3800) { $one = $one.Substring(0, 3800) + ' ...(截断)' }
+            Write-Host ("::notice title=step11::" + $one)
+          }
           function Add-Timing([string]$label, $value) {
             $script:timings += ("| {0} | {1} |" -f $label, $value)
           }
@@ -137,6 +147,7 @@ jobs:
             $lines = @('### step 11 计时（无论红绿都记）', '', '| 环节 | 实测 |', '| --- | --- |')
             $lines += $script:timings
             if ($summaryPath) { $lines | Out-File -FilePath $summaryPath -Append -Encoding utf8 }
+            Write-Annotation ('计时: ' + ($script:timings -join '   '))
           }
 
           # $entries 是 Start-Logged 的返回值（带 Name/Out/Err），不是 Process。
@@ -156,6 +167,7 @@ jobs:
               ("### step 11 FAILED`n" + $text) |
                 Out-File -FilePath $summaryPath -Append -Encoding utf8
             }
+            Write-Annotation ('FAILED: ' + $text)
             throw $text
           }
 
