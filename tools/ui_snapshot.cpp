@@ -36,12 +36,14 @@
 #include "app_icons.h"
 #include "app_paths.h"
 #include "schedule_service.h"
+#include "tool_probe.h"
 #include <stdio.h>
 #include <QDateTime>
 #include <QStatusBar>
 #include <QToolButton>
 #include <QToolBar>
 #include <QFont>
+#include <QElapsedTimer>
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -876,6 +878,60 @@ int main(int argc, char** argv) {
         printf("%s 越界的 viewZoom=99 被夹到上限，不会算出离谱字号\n",
                okClamp ? "[PASS]" : "[FAIL]");
         return (okRestore && okPersist && okReset && okClamp) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_TOOLPROBE_PROBE=1 ──
+     * 判「外部工具在不在」必须真跑一次 --version：实测 yt-dlp 1.34s、
+     * ffmpeg 0.08~0.47s、aria2c 0.06~0.12s，而调用点有四处（启动时的组件自愈、
+     * **每次**打开新建任务对话框、任务开始前、HLS 合成前）—— 同一份 1.3 秒被反复付。
+     * 这里拿系统自带的 ping/cmd 当替身：ping -n 2 有稳定的 ~1s 真实耗时，
+     * 于是"第二次没有重跑子进程"能被**时间**证明，而不是靠数 spawn 次数
+     * （那要造桩程序，反而测不到真路径）。
+     * 另外两条守住键的正确性：参数必须进键，且每个键各自记忆（不是最后一次写覆盖）。 */
+    if (qEnvironmentVariableIsSet("IDM_TOOLPROBE_PROBE")) {
+        const QString sysDir = QStringLiteral("C:/Windows/System32/");
+        const QString ping   = sysDir + QStringLiteral("ping.exe");
+        const QString cmd    = sysDir + QStringLiteral("cmd.exe");
+        const QStringList pingArgs { QStringLiteral("-n"), QStringLiteral("2"),
+                                     QStringLiteral("127.0.0.1") };
+
+        QElapsedTimer et;
+        et.start();
+        const bool first  = ToolProbe::available(ping, pingArgs);
+        const qint64 ms1  = et.elapsed();
+        et.restart();
+        const bool second = ToolProbe::available(ping, pingArgs);
+        const qint64 ms2  = et.elapsed();
+
+        const bool okTrue  = (first && second);
+        const bool okMemo  = (ms1 >= 700 && ms2 < 100);
+
+        const bool exitZero = ToolProbe::available(cmd, { QStringLiteral("/c"),
+                                QStringLiteral("exit"), QStringLiteral("0") });
+        const bool exitThree = ToolProbe::available(cmd, { QStringLiteral("/c"),
+                                 QStringLiteral("exit"), QStringLiteral("3") });
+        const bool exitZeroAgain = ToolProbe::available(cmd, { QStringLiteral("/c"),
+                                      QStringLiteral("exit"), QStringLiteral("0") });
+        const bool okArgs = (exitZero && !exitThree && exitZeroAgain);
+
+        const bool missing = ToolProbe::available(
+            sysDir + QStringLiteral("definitely-not-here-9f3a.exe"), pingArgs);
+        et.restart();
+        const bool missingAgain = ToolProbe::available(
+            sysDir + QStringLiteral("definitely-not-here-9f3a.exe"), pingArgs);
+        const qint64 msMissing = et.elapsed();
+        const bool okMissing = (!missing && !missingAgain && msMissing < 100);
+
+        printf("[toolprobe] 首次=%lldms 二次=%lldms | 不存在的文件二次=%lldms\n",
+               (long long)ms1, (long long)ms2, (long long)msMissing);
+        printf("%s 探测结果正确（ping 退出码 0 → 可用）\n", okTrue ? "[PASS]" : "[FAIL]");
+        printf("%s 第二次调用不再 spawn 子进程（首次≥700ms，二次<100ms）\n",
+               okMemo ? "[PASS]" : "[FAIL]");
+        printf("%s 参数进键：同一路径 exit 0/exit 3 各自记忆，互不串味\n",
+               okArgs ? "[PASS]" : "[FAIL]");
+        printf("%s 路径不存在 → false，且重复调用也不会反复 spawn\n",
+               okMissing ? "[PASS]" : "[FAIL]");
+        return (okTrue && okMemo && okArgs && okMissing) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_TEXT_PROBE=1 ──

@@ -1,6 +1,7 @@
 #include "video_downloader.h"
 #include "logger.h"
 #include "app_paths.h"
+#include "tool_probe.h"
 
 #include <QFileInfo>
 #include <QDir>
@@ -88,13 +89,9 @@ QString VideoDownloader::bundledYtDlpPath()
 
 bool VideoDownloader::isAvailable()
 {
-    QProcess proc;
-    proc.start(ytDlpPath(), { QStringLiteral("--version") });
-    if (!proc.waitForStarted(3000))
-        return false;
-    if (!proc.waitForFinished(5000))
-        return false;
-    return proc.exitCode() == 0;
+    /* 同步 spawn 一次外部工具要 0.06~1.34s（yt-dlp 最狠），而这里过去每次调用都跑一遍。
+       记忆判据见 src/utils/tool_probe.h。 */
+    return ToolProbe::available(ytDlpPath(), { QStringLiteral("--version") });
 }
 
 bool VideoDownloader::isVideoUrl(const QString& url)

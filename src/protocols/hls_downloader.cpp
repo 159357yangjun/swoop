@@ -2,6 +2,7 @@
 #include "aes128.h"
 #include "logger.h"
 #include "app_paths.h"
+#include "tool_probe.h"
 
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -45,11 +46,9 @@ QString HlsDownloader::ffmpegPath()
 
 bool HlsDownloader::isFfmpegAvailable()
 {
-    QProcess p;
-    p.start(ffmpegPath(), QStringList() << QStringLiteral("-version"));
-    if (!p.waitForStarted(3000))
-        return false;
-    return p.waitForFinished(5000) && p.exitCode() == 0;
+    /* 同步 spawn 一次外部工具要 0.06~1.34s（yt-dlp 最狠），而这里过去每次调用都跑一遍。
+       记忆判据见 src/utils/tool_probe.h。 */
+    return ToolProbe::available(ffmpegPath(), { QStringLiteral("-version") });
 }
 
 bool HlsDownloader::isHlsUrl(const QString& url)
