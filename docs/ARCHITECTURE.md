@@ -382,10 +382,23 @@ bash --noprofile --norc -eo pipefail <UI probes 步骤原文>
   环境坑/当前状态/下一步候选/路径速查/交付方式）。有内容 ⇒ 按"未提交不算完成"单独一笔进 `docs/`。
   注意其中的验证基线数字（engine 91/0 等）与 §7 候选 1、2 已经过期，**未改他的正文**。
 - `idm-next-glass-ui.html`：仓根，16.6KB，标题「IDM Next · 柔雾玻璃仪表盘」，
-  Tailwind + Google Fonts 的**独立 HTML 设计稿**（第三种 UI 方向，玻璃拟态），
-  仓库内零引用，与已停用的 `src/gui/legacy/glass_effect.cpp` 同一条废弃路线。
-  ⇒ 建议"提交进 `docs/design/` 作留档"或"进 `.gitignore` 承认是临时产物"，
-  **二选一由用户拍定**，本轮不动。
+  Tailwind + Google Fonts 的**独立 HTML 设计稿**（第三种 UI 方向，玻璃拟态）。
+  **可核口径**：`src/`、`CMakeLists.txt`、`tools/` 里零引用；全仓（排除 `.git/`）唯一的
+  文本命中就是本清单自己（`docs/ARCHITECTURE.md`）。原来写的"仓库内零引用"是一句
+  **被自己推翻的断言**——说出这句话的这一行本身就是一次引用，命中数不是 0 而是 1。
+  ```
+  $ grep -rl "glass-ui" --include=*.md --include=*.cpp --include=*.h .
+  ./docs/ARCHITECTURE.md                ← 命中 1 个文件，就是本文件（用户复核同结果）
+  $ grep -rn "glass-ui" src/ CMakeLists.txt tools/ | wc -l
+  0
+  $ grep -rIn "idm-next-glass-ui" . | grep -v '^./.git/' | cut -d: -f1 | sort | uniq -c
+        1 ./docs/ARCHITECTURE.md        ← 放开扩展名限制、扫全仓，仍只有本文件这 1 条
+  ```
+  与 `src/gui/legacy/glass_effect.cpp` 的关系**收窄为"设计意图相同（都做玻璃拟态）"**：
+  代码层零联系（`grep -c "glass_effect\|MainWindow\|\.cpp" idm-next-glass-ui.html` = 0），
+  所以原来那句"同一条废弃路线"作为事实断言**降级为未核实**。
+  ⇒ 去向（进 `docs/design/` 留档 / 进 `.gitignore` 承认是临时产物）**仍等用户拍定**，
+  本轮不动、也不写进"已处理"。
 
 验证输出：
 ```
