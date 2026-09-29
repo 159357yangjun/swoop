@@ -47,6 +47,7 @@
 #include <fcntl.h>
 #include <QList>
 #include <QDateTime>
+#include <QDate>
 #include <QStatusBar>
 #include <QToolButton>
 #include <QToolBar>
@@ -103,9 +104,54 @@ static bool probeIsolationDir(QString* outDir, bool* createdMark, QString* err) 
     return true;
 }
 
+/* 探针/截图的产物目录：默认落在**系统临时目录下的单一子目录 + 当天日期**。
+ *
+ * 为什么要改：这里的默认值曾经是硬编码的 `C:/Users/yyyy/idm_shots`，
+ * 配合"每轮临时传一个新的 IDM_SHOT_DIR / 手动 tee 一份构建日志"，
+ * 结果是把 47 个条目、191.5MB 堆在用户主目录根上（十来个截图目录 + 三十来份
+ * 构建/探测日志），时间跨 09-11→09-29。清单不在这里重复，见
+ * docs/probe-artifact-inventory-2026-09-29.md（那份才是逐条带引用的）。
+ * 注意：这里刻意**不写**那些目录的字面名字 —— 写了就会被
+ * tools/probe_artifact_inventory.py 当成"仓库引用"而标成不可删，
+ * 一条注释不该变成依赖。
+ * 用户工作区的根目录不是我的草稿纸。
+ *
+ * 两道措施：① 默认值改到 `%TEMP%/idm-next-probes/<日期>`；
+ * ② 显式传参也要过守卫 —— 直接落在主目录根下的一律拒写（返回 2）。
+ * 光有约定不够，因为堆积本身就是"每次换个新目录"这个习惯的产物。 */
+static QString defaultProbeOutDir()
+{
+    return QDir::tempPath() + QStringLiteral("/idm-next-probes/")
+         + QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+}
+
+/* dir 是否正好是"主目录下的第一层"（C:/Users/yyyy/xxx）？
+   再深一层（Documents/…）不算 —— 那是用户自己的组织方式。 */
+static bool sitsInHomeRoot(const QString& dir)
+{
+    const QString home = QDir::cleanPath(QDir::homePath());
+    const QString d = QDir::cleanPath(QDir().absoluteFilePath(dir));
+    if (!d.startsWith(home, Qt::CaseInsensitive)) return false;
+    const QString rest = d.mid(home.size());
+    if (rest.size() < 2) return false;
+    const QChar sep = rest[0];
+    if (sep != QLatin1Char('/') && sep != QLatin1Char('\\')) return false;
+    const QString tail = rest.mid(1);
+    return !tail.contains(QLatin1Char('/')) && !tail.contains(QLatin1Char('\\'));
+}
+
 int main(int argc, char** argv) {
-    const QString outDir = qEnvironmentVariable("IDM_SHOT_DIR", "C:/Users/yyyy/idm_shots");
+    const QString requested = qEnvironmentVariable("IDM_SHOT_DIR", defaultProbeOutDir());
+    if (sitsInHomeRoot(requested)) {
+        fprintf(stderr,
+                "IDM_SHOT_DIR 拒绝写进用户主目录根：%s\n"
+                "请改用 %%TEMP%% 下的子目录（默认 %s）或仓库内已 gitignore 的目录。\n",
+                qUtf8Printable(requested), qUtf8Printable(defaultProbeOutDir()));
+        return 2;
+    }
+    const QString outDir = requested;
     QDir().mkpath(outDir);
+    printf("[out] 产物目录 = %s\n", qUtf8Printable(QDir::toNativeSeparators(outDir)));
 
     // ── 与真实用户数据隔离 ──
     // 本工具每次运行都会建任务（截图需要任务行）、改设置（各诊断探针）、写历史。

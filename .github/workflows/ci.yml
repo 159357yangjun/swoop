@@ -59,7 +59,10 @@ jobs:
           # 给人眼对照的，一条断言都没有，放进闸门就等于挂两条永远绿的假保险。
           export QT_QPA_PLATFORM=offscreen
           export QT_QPA_FONTDIR="C:/Windows/Fonts"
-          export IDM_SHOT_DIR="$(cygpath -u "$TEMP")/idm-probe-shots"
+          # 产物目录统一成一个约定：$TEMP/idm-next-probes/<日期>。
+          # 与 ui_snapshot.cpp 的默认值一致，且带守卫拒绝写到用户主目录根
+          # （本机曾因 IDM_SHOT_DIR 每轮换一个新目录，攒出 47 个 idm* / 193MB）。
+          export IDM_SHOT_DIR="$(cygpath -u "$TEMP")/idm-next-probes/$(date +%F)"
           mkdir -p "$IDM_SHOT_DIR"
 
           if [ ! -f build/ui_snapshot.exe ]; then

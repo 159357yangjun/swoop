@@ -47,3 +47,7 @@ desktop.ini
 # 入库可保证 clone 后开箱即可构建，无需先下载 22MB 二进制。
 # 仅剔除 libcurl 自带的文档与示例（1.6MB，纯参考资料，不参与构建）：
 third_party/libcurl/docs/
+
+# 离屏探针/截图的产物（默认在 %TEMP%/idm-next-probes/<日期>；
+# 用 IDM_SHOT_DIR 指到仓库内时也走这里，绝不往用户主目录根写）
+build-probes/
