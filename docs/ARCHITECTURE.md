@@ -463,3 +463,91 @@ bash --noprofile --norc -eo pipefail <UI probes 步骤原文>
 仍未闭合：第 13 步的红。`送达` 字段（第 4 条）现在也还在场上 —— 下一轮若再红，
 annotation 里会同时有"排队/处理/送达/客户端在不在"和第 13 步自己的计时行，
 可以据此判剩余的红属于哪一类，而不是再猜。
+
+### 2026-09-29（第 6 条）— 本文档的否定式断言逐条核（有一句正在被自己推翻）
+
+**起因（用户复核，我确认）**：§7 第 4 条介绍 `idm-next-glass-ui.html` 时写"仓库内零引用"，
+而这句话本身就是一次引用 —— 跑 `grep -rl "glass-ui" --include=*.md --include=*.cpp --include=*.h .`
+命中的那个文件就是 `docs/ARCHITECTURE.md`。"零命中≠不存在"这次是反方向：**声称零命中，
+而命中就是声称本身**。据此把全文"零引用 / 无人依赖 / 已完全废弃 / 仍在编译"类断言扫一遍。
+以下所有命令都在仓库根 `D:\visual studio\lianxi\MFC\idm-next` 执行，命中数是当次原文输出
+（原文见本条末尾的取证块）。
+
+| # | 断言（位置） | grep 命令 | 命中数 | 结论 |
+|---|---|---|---|---|
+| 1 | `idm-next-glass-ui.html` 仓库内零引用（§7 第 4 条「两个未跟踪文件」段） | `grep -rl "glass-ui" --include=*.md --include=*.cpp --include=*.h .`（V1） | **1** 个文件 = `./docs/ARCHITECTURE.md` | **原口径不成立（自指）**。改为可核口径：除本清单自身外零引用；`src/`+`CMakeLists.txt`+`tools/` 命中 **0**（V2）；放开扩展名扫全仓仍只有本文件 **1** 处（V3） |
+| 2 | 该 HTML "与已停用的 `glass_effect.cpp` 同一条废弃路线"（§7 第 4 条） | 在 HTML 内找代码符号：`grep -c "glass_effect\|MainWindow\|\.cpp" idm-next-glass-ui.html`（V4） | **0** | **降级为未核实**：代码层零联系，只有"玻璃拟态"这个设计意图相同。已把措辞收窄为"设计意图相同" |
+| 3 | `core/network.c`（WinHTTP 874 行）**未编译**（§1「死代码」行、§1.2 表、§3.2 表） | `ls src/core/network.c`（V5a）· `wc -l src/core/legacy/network_winhttp.c`（V5b）· `grep -c network_winhttp build/build.ninja`（V5c） | 原路径**不存在**；行数 **874**；当前构建脚本 **0** | **成立且更强**，但路径过期：文件现为 `src/core/legacy/network_winhttp.c`，874 行复核一致 |
+| 4 | `gui/glass_effect.cpp` 已停用但**仍在编译**（§1「死代码」行） | `grep -c glass_effect CMakeLists.txt`（V6a）· `grep -c glass_effect build/build.ninja`（V6b）· `ls build/CMakeFiles/idm-next.dir/src/gui/glass_effect.cpp.obj`（V6c） | **0 / 0**（旧路径 obj 存在，日期 2026-09-14） | **不成立**（这条"现状盘点"在 09-19 阶段 1 之后就已过期）。那个 `.obj` 是搬迁前的遗留产物，不能当"仍在编译"的证据 —— 与本仓库踩过的 stale-binary 同一个坑 |
+| 5 | `glass_effect.*` 移出编译、停用留档 ⇒ 可理解为"已完全废弃"（§1.2 表、§4 阶段 1） | `grep -rn glass_effect src/ --include=*.h --include=*.cpp`（V7） | **2**：`src/gui/legacy/glass_effect.cpp:1`（自身）+ **`src/gui/main_window.h:10` 仍 `#include "legacy/glass_effect.h"`** | **"移出编译"成立；"完全废弃/无人引用"不成立**：头文件仍被一个参与编译的翻译单元 include（`main_window.cpp` 内无 glass 符号，命中 0，所以只是 include 未使用） |
+| 6 | §1.1 六条"下层 → gui 引用数 = 0"（§1.1 表） | 按 `src/gui/*.h` 的 17 个头名做 include 扫描（V8） | core **0** · storage **0** · utils **0** · protocols **0** · cli **0** · host **0** | **今日复核仍成立**。对照：app **5**、model **1** |
+| 6b | §1.1 结论"没有'下层回头依赖上层'的倒挂"（§1.1 结论行） | 同 V8，再看非零明细（V12） | app 5 条**合规**（§2 的铁律允许 app 层持 gui 引用）；model **1 条不合规** | **不成立**：`src/model/task_list_model.cpp:2` → `src/gui/app_icons.h`（`fileTypeIcon` 画文件名列图标）。阶段 1 搬迁后才出现，写 §1.1 时该文件还在 `gui/` ⇒ 当时为真。§1.1 结论行已就地更正，**本轮只记录不修**（用户指令：本轮不加新活） |
+| 7 | `cfg.max_concurrent` 在引擎里"只被写入、无人读"（§7 第 1 条「改了什么」1.） | `grep -rn max_concurrent src/ tools/`（V9） | **8**，其中唯一读者 `src/core/download_core.c:550 concurrent_limit()` | **作为历史陈述成立、作为现状不成立**：`ef1fb7d` 起已有人读。原文有"以前"限定，保留；引用时须知道它已过期 |
+| 8 | 探针产物目录"仓库内零脚本依赖"（§7「（续）」的"仍然没验证"2.） | `grep -rn idm_shots --include=*.py --include=*.yml --include=*.sh --include=*.ps1 .`（V10） | **4**，全部落在 `tools/probe_artifact_inventory.py`（3 条是它自己的注释/名字族匹配逻辑 = 自指，1 条正文描述旧默认值） | **排除自指后 0 ⇒ 成立**。同一条自己留的那句"别的会话/手工习惯是否还在往这些目录写"**本机无账本可查，仍未核实** |
+| 9 | 重构前**无 `.git`**（§1「版本控制」行） | `git log --reverse` 取首笔（V11） | 首笔 `874427e`，日期 2026-09-19 | **半核实 → 降级**：只能证明"09-19 之前没有提交"，证明不了"当时目录里没有 .git"（也可能被删过）。可核写法是"首笔提交在 2026-09-19" |
+| 10 | "零逻辑改动 / 纯移动零风险 / 零视觉变化 / 渲染零差异"（§3.2 标题、§4 阶段 1 的标题与验收行、阶段 2-3 各段） | 非引用类：要靠 2026-09-19 那次的 A/B 构建与 md5 对照复现 | — | **本轮未核实**：那批 md5/PNG 对照的原始产物已不在（截图从未入 git），无法复跑。保留原文，但按"当时记录"读，不当作今天的可核事实 |
+
+取证块（**命令逐字可复跑**，在仓库根执行；输出为当次原文。`←` 与 `（）` 内是我加的注释；
+`ls` / `wc` 这类单值结果写成"→ 值"的形式）：
+```
+V1 $ grep -rl "glass-ui" --include=*.md --include=*.cpp --include=*.h .
+   ./docs/ARCHITECTURE.md
+V2 $ grep -rn "glass-ui" src/ CMakeLists.txt tools/ | wc -l
+   0
+V3 $ grep -rIn "idm-next-glass-ui" . | grep -v '^./.git/' | cut -d: -f1 | sort | uniq -c
+         1 ./docs/ARCHITECTURE.md
+V4 $ grep -c "glass_effect\|MainWindow\|\.cpp" idm-next-glass-ui.html
+   0
+V5 $ ls src/core/network.c                        → No such file or directory
+   $ wc -l src/core/legacy/network_winhttp.c      → 874
+   $ grep -c network_winhttp build/build.ninja    → 0
+V6 $ grep -c glass_effect CMakeLists.txt          → 0
+   $ grep -c glass_effect build/build.ninja       → 0
+   $ ls build/CMakeFiles/idm-next.dir/src/gui/glass_effect.cpp.obj
+     → 存在，36000 字节，2026-09-14 08:11（搬迁前遗留）
+V7 $ grep -rn "glass_effect" src/ --include=*.h --include=*.cpp
+   src/gui/legacy/glass_effect.cpp:1:#include "glass_effect.h"
+   src/gui/main_window.h:10:#include "legacy/glass_effect.h"   // 玻璃拟态特效（已停用，留档…）
+   （另：grep -n "glass\|Glass" src/gui/main_window.cpp → 0 命中 ⇒ 只 include 未使用）
+V8 $ HDRS=$(find src/gui -name '*.h' -printf '%f\n'|sort -u); for d in core storage utils \
+       protocols cli host app model; do printf '%-9s %s\n' "$d" \
+       "$(grep -rh '#include' src/$d | grep -F -w -f <(echo "$HDRS") | wc -l)"; done
+   core      0
+   storage   0
+   utils     0
+   protocols 0
+   cli       0
+   host      0
+   app       5
+   model     1
+   （同一批命令里另跑 find … | wc -l ⇒ gui 头 17 个，是被匹配的名单规模）
+V9 $ grep -rn "max_concurrent" src/ tools/
+   src/core/download_core.c:550:    return g_cfg.max_concurrent > 0 ? g_cfg.max_concurrent : 0;   ← 唯一读者
+   src/core/download_core.c:1300:        g_cfg.max_concurrent     = 3;
+   src/core/download_core.c:2114:    g_cfg.max_concurrent  = cfg->max_concurrent;
+   src/core/download_core.h:147:    int max_concurrent;     /* 同时下载的任务数 */
+   src/utils/settings.cpp:152:    cfg.max_concurrent     = m_maxConcurrent;
+   tools/engine_selftest.c:2082:        cfg.max_concurrent = A_LIMIT;
+   tools/engine_selftest.c:2141:        cfg.max_concurrent = B_LIMIT;
+   tools/engine_selftest.c:2163:        cfg.max_concurrent = 3;
+V10 $ grep -rn "idm_shots" --include=*.py --include=*.yml --include=*.sh --include=*.ps1 .
+    ./tools/probe_artifact_inventory.py:6:`C:/Users/yyyy/idm_shots`，配合"每轮临时换一个新 IDM_SHOT_DIR / 顺手 tee 一份构建日志"
+    ./tools/probe_artifact_inventory.py:137:    """按名字族（idm_ui_vN / idm_shots*）分组并比较内容。"""
+    ./tools/probe_artifact_inventory.py:144:        elif name.startswith("idm_shots"):
+    ./tools/probe_artifact_inventory.py:145:            key = "idm_shots*"
+    （4 条命中全在这一个文件 = 检查工具自身的注释与名字族逻辑；再 grep -v 该文件 → 0）
+V11 $ git log --reverse | head -1
+    874427e chore: 建立工程基线（v0.1.0 源码 + 工程规范底座）  （2026-09-19）
+V12 $ HDRS=$(find src/gui -name '*.h' -printf '%f\n'|sort -u)
+    $ grep -rn "#include" src/model src/app | grep -F -w -f <(echo "$HDRS")
+    src/model/task_list_model.cpp:2:#include "app_icons.h"   // fileTypeIcon：文件名列的类型图标
+    src/app/appearance_controller.cpp:11:#include "progress_delegate.h"
+    src/app/appearance_controller.cpp:12:#include "sidebar_panel.h"
+    src/app/appearance_controller.cpp:13:#include "app_icons.h"
+    src/app/queue_scheduler.h:10:#include "queue_manager.h"     // DownloadQueue（队列定义）
+    src/app/task_controller.cpp:9:#include "queue_manager.h"
+```
+
+本轮**没做**的（按用户指令）：`idm-next-glass-ui.html` 一个字节没动、没搬、没进 `.gitignore`、
+没删 —— 去向仍等拍板，这条不算已处理（`git status -sb` 里它仍是 `??`）。
+第 13 步的 3 个红本轮**不收**，仍按第 5 条的门槛写作**未闭合**。
