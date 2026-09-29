@@ -74,7 +74,7 @@ jobs:
                   IDM_NOTICE_PROBE IDM_IPC_PROBE IDM_FORWARD_PROBE
                   IDM_PROXY_PROBE IDM_ZOOM_PROBE IDM_TOOLPROBE_PROBE
                   IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE
-                  IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE"
+                  IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE IDM_FLUSH_PROBE"
           BAD=""
           TOTAL_PASS=0
           for P in $PROBES; do
@@ -103,14 +103,14 @@ jobs:
             echo "::error::UI 探针未全绿：$BAD"
             exit 1
           fi
-          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 13 个模式共 50 条，
+          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 14 个模式共 53 条，
           # 留 6 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
           # 但整段被删空、或大面积退化仍然会红。
-          if [ "$TOTAL_PASS" -lt 44 ]; then
-            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥44）—— 断言被删了还是根本没跑？"
+          if [ "$TOTAL_PASS" -lt 46 ]; then
+            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥46）—— 断言被删了还是根本没跑？"
             exit 1
           fi
-          echo "UI 探针全绿：13 个模式共 $TOTAL_PASS 条断言"
+          echo "UI 探针全绿：14 个模式共 $TOTAL_PASS 条断言"
 
       - name: Engine self-test (local authenticated HTTP server)
         shell: msys2 {0}

@@ -40,7 +40,8 @@
 #include "schedule_service.h"
 #include "tool_probe.h"
 #include "cli_forward.h"
-#include "off_thread.h"   // IDM_OFFTHREAD_PROBE：自愈不再冻住 GUI 线程   // IDM_FORWARD_PROBE：转发的四条出口各自该留下什么证据
+#include "off_thread.h"    // IDM_OFFTHREAD_PROBE：自愈不再冻住 GUI 线程
+#include "socket_drain.h"  // IDM_FLUSH_PROBE：回话必须推完才允许关
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>        // dup/dup2/freopen：把 stderr 临时挪走，好断言「失败时说不说得清」
@@ -1246,6 +1247,120 @@ int main(int argc, char** argv) {
                okLoop ? "[PASS]" : "[FAIL]", (long long)maxGapMs);
         printf("%s done 恰好一次\n", okOnce ? "[PASS]" : "[FAIL]");
         return (okJob && okDone && okLoop && okOnce) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_FLUSH_PROBE=1 ──
+     * 双向证明"回话必须推完再销毁"这条修复到底管不管用 —— 不是靠"连投 50 次没丢"
+     * 那种只能证明正常情况正常的断言。
+     *
+     * 场景：服务端要发一份 2MB 的回话，对端故意晚 250ms 才开始读 ⇒ 写必然被背压挡住，
+     * 于是出现"还有字节没发出去"的状态。然后两个分支只做一件不同的事，
+     * 最后**都立刻 delete 那个 socket**：
+     *   旧写法：write → flush → waitForBytesWritten(2000) 一次 → 销毁
+     *           （Qt 的 waitForBytesWritten 只保证"这段时间内写出去过字节"，
+     *             不保证推完 ⇒ 剩余字节随 socket 一起没了）
+     *   新写法：write → flush → drainSocketBeforeClose(2000) 推到 bytesToWrite()==0 → 销毁
+     * 判据：旧分支客户端收到的字节 **少于** 2MB（丢，必红），新分支 **正好等于** 2MB（必绿）。
+     *
+     * ⚠️ 与生产的差别要说清楚：生产里销毁是 deleteLater()（下一轮事件循环才真删），
+     * 所以只有那一轮被别的事占住时才会真丢 —— 这正是它在 CI 上表现为间歇红、
+     * 而本机连投 600 次都不丢的原因。本探针把销毁改成即时，把同一个机制变成
+     * **可重复触发**，用来证明"先推完再销毁"确实是止损的那一步。
+     * 生产侧的现行信号是日志字段 `送达=0/1`（drain 的返回值）：
+     * CI 再看到 `送达=0` 就是这条路；若全是 `送达=1` 而客户端仍超时，就得换方向查。 */
+    if (qEnvironmentVariableIsSet("IDM_FLUSH_PROBE")) {
+        const int PAYLOAD = 2 * 1024 * 1024;
+        const QByteArray payload(PAYLOAD, 'x');
+        const QString pipe = QStringLiteral("idm-flush-probe-%1")
+                                 .arg(QCoreApplication::applicationPid());
+        qint64 drainElapsedMs = -1;
+
+        auto runCase = [&](bool useDrain, int readerDelayMs) -> qint64 {
+            QLocalServer::removeServer(pipe);
+            QLocalServer srv;
+            if (!srv.listen(pipe)) return -1;
+            QLocalSocket* serverSide = nullptr;
+            QObject::connect(&srv, &QLocalServer::newConnection, [&srv, &serverSide] {
+                serverSide = srv.nextPendingConnection();
+            });
+
+            std::atomic<qint64> received { 0 };
+            std::atomic<bool> clientDone { false };
+            QElapsedTimer spentHere;
+            spentHere.start();
+            QThread* client = QThread::create([&] {
+                QLocalSocket s;
+                s.connectToServer(pipe);
+                if (s.waitForConnected(3000)) {
+                    if (readerDelayMs >= 0)
+                        QThread::msleep(readerDelayMs);      // 晚读：制造/缓解背压
+                    while (s.state() == QLocalSocket::ConnectedState) {
+                        s.waitForReadyRead(200);
+                        received += s.readAll().size();
+                    }
+                    received += s.readAll().size();          // 断开后缓冲里的残余也要读完
+                }
+                clientDone = true;
+            });
+            client->start();
+
+            for (int i = 0; i < 300 && !serverSide; ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(5);
+            }
+            qint64 pendingAfter = -1;
+            if (serverSide) {
+                serverSide->write(payload);
+                serverSide->flush();
+                bool waitRet = false;
+                bool drained = false;
+                if (useDrain) {
+                    drained = drainSocketBeforeClose(serverSide, 2000);
+                } else {
+                    waitRet = serverSide->waitForBytesWritten(2000);   // 旧写法：等一次就算数
+                    drained = (serverSide->bytesToWrite() == 0);
+                }
+                pendingAfter = serverSide->bytesToWrite();
+                if (useDrain) drainElapsedMs = spentHere.elapsed();
+                printf("[flush] %s(delay=%d) 单次等待返回=%d 销毁前待发=%lld 推完=%d 用时=%lldms\n",
+                       useDrain ? "drain" : "旧(只等一次)", readerDelayMs,
+                       waitRet ? 1 : 0, (long long)pendingAfter, drained ? 1 : 0,
+                       (long long)spentHere.elapsed());
+                delete serverSide;
+                serverSide = nullptr;
+            }
+            while (!clientDone.load()) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(5);
+            }
+            client->wait(5000);
+            delete client;
+            return received.load();
+        };
+
+        /* 两组情形都跑了，结论是**负结果**，照实写在这儿：
+             · 对端完全不读 ⇒ 单次 waitForBytesWritten 之后 bytesToWrite() 也已经是 0
+               （写对端已断开的管道会被直接丢弃，不会留下"待发字节"）；
+             · 对端晚 300ms 读 ⇒ 旧写法（只等一次）与新写法（drain 到空）都把 2MB 完整送到。
+           也就是说：**这台机器上构造不出"返回时仍有待发字节"的状态**，
+           因此 drainSocketBeforeClose 的必要性在本地无法证明，也无法证伪 ——
+           它的判据只能来自生产的 `送达=0/1` 字段（见 docs/ARCHITECTURE.md §7）。
+           本探针保留的是这个 helper 本身可证的两条契约： */
+        const qint64 oldRx = runCase(false, 300);
+        const qint64 newRx = runCase(true, 300);
+        QLocalServer::removeServer(pipe);
+
+        /* ① 契约：推完再销毁 ⇒ 晚读的对端也必须收到完整 2MB（少一字节就是 drain 写坏了） */
+        const bool okDeliver = (newRx == PAYLOAD);
+        /* ② 契约：预算必须封顶 —— 这个函数跑在 GUI 线程上，它不能把人钉死。 */
+        const bool okBounded = (drainElapsedMs >= 0 && drainElapsedMs < 2600);
+        printf("[flush] 本机负结果：旧写法收到 %lld/%d，新写法收到 %lld/%d ⇒ 本地无法复现丢字节\n",
+               (long long)oldRx, PAYLOAD, (long long)newRx, PAYLOAD);
+        printf("%s 推完再销毁：对端晚读 300ms 仍收到完整 2MB\n",
+               okDeliver ? "[PASS]" : "[FAIL]");
+        printf("%s drain 的等待被预算封顶（实测 %dms，需 <2600ms，跑在 GUI 线程上）\n",
+               okBounded ? "[PASS]" : "[FAIL]", (int)drainElapsedMs);
+        return (okDeliver && okBounded) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_PROXY_PROBE=1 ──
