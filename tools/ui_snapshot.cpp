@@ -44,6 +44,7 @@
 #include <QToolBar>
 #include <QFont>
 #include <QElapsedTimer>
+#include <atomic>
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -699,8 +700,8 @@ int main(int argc, char** argv) {
      * 以前 IpcServer::start() 在 MainWindow 构造里同步跑，于是「构造完成 ~ app.exec()」
      * 之间管道存在但没人读——第二实例连得上、写得进、等不到回话，3 秒后按失败退出 1
      * （CI「secondary IDM Next launch exited with code 1」就是这个 1）。
-     * 这里不起第二个进程（那会往本机再拉一个 GUI），而是在同一进程里用 QLocalSocket
-     * 扮演那个迟到的第二实例：
+     * 这里不起第二个进程（那会往本机再拉一个 GUI），而是在本进程内用**另一条线程**
+     * 跑 QLocalSocket 扮演那个迟到的第二实例：
      *   ① 窗口构造完、循环第一轮之前：必须**连不上**（黑洞窗口已消除）；
      *   ② 转一圈事件循环（start() 的 singleShot(0) 被触发）后：必须连得上；
      *   ③ 发一条 activate：必须拿到 success=true 的回话。
@@ -732,31 +733,48 @@ int main(int argc, char** argv) {
 
             QCoreApplication::processEvents();   /* 第一轮：singleShot(0) → IpcServer::start() */
 
-            QLocalSocket late;
-            late.connectToServer(QStringLiteral("idm-next-ipc"));
-            listeningAfterLoop = late.waitForConnected(2000);
-            if (listeningAfterLoop) {
-                QJsonObject req;
-                req[QStringLiteral("command")] = QStringLiteral("activate");
-                late.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
-                late.flush();
-                /* 本进程里客户端和服务端是同一条线程：QLocalSocket 的写出走
-                 * QWindowsPipeWriter，是异步的，要事件循环才能真正把字节推进管道。
-                 * 不先泵一轮就进 handleClient 的话，它的 waitForReadyRead(100)
-                 * 读不到自己的请求（10 轮 ≈1 秒后按空命令回绝），假红。
-                 * 真实场景是两个进程，各自的写不依赖对方循环，所以这里只是
-                 * 补齐「单进程扮演第二实例」这个做法的必要一步。 */
-                QCoreApplication::processEvents();
-                if (late.waitForBytesWritten(1000)) {
-                    /* 服务端 handleClient 会阻塞这条线程，先把请求送达再泵一次收回话 */
-                    gotReply = late.waitForReadyRead(2000);
-                    if (gotReply) {
+            /* 客户端放到**另一条线程**里：真实场景它就是另一个进程。
+               同线程既当客户端又当服务端时，「字节能不能在 handleClient 进去之前推出去」
+               取决于一次 processEvents() 里 notifier 的先后 —— 那是测具自己的竞态，
+               不是被测代码的。实测踩到：构造函数里少跑 1.5 秒组件探测，这个竞态就翻脸
+               （③④ 假红），所以不能靠"多泵一圈事件循环"糊过去。
+               GUI 线程这边要继续转，否则 singleShot(0) 排队的 listen 和 newConnection
+               永远不会被处理 —— 那正是本探针要验的东西。 */
+            std::atomic<bool> clientFinished { false };
+            std::atomic<bool> connected { false };
+            std::atomic<bool> replyOk { false };
+            std::atomic<bool> successOk { false };
+
+            QThread* client = QThread::create([&] {
+                QLocalSocket late;
+                late.connectToServer(QStringLiteral("idm-next-ipc"));
+                connected = late.waitForConnected(2000);
+                if (connected) {
+                    QJsonObject req;
+                    req[QStringLiteral("command")] = QStringLiteral("activate");
+                    late.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                    late.flush();
+                    if (late.waitForBytesWritten(2000) && late.waitForReadyRead(3000)) {
                         const QJsonObject resp = QJsonDocument::fromJson(late.readAll()).object();
-                        replySaysSuccess = resp.value(QStringLiteral("success")).toBool(false);
+                        replyOk   = !resp.isEmpty();
+                        successOk = resp.value(QStringLiteral("success")).toBool(false);
                     }
+                    late.disconnectFromServer();
                 }
-                late.disconnectFromServer();
+                clientFinished = true;
+            });
+            client->start();
+            for (int i = 0; i < 300 && !clientFinished.load(); ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
             }
+            client->wait(5000);
+            delete client;
+
+            listeningAfterLoop = connected.load();
+            gotReply           = replyOk.load();
+            replySaysSuccess   = successOk.load();
+
         }
 
         printf("%s 窗口构造完、事件循环第一轮之前没人监听（不留下「连得上但没人读」的黑洞）\n",
