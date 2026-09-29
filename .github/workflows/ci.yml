@@ -340,21 +340,31 @@ jobs:
           # 因为"这次绿但排队已经 2.4s"正是下一次红的预告片。
           function Add-IpcLatencies {
             $found = @()
+            $worst = 0
             foreach ($f in (Get-ChildItem -LiteralPath $logDir -Filter '*.err' -ErrorAction SilentlyContinue)) {
-              $lines = Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue |
-                       Where-Object { $_ -match 'IPC .+ (\-?\d+)ms .+ (\d+)ms' }
+              $lines = Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue |
+                       Where-Object { $_ -match 'IPC' }
               foreach ($ln in $lines) {
-                $m = [regex]::Match($ln, 'IPC [^:]*: (\S+) .*?(\-?\d+)ms\D+(\d+)ms')
+                # 真实格式：IPC 请求: activate → 成功（排队 11ms，处理 2ms，回话时客户端=在）
+                # ⚠️ 两个数之间是中文「，」不是空格 —— 我第一版按空格写模式，
+                # 结果 CI 上永远报「<没抓到>」，一条静默失效的取证比没有取证更坏。
+                $m = [regex]::Match($ln, 'IPC [^:]*: (\S+) .*?(-?\d+)ms\D{0,8}(\d+)ms')
                 if ($m.Success) {
-                  $found += ('{0}={1}/{2}ms@{3}' -f $f.BaseName, $m.Groups[1].Value,
-                                                    $m.Groups[2].Value, $m.Groups[3].Value)
+                  $q = [int]$m.Groups[2].Value
+                  if ($q -gt $worst) { $worst = $q }
+                  $found += ('{0}={1} cmd={2} q={3}ms h={4}ms' -f $f.BaseName, $q,
+                            $m.Groups[1].Value, $q, [int]$m.Groups[3].Value)
                 }
               }
             }
             if ($found.Count -gt 0) {
-              Add-Timing 'IPC 服务端 排队ms/命令（每条请求）' (($found -join ' , '))
+              Add-Timing ('IPC 服务端排队（最差 ' + $worst + 'ms，共 ' + $found.Count + ' 条）') ($found -join ' , ')
+              # 排队逼近 3 秒就是下一次「连上了但没回话」的预告 —— 报出来，别等红了才看。
+              if ($worst -ge 1500) {
+                Write-Host ("::warning title=step11::IPC 排队已达 $worst ms（客户端死线 3000ms）—— 有东西又在占住 GUI 线程")
+              }
             } else {
-              Add-Timing 'IPC 服务端 排队ms/命令（每条请求）' '<没抓到：日志里没有计时字段>'
+              Add-Timing 'IPC 服务端排队' '<没抓到：日志里没有计时字段>'
             }
           }
 
