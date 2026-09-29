@@ -35,7 +35,7 @@ jobs:
 
       - name: Configure
         shell: msys2 {0}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DIDM_BUILD_UI_SNAPSHOT=ON
 
       - name: Build
         shell: msys2 {0}
@@ -46,6 +46,67 @@ jobs:
         run: |
           if (-not (Test-Path build/idm-next.exe)) { throw 'idm-next.exe missing' }
           if (-not (Test-Path build/idm-next-host.exe)) { throw 'idm-next-host.exe missing' }
+
+      - name: UI probes (offscreen assertion suite)
+        shell: msys2 {0}
+        run: |
+          # 这 11 个离屏探针是 UI 侧唯一的回归网：站点口令不被掩码回写（P0）、
+          # 代理语义两侧一致、缩放能持久化、IPC 的 listen 推迟到事件循环第一轮、
+          # 转发的四条出口各留下什么证据……以前只有我本机跑过，CI 一次都没提。
+          # 现在跟引擎自测一样钉成闸门，规则也一致：不 skip、不光学退出码、
+          # 每个探针单独报数，红色时必须打出 ::error::（日志 403，只有 annotation 读得到）。
+          # 名单里刻意不含 IDM_ICON_PROBE / IDM_ARROW_PROBE —— 那两个是把图标铺开
+          # 给人眼对照的，一条断言都没有，放进闸门就等于挂两条永远绿的假保险。
+          export QT_QPA_PLATFORM=offscreen
+          export QT_QPA_FONTDIR="C:/Windows/Fonts"
+          export IDM_SHOT_DIR="$(cygpath -u "$TEMP")/idm-probe-shots"
+          mkdir -p "$IDM_SHOT_DIR"
+
+          if [ ! -f build/ui_snapshot.exe ]; then
+            echo "::error::build/ui_snapshot.exe 没生成（Configure 里的 -DIDM_BUILD_UI_SNAPSHOT=ON 被改掉了？）"
+            exit 1
+          fi
+
+          PROBES="IDM_SCHEDULE_PROBE IDM_SETTINGS_PROBE IDM_SITEAUTH_PROBE
+                  IDM_NOTICE_PROBE IDM_IPC_PROBE IDM_FORWARD_PROBE
+                  IDM_PROXY_PROBE IDM_ZOOM_PROBE IDM_TOOLPROBE_PROBE
+                  IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE"
+          BAD=""
+          TOTAL_PASS=0
+          for P in $PROBES; do
+            # ⚠️ 必须 export：`env VAR=1 ui_snapshot.exe` 在这套工具链上会静默不传变量，
+            # 探针一个都不跑、还回 0 —— 那就是一条永远不会红的假绿闸门（本机实测踩过）。
+            export "$P=1"
+            RC=0
+            OUT=$(./build/ui_snapshot.exe 2>&1) || RC=$?
+            unset "$P"
+            NP=$(printf '%s' "$OUT" | grep -ac '\[PASS\]' | tail -1) || true
+            NF=$(printf '%s' "$OUT" | grep -ac '\[FAIL\]' | tail -1) || true
+            NP=${NP:-0}
+            NF=${NF:-0}
+            TOTAL_PASS=$((TOTAL_PASS + NP))
+            echo "$P rc=$RC pass=$NP fail=$NF"
+            # 「一条断言都没报」也算红：探针改成提前 return、或者输出被吞掉，
+            # 退出码都还是 0，但闸门已经空了。
+            if [ "$RC" != "0" ] || [ "$NF" != "0" ] || [ "$NP" = "0" ]; then
+              BAD="$BAD $P"
+              echo "::error::$P 未通过（rc=$RC，$NP 条 PASS，$NF 条 FAIL；非 0 退出、出现 FAIL、或一条断言都没跑，都算红）"
+              printf '%s\n' "$OUT" | tail -25
+            fi
+          done
+
+          if [ -n "$BAD" ]; then
+            echo "::error::UI 探针未全绿：$BAD"
+            exit 1
+          fi
+          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 11 个模式共 40 条，
+          # 留 5 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
+          # 但整段被删空、或大面积退化仍然会红。
+          if [ "$TOTAL_PASS" -lt 35 ]; then
+            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥35）—— 断言被删了还是根本没跑？"
+            exit 1
+          fi
+          echo "UI 探针全绿：11 个模式共 $TOTAL_PASS 条断言"
 
       - name: Engine self-test (local authenticated HTTP server)
         shell: msys2 {0}
