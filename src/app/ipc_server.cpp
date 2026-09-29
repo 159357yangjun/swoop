@@ -302,24 +302,36 @@ void IpcServer::handleClient(QLocalSocket* client)
 
     // 发送响应
     QByteArray respData = QJsonDocument(response).toJson(QJsonDocument::Compact);
-    /* 写之前先记下客户端还在不在：**这才是"客户端是否已经超时走了"的判据**。
-     * waitForBytesWritten 的返回值不能当交付证明 —— 实测客户端好好读完回话时它仍返回
-     * false（QLocalSocket 在 Windows 上的写出是异步的，字节在 disconnect 期间才推完），
-     * 拿它当"没写出去"看会把人带偏。 */
+    /* ⚠️ 必须把字节真的推完再关 —— 这条是 CI 第 13 步那个间歇红的真因。
+     * Windows 上 QLocalSocket 的写出走 QWindowsPipeWriter（异步），而旧代码是
+     * write → flush → waitForBytesWritten(2000) 一次 → disconnectFromServer() → deleteLater()：
+     * 只要那一次等待没等到写完，socket 就被销毁，挂起的回话静默丢弃。
+     * 现场证据是 CI 自己报回来的两个数（2e54031）：
+     *   服务端 "IPC 请求: activate → 成功（排队 51ms，处理 0ms）"
+     *   副实例 "已连上运行中的实例并送出 39 字节，3 秒内没有回话"
+     * —— 51 毫秒就答了，客户端却什么都没收到；不是"服务端慢"，是"答了没发出去"。
+     * 我上一轮把 `waitForBytesWritten` 返回 false 解读成"不能当送达证明"，
+     * 方向反了：它就是没推完，而推不完还被销毁正是丢回话的机制。 */
     const bool clientStillHere = (client->state() == QLocalSocket::ConnectedState);
     client->write(respData);
     client->flush();
-    client->waitForBytesWritten(2000);
+    qint64 flushedFor = 0;
+    while (client->bytesToWrite() > 0 && flushedFor < 2000) {
+        client->waitForBytesWritten(100);
+        flushedFor += 100;
+    }
+    const bool delivered = (client->bytesToWrite() == 0);
     client->disconnectFromServer();
     client->deleteLater();
 
-    /* 这行是「为什么慢」的唯一取证入口，CI 第 13 步会把它抓进 annotation：
-     * 排队大 ⇒ 事件循环被别的东西占住（首次绘制、磁盘、以前的组件自愈）；
-     * 处理大 ⇒ 命令本身在 GUI 线程上慢；客户端=已走 ⇒ 它没等到这句回话。 */
-    Log::info(QStringLiteral("IPC 请求: %1 → %2（排队 %3ms，处理 %4ms，回话时客户端=%5）")
+    /* 取证入口（CI 第 13 步抓进 annotation，绿的那些轮也记）：
+     * 排队大 ⇒ 事件循环被别的东西占住；处理大 ⇒ 命令本身在 GUI 线程上慢；
+     * 送达=0 ⇒ 回话没推出去（就是上面这个 bug 的现行信号）。 */
+    Log::info(QStringLiteral("IPC 请求: %1 → %2（排队 %3ms，处理 %4ms，送达=%5，回话时客户端=%6）")
                   .arg(command,
                        response.value("success").toBool() ? QStringLiteral("成功") : QStringLiteral("失败"))
                   .arg(queueMs)
                   .arg(handledClock.elapsed())
+                  .arg(delivered ? 1 : 0)
                   .arg(clientStillHere ? QStringLiteral("在") : QStringLiteral("已走")));
 }
