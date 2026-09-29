@@ -281,3 +281,39 @@ CI 侧：`369bf21` 那一轮 step 8/9/13 全 success，第 13 步报
    0 失败，复现不出。已移除两处结构性脆弱（客户端线程无事件循环、只泵一圈就假定
    listen 完成 + 等不到就明确报「前置不成立」），修好的版本 30/30 绿、闸门 3 轮绿，
    但这只能说"已知脆弱被拿掉"，不能说"那条 flaky 修好了"。
+
+### 2026-09-29（续）— 探针产物不再写进用户主目录根；47 项遗留清单已交
+
+本轮修的不是产品功能，而是**我自己留下的工作区污染**：`ui_snapshot` 的输出目录默认值
+曾经是硬编码的 `C:/Users/yyyy/idm_shots`，加上"每轮临时换一个新 `IDM_SHOT_DIR`、
+顺手 tee 一份构建日志到主目录根"的写法，09-11→09-29 攒出 **47 个条目 / 191.5MB**
+（十几个截图目录 + 三十来份日志）堆在用户工作区根上。
+
+改动：
+1. `tools/ui_snapshot.cpp` 默认输出 → `%TEMP%/idm-next-probes/<当天日期>`；
+2. 同文件新增 `sitsInHomeRoot()` 守卫：`IDM_SHOT_DIR` 直接落在主目录第一层 ⇒ **拒写、返回 2**
+   （约定会被忘记，所以做成断言）；
+3. `.github/workflows/ci.yml` 的产物目录统一到同一约定；
+4. `.gitignore` 增加 `build-probes/`（仓库内备选位置）；
+5. 新增 `tools/probe_artifact_inventory.py`（只读清点器：清单 + 仓库引用检查 + 同族去重比较
+   + `--count`），产物表落在 `docs/probe-artifact-inventory-2026-09-29.md`。
+
+验证命令与实际输出：
+```
+IDM_SHOT_DIR="C:/Users/yyyy/idm_shots_new" ./build/ui_snapshot.exe
+  → rc=2  "IDM_SHOT_DIR 拒绝写进用户主目录根：C:/Users/yyyy/idm_shots_new"
+（不传）./build/ui_snapshot.exe
+  → rc=0  [out] 产物目录 = %TEMP%\idm-next-probes\2026-09-29
+python tools/probe_artifact_inventory.py --count
+  → COUNT=47 TOTAL_MB=191.5 HOME=C:\Users\yyyy
+bash --noprofile --norc -eo pipefail <UI probes 步骤原文>
+  → 13 模式 rc 全 0，「UI 探针全绿：13 个模式共 50 条断言」
+```
+
+仍然没验证 / 没做的：
+1. **一个文件都没删** —— 清单交完等你拍定；`idm_ui_v2..v8` 很可能是 09-14 那轮 UI 迭代
+   仅存的逐版本快照（截图从不入 git），删错无法重建。
+2. 引用检查的结论是"仓库内零脚本依赖"，但**别的会话/手工习惯是否还在往这些目录写**，
+   这台机器上没有账本可查，我只知道自己这轮之后不再写。
+3. `--match` 的判定用同名数为主：同一份代码连跑两次，部分面板的 PNG 也会有噪声差异，
+   所以"逐字节不同"不能当"界面变了"的证据（本轮实测：与当前渲染同名 14、逐字节同 6）。
