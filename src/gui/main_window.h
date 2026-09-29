@@ -60,6 +60,13 @@ enum TreeNodeRole {
     CountRole    = Qt::UserRole + 6   // 该节点下的任务数（-1 = 不显示徽标）
 };
 
+// 把设置页的代理应用到 Qt 应用级代理（站点抓取器等 Qt 网络栈）。
+// 判据与 C 引擎侧 dlmgr_set_proxy() 一致：type 非 http/socks、host 为空、port<=0
+// 一律视为「不用代理」，并且**显式清掉**已装的全局代理 —— 否则关代理会残留到重启。
+// 自由函数而非成员，是为了让 IDM_PROXY_PROBE 能逐个组合断言而不必构造主窗口。
+void applyQtApplicationProxy(const QString& type, const QString& host, int port,
+                             const QString& user, const QString& pass);
+
 // 主窗口：菜单栏 + 工具栏 + 左侧分类树 + 右侧任务列表 + 状态栏
 // 所有下载操作经由 DownloadManager（引擎 C→Qt 桥接）完成
 class MainWindow : public QMainWindow {

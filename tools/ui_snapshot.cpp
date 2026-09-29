@@ -765,6 +765,54 @@ int main(int argc, char** argv) {
         return (notListeningYet && listeningAfterLoop && gotReply && replySaysSuccess) ? 0 : 1;
     }
 
+    /* ── 诊断模式：IDM_PROXY_PROBE=1 ──
+     * 「代理」这一项在两侧（libcurl 引擎 / Qt 网络栈）必须得出同一个结论。
+     * 缺陷形态：Qt 侧原来只看 type ——
+     *   · 用户把代理改回「不使用代理」时函数提前 return，从不清除
+     *     QNetworkProxy::setApplicationProxy() 装过的全局代理（全仓库只有那一处写它），
+     *     于是「设置里关了代理，抓取还是走它」，一直残留到重启；
+     *   · host/port 还没填就装一个 host="" port=0 的代理，站点抓取整条 Qt 网络被打死，
+     *     而引擎按「无代理」正常直连 —— 同一个设置两种结果。
+     * 这里直接调自由函数断言判据本身，不构造主窗口（那测不到判据，只测到接线）。 */
+    if (qEnvironmentVariableIsSet("IDM_PROXY_PROBE")) {
+        const QNetworkProxy prev = QNetworkProxy::applicationProxy();
+        auto probe = [](const char* type, const char* host, int port) {
+            applyQtApplicationProxy(QString::fromLatin1(type), QString::fromLatin1(host), port,
+                                    QStringLiteral("u"), QStringLiteral("p"));
+            return QNetworkProxy::applicationProxy();
+        };
+        /* 顺序有意义：先装两种可用代理，再试「关代理」，才测得出"关"是否真的清掉了 */
+        const QNetworkProxy on     = probe("http",  "127.0.0.1", 8888);
+        const QNetworkProxy socks  = probe("socks", "10.0.0.1",  1080);
+        const QNetworkProxy off    = probe("none",  "127.0.0.1", 8888);
+        const QNetworkProxy nohost = probe("http",  "",          8888);
+        const QNetworkProxy zero   = probe("http",  "127.0.0.1", 0);
+
+        const bool okOn = (on.type() == QNetworkProxy::HttpProxy
+                           && on.hostName() == QStringLiteral("127.0.0.1") && on.port() == 8888
+                           && on.user() == QStringLiteral("u")
+                           && on.password() == QStringLiteral("p"));
+        const bool okSocks = (socks.type() == QNetworkProxy::Socks5Proxy && socks.port() == 1080);
+        const bool okOff   = (off.type() == QNetworkProxy::NoProxy);
+        const bool okNoHost = (nohost.type() == QNetworkProxy::NoProxy);
+        const bool okZero   = (zero.type() == QNetworkProxy::NoProxy);
+
+        printf("[proxy] 关代理后 type=%d 空host后 type=%d port=0后 type=%d（NoProxy=%d）\n",
+               (int)off.type(), (int)nohost.type(), (int)zero.type(),
+               (int)QNetworkProxy::NoProxy);
+        printf("%s HTTP 代理连凭据一起下发到 Qt 网络栈\n", okOn ? "[PASS]" : "[FAIL]");
+        printf("%s SOCKS 代理走 Socks5 通道\n", okSocks ? "[PASS]" : "[FAIL]");
+        printf("%s 装过代理后改回「不使用代理」：Qt 全局代理真的被清掉（不残留到重启）\n",
+               okOff ? "[PASS]" : "[FAIL]");
+        printf("%s 选了代理但没填服务器 → 按无代理处理（与引擎一致）\n",
+               okNoHost ? "[PASS]" : "[FAIL]");
+        printf("%s 选了代理但端口为 0 → 按无代理处理（与引擎 download_core.c:1593 一致）\n",
+               okZero ? "[PASS]" : "[FAIL]");
+
+        QNetworkProxy::setApplicationProxy(prev);   // 还原，别把探针的代理留在进程里
+        return (okOn && okSocks && okOff && okNoHost && okZero) ? 0 : 1;
+    }
+
     /* ── 诊断模式：IDM_TEXT_PROBE=1 ──
      * 改了设置页三处说明文字（代理通道、扩展名作用范围、组件路径需重启），
      * 文字变长就可能被裁：QLabel 开了 wordWrap，但外层若给它的高度小于

@@ -952,28 +952,45 @@ void MainWindow::dropEvent(QDropEvent* event)
 
 
 
-void MainWindow::applyNetworkProxy()
+/* 把「设置页的代理」落到 Qt 的应用级代理上（站点抓取器等走 Qt 网络栈的部分用）。
+ * 判据必须与 C 引擎侧 dlmgr_set_proxy() 一致：type 不是 http/socks、host 为空、
+ * port<=0 三种情况引擎都按「不用代理」处理（download_core.c:1593）。
+ * 原来这里只看 type，于是：
+ *   · 用户把代理改回「不使用代理」后本函数直接 return，从不清除
+ *     QNetworkProxy::setApplicationProxy() 装过的那个全局代理 ——
+ *     旧代理会一直残留到进程结束，表现为「设置里明明关了代理，抓取还是走它」；
+ *     全仓库只有这一处写应用级代理，没有别人会替它清掉。
+ *   · type 选了 HTTP 但 host/port 还没填，就装一个 host="" port=0 的代理，
+ *     Qt 侧网络全废而引擎照常直连 —— 同一个设置在两侧得出相反结果。
+ * 抽成自由函数是为了让 IDM_PROXY_PROBE 能直接逐个组合断言，不必构造 MainWindow。 */
+void applyQtApplicationProxy(const QString& type, const QString& host, int port,
+                             const QString& user, const QString& pass)
 {
-    // 根据设置应用 Qt 应用级代理（仅站点抓取器等 Qt 网络使用）。
-    // 设置 "none" 时沿用系统代理，与 C 下载引擎默认行为一致。
-    const QString type = m_settings.proxyType();
-    if (type != QStringLiteral("http") && type != QStringLiteral("socks")) {
-        // "none"：不做任何覆盖，保持 Qt 默认（系统代理）
+    const bool usable = ((type == QStringLiteral("http") || type == QStringLiteral("socks"))
+                         && !host.isEmpty() && port > 0);
+    if (!usable) {
+        QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::NoProxy));
         return;
     }
 
     QNetworkProxy p(type == QStringLiteral("http") ? QNetworkProxy::HttpProxy
                                                    : QNetworkProxy::Socks5Proxy,
-                    m_settings.proxyHost(), (quint16)m_settings.proxyPort());
-    /* 凭据必须一起下发。原来只设了 host/port，于是 proxyUser/proxyPass 只对 C 引擎
+                    host, static_cast<quint16>(port));
+    /* 凭据必须一起下发。以前只设了 host/port，于是 proxyUser/proxyPass 只对 C 引擎
      * （libcurl）生效，走 Qt 网络栈的站点抓取器一旦碰到需要认证的代理就是必然 407 ——
      * 设置页填的用户名密码在那一半功能里等于不存在。 */
-    const QString user = m_settings.proxyUser();
     if (!user.isEmpty()) {
         p.setUser(user);
-        p.setPassword(m_settings.proxyPass());
+        p.setPassword(pass);
     }
     QNetworkProxy::setApplicationProxy(p);
+}
+
+void MainWindow::applyNetworkProxy()
+{
+    applyQtApplicationProxy(m_settings.proxyType(), m_settings.proxyHost(),
+                            m_settings.proxyPort(), m_settings.proxyUser(),
+                            m_settings.proxyPass());
 }
 
 void MainWindow::paintEvent(QPaintEvent* event)
