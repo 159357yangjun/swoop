@@ -2043,5 +2043,15 @@ int main(int argc, char **argv)
 
     dlmgr_destroy();
     printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
+
+    /* 让本地服务自己退出，别留给 CI 去 kill：MSYS2 的 kill 实测会打到步骤自己的
+       进程组（整步以 143=SIGTERM 结束，报出来的错和引擎无关）。
+       放在结果行之后 —— 先看结论，再收摊。 */
+    {
+        char surl[256];
+        snprintf(surl, sizeof(surl), "http://127.0.0.1:%d/_shutdown", port);
+        NetResponse sr = network_get_html(surl, NULL);
+        free(sr.data);
+    }
     return g_fail;
 }

@@ -127,6 +127,21 @@ PROXY_BODY = make_payload(4096)     # 与 content_matches_pattern 同模式：by
 # （海外源站 / CDN 拥塞 / TLS 握手排队），而 GUI 线程一旦被占住，整个窗口就不响应了。
 STALL_PATH = "/stall.bin"
 STALL_MS = int(os.environ.get("IDM_SELFTEST_STALL_MS", "3000"))
+
+# 看门狗：超过这个秒数就自己退出（0 = 不限）。
+# 为什么要有：CI 步骤里**绝不能**用 shell 的 kill 去收这个服务 ——
+# MSYS2 下 `kill $pid` 实测会打到步骤自己的进程组，整步以 143(SIGTERM) 结束，
+# 报出来的错误与引擎毫无关系。正常收尾靠 /_shutdown，这条只是「自测中途崩了」
+# 时的兜底，保证服务不会把一个 CI 步骤吊死。
+MAX_LIFE_SEC = int(os.environ.get("IDM_SELFTEST_MAX_LIFE", "0"))
+
+
+def _exit_now():
+    try:
+        _summary()
+    except Exception:
+        pass
+    os._exit(0)
 STALL_PAYLOAD = make_payload(4096)
 
 _lock = threading.Lock()
@@ -305,6 +320,11 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _hits.update(_RESET_KEYS)
             return self._send_json({"ok": 1})
+        if path == "/_shutdown":
+            # 自测跑完后自己收摊：先回 200，再延迟一点退出，好让响应发出去。
+            self._send_json({"ok": 1, "bye": 1})
+            threading.Timer(0.3, _exit_now).start()
+            return
         if path == SINK_PATH:
             # 免认证：sink 的任务是「看客户端主动带了什么过来」，自己不设门槛
             return self._serve_sink()
@@ -624,6 +644,8 @@ def _summary():
 if __name__ == "__main__":
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
+    if MAX_LIFE_SEC > 0:
+        threading.Timer(MAX_LIFE_SEC, _exit_now).start()
     print(f"[server] listening on http://127.0.0.1:{PORT} user={USER} "
           f"slow={SLOW_MS}ms", flush=True)
     try:

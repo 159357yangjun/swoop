@@ -61,12 +61,17 @@ jobs:
           #   ② 除了退出码，还必须从日志里解析出「结果：N 通过，M 失败」这一行，
           #      并要求 N≥100、M=0。光看退出码不够：程序压根没跑起来时，
           #      管道与 tail 会把真实状态盖掉（本会话在 ext_shot 上就是这么永久绿的）。
-          #   ③ 服务进程按 PID 收尾（绝不按镜像名一刀切），临时产物当场删。
+          #   ③ 服务由自测程序通过 /_shutdown 自己收摊，这一步**一个信号都不发**。
+          #      MSYS2 下 `kill $pid` 实测会打到步骤自己的进程组：整步以 143=SIGTERM
+          #      结束，annotations 里只剩「Process completed with exit code 143」，
+          #      报出来的错和引擎毫无关系（第一版就是这么红的）。
+          #      再加一层看门狗兜底：自测中途崩了没喊停，服务自己退，不吊死步骤。
           PORT=18080
           SUSER=idmuser
           SPASS=idmpass
           ST_BUILD=build-selftest
           ST_LOG=selftest.log
+          export IDM_SELFTEST_MAX_LIFE=300
 
           if ! command -v python >/dev/null 2>&1; then
             echo "runner 上没有 python，用 choco 装（与 NSIS 那一步同一套办法）"
@@ -95,7 +100,7 @@ jobs:
           # 会变成一条与代码无关的假失败（甚至让「无凭据必须失败」那类用例假通过）。
           READY=0
           for i in $(seq 1 60); do
-            CODE=$(curl -s --noproxy '*' --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/_stats" || echo 000)
+            CODE=$(curl -s --noproxy '*' --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/_stats") || CODE=000
             if [ "$CODE" = "200" ]; then READY=1; break; fi
             if ! kill -0 $SRV 2>/dev/null; then
               echo "::error::python 服务提前退出，最后 40 行："
@@ -107,15 +112,21 @@ jobs:
           if [ "$READY" != "1" ]; then
             echo "::error::等了 60 秒服务仍没监听 $PORT"
             tail -40 server.log
-            kill -9 $SRV 2>/dev/null
             exit 1
           fi
 
           "./$ST_BUILD/engine_selftest.exe" "$PORT" "$SUSER" "$SPASS" > "$ST_LOG" 2>&1
           RC=$?
-          kill $SRV 2>/dev/null
-          if kill -0 $SRV 2>/dev/null; then kill -9 $SRV 2>/dev/null; fi
-          wait $SRV 2>/dev/null
+
+          # 只探测存活（kill -0 不投递任何信号），等它自己退；最多 20 秒。
+          # 等不到也不判失败：产物与结论都已拿到，残留的服务进程由看门狗/作业结束收。
+          for i in $(seq 1 40); do
+            kill -0 $SRV 2>/dev/null || break
+            sleep 0.5
+          done
+          if kill -0 $SRV 2>/dev/null; then
+            echo "::warning::服务 20 秒后仍在运行（/_shutdown 没生效？），交给看门狗 $IDM_SELFTEST_MAX_LIFE 秒兜底"
+          fi
 
           TMPD=$(cygpath -u "$TEMP" 2>/dev/null || echo "$TEMP")
           rm -rf "$TMPD/idm_selftest_out" "$ST_BUILD"
