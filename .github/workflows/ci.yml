@@ -73,9 +73,12 @@ jobs:
           ST_LOG=selftest.log
           export IDM_SELFTEST_MAX_LIFE=300
 
+          # msys2 这个 shell 和 bash 一样带 `-e -o pipefail`：任何一条命令非零就整步
+          # 当场退出。而我唯一能取证的是 annotations（日志要 admin，403 读不到），
+          # 所以每一处可能非零的地方都必须先把 ::error:: 打出去，再 exit。
           if ! command -v python >/dev/null 2>&1; then
             echo "runner 上没有 python，用 choco 装（与 NSIS 那一步同一套办法）"
-            choco install python3 -y --no-progress || choco install python -y --no-progress
+            choco install python3 -y --no-progress || choco install python -y --no-progress || true
             export PATH="/c/Python312:/c/Python311:/c/Python310:$PATH"
           fi
           if ! command -v python >/dev/null 2>&1; then
@@ -85,10 +88,25 @@ jobs:
           python --version
 
           # 单独一个构建目录：只编 core + 自测，不碰发行用的 build/，对打包零影响。
-          cmake -S . -B "$ST_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DIDM_BUILD_ENGINE_SELFTEST=ON
-          cmake --build "$ST_BUILD" --target engine_selftest
+          if ! cmake -S . -B "$ST_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DIDM_BUILD_ENGINE_SELFTEST=ON; then
+            echo "::error::cmake configure 失败（$ST_BUILD，含 -DIDM_BUILD_ENGINE_SELFTEST=ON）"
+            exit 1
+          fi
+          if ! cmake --build "$ST_BUILD" --target engine_selftest; then
+            echo "::error::engine_selftest 编译失败 —— 这一步是闸门，编译不过就红，不做降级"
+            exit 1
+          fi
           if [ ! -f "$ST_BUILD/engine_selftest.exe" ]; then
             echo "::error::engine_selftest.exe 没生成"
+            exit 1
+          fi
+
+          # 起服务前先确认这个端口没人应答。Windows 的 SO_REUSEADDR 允许同一个端口
+          # 被多个进程同时 bind（本机实测残留过 7 个），新起的这个可能压根收不到请求，
+          # 于是「服务统计」断言读到的是别人家的计数器 —— 假绿与假红都在这条路上。
+          PRE=$(curl -s --noproxy '*' --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/_stats") || PRE=000
+          if [ "$PRE" = "200" ]; then
+            echo "::error::$PORT 上已经有一个服务在应答（残留进程？），它会让 _stats 类断言读到错误的计数器。这一步拒绝继续。"
             exit 1
           fi
 
@@ -115,8 +133,10 @@ jobs:
             exit 1
           fi
 
-          "./$ST_BUILD/engine_selftest.exe" "$PORT" "$SUSER" "$SPASS" > "$ST_LOG" 2>&1
-          RC=$?
+          # 自测失败时进程按失败条数退出（非 0），在 `-e` 下会直接掀掉这一步，
+          # 后面的解析和 ::error:: 一条都到不了 —— 必须自己接住退出码。
+          RC=0
+          "./$ST_BUILD/engine_selftest.exe" "$PORT" "$SUSER" "$SPASS" > "$ST_LOG" 2>&1 || RC=$?
 
           # 只探测存活（kill -0 不投递任何信号），等它自己退；最多 20 秒。
           # 等不到也不判失败：产物与结论都已拿到，残留的服务进程由看门狗/作业结束收。
@@ -133,8 +153,10 @@ jobs:
 
           tail -40 "$ST_LOG"
 
-          PASS_N=$(grep -oE '结果：[0-9]+' "$ST_LOG" | tail -1 | grep -oE '[0-9]+')
-          FAIL_N=$(grep -oE '[0-9]+ 失败' "$ST_LOG" | tail -1 | grep -oE '[0-9]+')
+          # 「没跑完」正是最需要报出来的情形，可 grep 无匹配返回 1，配上 pipefail
+          # 会让这行赋值直接终止整步 —— 所以 || true，让下面的判空去定性。
+          PASS_N=$(grep -oE '结果：[0-9]+' "$ST_LOG" | tail -1 | grep -oE '[0-9]+') || true
+          FAIL_N=$(grep -oE '[0-9]+ 失败' "$ST_LOG" | tail -1 | grep -oE '[0-9]+') || true
           echo "引擎自测：通过=${PASS_N:-无} 失败=${FAIL_N:-无} 退出码=$RC"
           if [ -z "$PASS_N" ] || [ -z "$FAIL_N" ]; then
             echo "::error::日志里没有「结果：N 通过，M 失败」这一行 —— 自测压根没跑完，不能算通过。"
