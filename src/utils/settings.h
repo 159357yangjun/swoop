@@ -143,8 +143,6 @@ public:
     const QString& proxyPass() const { return m_proxyPass; }
     void setProxyPass(const QString& p) { m_proxyPass = p; }
 
-    bool proxyEnabled() const { return m_proxyType != QStringLiteral("none"); }
-
     // ── 站点登录 ──
     const QList<SiteLogin>& siteLogins() const { return m_siteLogins; }
     void setSiteLogins(const QList<SiteLogin>& v) { m_siteLogins = v; }

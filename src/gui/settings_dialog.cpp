@@ -173,8 +173,13 @@ void SettingsDialog::buildFileTypesTab(QWidget* page)
 {
     auto* layout = new QVBoxLayout(page);
 
+    /* ⚠️ 这张表的实际作用范围只有剪贴板监听（唯一读者 main_window.cpp:828）。
+       浏览器侧的捕获规则写死在扩展自己的 background.js / content.js 里
+       （INTERCEPT_PATTERNS 那几组正则），既不读这张表也读不到，
+       所以文案不能再写「与浏览器嗅探」——用户在这里改了扩展名却发现浏览器那边
+       毫无变化，是比"不支持"更糟的体验。 */
     auto* tip = new QLabel(QStringLiteral(
-        "自动捕获以下扩展名的链接（用于剪贴板监听与浏览器嗅探）："), page);
+        "自动捕获以下扩展名的链接（仅用于剪贴板监听；浏览器捕获规则由扩展自身维护）："), page);
     tip->setWordWrap(true);
     layout->addWidget(tip);
 
@@ -317,6 +322,8 @@ void SettingsDialog::buildDownloadsTab(QWidget* page)
         "对保存之后新建的任务生效。\n"
         "· 同时下载的任务数 —— 超出该数量的新任务会自动排队，等有任务结束再自动开始；"
         "手动点「开始 / 重新开始」可立即启动，不受此限制。\n"
+        "· yt-dlp / ffmpeg / aria2c 的路径与「缺失时自动下载」开关 —— 只在程序启动时读取一次，"
+        "改完需要重启本程序才生效。\n"
         "· 其余各项（站点登录、代理、限速、重试、UA、分类目录等）保存后立即生效。"), page);
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
@@ -398,8 +405,12 @@ void SettingsDialog::buildProxyTab(QWidget* page)
     m_proxyPassEdit->setEchoMode(QLineEdit::Password);
     form->addRow(QStringLiteral("密码:"), m_proxyPassEdit);
 
+    /* 这句文案原来写「下载引擎的代理通道将在后续版本中接入，当前仅保存配置」——
+       与代码相反：Settings::applyToEngine() 已经把 type/host/port/user/pass 下发给
+       libcurl 引擎（CURLOPT_PROXY*），并由 IDM_SETTINGS_PROBE 与代理 407 用例端到端证明。
+       留着这句话，用户会以为代理根本没生效而去做无谓的排查。 */
     auto* note = new QLabel(QStringLiteral(
-        "代理凭据将安全保存于本机配置。下载引擎的代理通道将在后续版本中接入，当前仅保存配置。"), page);
+        "代理设置保存后立即用于新的下载请求（进行中的分片沿用原连接）。凭据仅保存在本机配置中。"), page);
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
     form->addRow(QString(), note);
@@ -616,16 +627,13 @@ void SettingsDialog::accept()
     m_settings.setWebPort(m_webPortSpin->value());
     m_settings.setWebToken(m_webTokenEdit->text().trimmed());
 
-    // 站点登录（从表格兜底读回）
-    QList<SiteLogin> logins;
-    for (int r = 0; r < m_siteTable->rowCount(); ++r) {
-        SiteLogin l;
-        l.url      = m_siteTable->item(r, 0) ? m_siteTable->item(r, 0)->text() : QString();
-        l.username = m_siteTable->item(r, 1) ? m_siteTable->item(r, 1)->text() : QString();
-        l.password = m_siteTable->item(r, 2) ? m_siteTable->item(r, 2)->text() : QString();
-        if (!l.url.isEmpty()) logins << l;
-    }
-    m_settings.setSiteLogins(logins);
+    /* 站点登录：**不能**从表格读回。
+     * 第三列是显示掩码「••••••••」（refreshSiteTable 刻意不回显明文），
+     * 而表格又是 NoEditTriggers、增删改全走 onAddSite/onEditSite/onRemoveSite
+     * → 每次都 setSiteLogins() + refreshSiteTable()。
+     * 也就是说 m_settings 到这里已经是权威值，从表格读回只会把掩码当密码写回去——
+     * 用户「打开设置、什么都没改、点了确定」就会把他所有站点密码清成 8 个圆点，
+     * 再下发给引擎，表现为凭据填了却始终 401。由 IDM_SITEAUTH_PROBE 守着。 */
 
     m_settings.save();
     m_settings.applyToEngine();

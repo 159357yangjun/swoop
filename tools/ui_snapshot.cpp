@@ -10,6 +10,7 @@
 #include <QThread>
 #include <QDir>
 #include <QLocalSocket>
+#include <QTableWidget>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QPixmap>
@@ -21,6 +22,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QComboBox>
+#include <QTabWidget>
 
 #include "main_window.h"
 #include "new_task_dialog.h"
@@ -510,6 +512,139 @@ int main(int argc, char** argv) {
         return (modeKept && changedMarked && proxyOk && owDefaultOff && owOnWorks) ? 0 : 1;
     }
 
+    /* ── 诊断模式：IDM_SITEAUTH_PROBE=1 ──
+     * 「设置 → 站点登录」里那条凭据的密码，在用户**什么都没改、只是点了确定**之后
+     * 必须还是原密码。缺陷形态：表格第三列存的是显示掩码「••••••••」（刻意不回显明文），
+     * 而 accept() 又把整张表读回去当作真值写进 Settings 并下发引擎 ——
+     * 于是「打开设置→点确定」这一个动作就把所有站点密码变成 8 个圆点，
+     * 用户看到的是「账号密码明明填了，站点一直 401」。
+     * 四条断言两两成对：显示列必须**仍是掩码**（守住不发明文回显），
+     * 存储与引擎里的密码必须**仍是真值**（守住不被掩码覆盖）。
+     * 走点「确定」按钮这条路：accept() 是重写的保护成员，按钮的 accepted 信号才是
+     * 用户真实入口，也顺带覆盖了 save()+applyToEngine() 的整条链。 */
+    if (qEnvironmentVariableIsSet("IDM_SITEAUTH_PROBE")) {
+        QString isoDir, isoErr;
+        bool createdMark = false;
+        if (!probeIsolationDir(&isoDir, &createdMark, &isoErr)) {
+            printf("[siteauth] ★%s\n", qUtf8Printable(isoErr));
+            return 2;
+        }
+        const QString iniPath  = isoDir + QStringLiteral("/idm-next.ini");
+        const QString markPath = QCoreApplication::applicationDirPath()
+                                 + QStringLiteral("/idm-next.portable");
+        const QString realPass = QStringLiteral("S3cr3t-Pass!");
+        const QString realUser = QStringLiteral("dluser");
+        const QString realHost = QStringLiteral("files.example.com");
+        const QString mask     = QStringLiteral("••••••••");
+
+        {   /* 预置：等同用户填完凭据并保存之后的状态 */
+            SiteLogin l;
+            l.url      = realHost;
+            l.username = realUser;
+            l.password = realPass;
+            Settings s;
+            s.setSiteLogins(QList<SiteLogin>() << l);
+            s.save();
+        }
+
+        bool okFound = false;
+        bool displayStillMasked = false;
+        {
+            Settings s;
+            s.load();
+            SettingsDialog dlg(s);
+            QDialogButtonBox* box = dlg.findChild<QDialogButtonBox*>();
+            QPushButton* ok = box ? box->button(QDialogButtonBox::Ok) : nullptr;
+            okFound = (ok != nullptr);
+            if (okFound) {
+                QTableWidget* tw = nullptr;
+                int hits = 0;
+                for (QTableWidget* t : dlg.findChildren<QTableWidget*>()) {
+                    if (t->columnCount() == 3 && t->rowCount() == 1) { tw = t; hits++; }
+                }
+                /* 定位方式失效（0 个或不止 1 个）时按 FAIL 处理，不静默跳过 */
+                displayStillMasked = (hits == 1 && tw && tw->item(0, 2)
+                                      && tw->item(0, 2)->text() == mask
+                                      && tw->item(0, 2)->text() != realPass);
+                ok->click();
+            }
+        }
+
+        QString hostAfter, userAfter, passAfter;
+        int nAfter = -1;
+        {
+            Settings s;
+            s.load();
+            const QList<SiteLogin> ls = s.siteLogins();
+            nAfter = ls.size();
+            if (nAfter == 1) { hostAfter = ls[0].url; userAfter = ls[0].username; passAfter = ls[0].password; }
+        }
+        const bool storedKept = (nAfter == 1 && passAfter == realPass
+                                 && userAfter == realUser && hostAfter == realHost);
+
+        bool engineKept = false;
+        {
+            const DownloadConfig cfg = dlmgr_get_config();
+            engineKept = (cfg.site_login_count == 1
+                          && QString::fromUtf8(cfg.site_logins[0].pass) == realPass
+                          && QString::fromUtf8(cfg.site_logins[0].user) == realUser);
+        }
+
+        /* 反方向的保险：修法是「accept() 不再从表格读回」，那么界面上点「删除」
+         * 之后必须仍然真的删掉 —— 增删改都走 setSiteLogins()，m_settings 是权威值。
+         * 这条要是红了，说明读回其实是删除生效的唯一途径，就不能简单删掉那段代码。 */
+        bool deleteWorks = false;
+        {
+            Settings s;
+            s.load();
+            SettingsDialog dlg(s);
+            QTableWidget* tw = nullptr;
+            int hits = 0;
+            for (QTableWidget* t : dlg.findChildren<QTableWidget*>()) {
+                if (t->columnCount() == 3) { tw = t; hits++; }
+            }
+            QPushButton* del = nullptr;
+            int delHits = 0;
+            for (QPushButton* b : dlg.findChildren<QPushButton*>()) {
+                if (b->text() == QStringLiteral("删除")) { del = b; delHits++; }
+            }
+            if (hits == 1 && tw && tw->rowCount() == 1 && delHits == 1) {
+                tw->selectRow(0);
+                del->click();
+                QPushButton* ok = dlg.findChild<QDialogButtonBox*>()
+                                    ? dlg.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)
+                                    : nullptr;
+                if (ok) ok->click();
+                Settings chk;
+                chk.load();
+                deleteWorks = chk.siteLogins().isEmpty();
+            } else {
+                printf("[siteauth] 定位「删除」按钮/表格失败（表格命中 %d、按钮命中 %d），"
+                       "该判据按不通过处理\n", hits, delHits);
+            }
+        }
+
+        printf("[siteauth] 确定后存储里的密码=「%s」 引擎里=「%s」（真值应为「%s」）\n",
+               qUtf8Printable(passAfter),
+               qUtf8Printable(engineKept ? realPass
+                                         : QString::fromUtf8(dlmgr_get_config().site_logins[0].pass)),
+               qUtf8Printable(realPass));
+        printf("%s 表格第三列仍然只显示掩码，不明文回显密码\n",
+               displayStillMasked ? "[PASS]" : "[FAIL]");
+        printf("%s 什么都没改、只点确定：密码/用户名/站点都原样保留\n",
+               storedKept ? "[PASS]" : "[FAIL]");
+        printf("%s 真密码确实下发到引擎（applyToEngine 之后）\n",
+               engineKept ? "[PASS]" : "[FAIL]");
+        printf("%s 找到「确定」按钮（找不到则以上结论都无意义）\n",
+               okFound ? "[PASS]" : "[FAIL]");
+        printf("%s 界面点「删除」+确定 之后凭据真的被删掉（不依赖从表格读回）\n",
+               deleteWorks ? "[PASS]" : "[FAIL]");
+
+        QFile::remove(iniPath);
+        if (createdMark) QFile::remove(markPath);
+        return (displayStillMasked && storedKept && engineKept && okFound && deleteWorks) ? 0 : 1;
+    }
+
     /* ── 诊断模式：IDM_NOTICE_PROBE=1 ──
      * 限流倒计时「看得见」这件事的界面侧：状态列真的换成那句中文、撤掉后回落、
      * 状态跃迁时不许残留。用独立的 TaskListModel，不建窗口、不碰真实数据目录。
@@ -628,6 +763,49 @@ int main(int argc, char** argv) {
         printf("%s 回话里 success=true（交接成功 ⇒ 第二实例退出码 0）\n",
                replySaysSuccess ? "[PASS]" : "[FAIL]");
         return (notListeningYet && listeningAfterLoop && gotReply && replySaysSuccess) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_TEXT_PROBE=1 ──
+     * 改了设置页三处说明文字（代理通道、扩展名作用范围、组件路径需重启），
+     * 文字变长就可能被裁：QLabel 开了 wordWrap，但外层若给它的高度小于
+     * heightForWidth(width)，末尾几行会直接看不见——这种回归只有量高度+看图能抓到。
+     * 每个 tab 存一张 PNG 到探针目录，供肉眼复核；同时给出"没有裁切"的机器判据。 */
+    if (qEnvironmentVariableIsSet("IDM_TEXT_PROBE")) {
+        Settings s;
+        s.load();
+        SettingsDialog dlg(s);
+        /* 用对话框**自己声明的最小尺寸**（settings_dialog.cpp:78 的 560x470）来量：
+         * 那是文字换行最挤、最可能裁尾的一档；给个宽敞尺寸再检查等于没检查。
+         * 顺带把"最小尺寸下不裁"变成契约——用户把窗口缩到最小也应当读得完整。 */
+        dlg.resize(dlg.minimumWidth(), dlg.minimumHeight());
+        dlg.show();
+        QCoreApplication::processEvents();
+        QTabWidget* tabs = dlg.findChild<QTabWidget*>();
+        if (!tabs) { printf("[FAIL] 找不到设置页的 QTabWidget，无法检查文字裁切\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < tabs->count(); ++i) {
+            tabs->setCurrentIndex(i);
+            QCoreApplication::processEvents();
+            QWidget* page = tabs->widget(i);
+            QString pageName = tabs->tabText(i);
+            for (QLabel* lab : page->findChildren<QLabel*>()) {
+                if (!lab->wordWrap() || lab->text().length() < 20) continue;
+                const int need = lab->heightForWidth(lab->width());
+                printf("[text]   p%d 高=%d 需=%d 宽=%d 「%s」\n",
+                       i + 1, lab->height(), need, lab->width(),
+                       qUtf8Printable(lab->text().left(16)));
+                if (lab->height() < need) {
+                    printf("[FAIL] 第 %d 页「%s」里一段说明文字被裁：高 %d < 需要 %d\n",
+                           i + 1, qUtf8Printable(pageName), lab->height(), need);
+                    bad++;
+                }
+            }
+            dlg.grab().save(outDir + QStringLiteral("/probe_settings_tab%1.png").arg(i));
+        }
+        printf("%s 设置页 %d 个 tab 的换行说明文字都没有被裁切\n",
+               bad == 0 ? "[PASS]" : "[FAIL]", tabs->count());
+        printf("[text] 截图已存 %s/probe_settings_tab*.png\n", qUtf8Printable(outDir));
+        return bad == 0 ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_CONCURRENCY_PROBE=1 ──
