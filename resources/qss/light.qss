@@ -237,7 +237,7 @@ QStatusBar::item { border: none; }
  * 这里只留卡片没有的信息 —— 当前限速档位与任务计数，两处不重复。 */
 QLabel#statusPill {
     background-color: #f2f3f5;
-    border-radius: 9px;
+    border-radius: 8px;
     padding: 2px 10px;
     margin: 2px 3px;
     color: #4e5969;
@@ -449,7 +449,7 @@ QTabBar::tab:hover:!selected {
 /* ── 进度条（纯蓝，简洁） ── */
 QProgressBar {
     border: 1px solid #e5e6eb;
-    border-radius: 5px;
+    border-radius: 4px;
     text-align: center;
     background-color: #f2f3f5;
     color: #1f2329;
@@ -468,13 +468,13 @@ QProgressBar::chunk {
 QScrollBar:vertical {
     background: transparent;
     width: 10px;
-    border-radius: 5px;
+    border-radius: 4px;
     margin: 2px;
 }
 QScrollBar::handle:vertical {
     background: #c9cdd4;
     min-height: 30px;
-    border-radius: 5px;
+    border-radius: 4px;
 }
 QScrollBar::handle:vertical:hover {
     background: #a9aeb8;
@@ -485,13 +485,13 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 QScrollBar:horizontal {
     background: transparent;
     height: 10px;
-    border-radius: 5px;
+    border-radius: 4px;
     margin: 2px;
 }
 QScrollBar::handle:horizontal {
     background: #c9cdd4;
     min-width: 30px;
-    border-radius: 5px;
+    border-radius: 4px;
 }
 QScrollBar::handle:horizontal:hover {
     background: #a9aeb8;

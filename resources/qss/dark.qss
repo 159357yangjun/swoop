@@ -96,9 +96,14 @@ QToolButton::menu-indicator {
     right: 4px;
 }
 
-/* 主操作按钮（新建任务）：蓝填充 */
+/* 主操作按钮（新建任务）：蓝填充。
+   填充上压白字的这三处（主按钮 / 默认按钮 / 输入框选中底）用 #2f6fe0，
+   比强调色 #4c8dff 深一档：白字对比从 3.20:1 抬到 4.70:1（WCAG 正文线 4.5）。
+   强调色本身不动——其余 6 处（选中条 / 焦点边框 / 勾选框 / 单选框）是纯图形，
+   3:1 就够，#4c8dff 对窗体底是 5.49:1。两把蓝的 CIE76 dE=11.7（>2.5 可辨），
+   所以按钮与勾选框并排时读作"深浅两档"而不是"配错了色"。 */
 QToolButton#primaryToolBtn {
-    background-color: #4c8dff;
+    background-color: #2f6fe0;
     color: #ffffff;
     font-weight: 600;
 }
@@ -217,7 +222,7 @@ QStatusBar::item { border: none; }
 /* 状态栏胶囊：总速度已挪到左侧总览卡片 */
 QLabel#statusPill {
     background-color: #2c2d31;
-    border-radius: 9px;
+    border-radius: 8px;
     padding: 2px 10px;
     margin: 2px 3px;
     color: #c3c7cd;
@@ -251,8 +256,9 @@ QPushButton:disabled {
     border-color: #2c2d31;
 }
 QPushButton:default {
-    background-color: #4c8dff;
-    border-color: #4c8dff;
+    /* 与 QToolButton#primaryToolBtn 同一档：这块上面也压 #ffffff 文字 */
+    background-color: #2f6fe0;
+    border-color: #2f6fe0;
     color: #ffffff;
     font-weight: 600;
 }
@@ -271,7 +277,7 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDate
     border-radius: 6px;
     background-color: #1c1d20;
     color: #e8eaed;
-    selection-background-color: #4c8dff;
+    selection-background-color: #2f6fe0;
     selection-color: #ffffff;
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
@@ -420,7 +426,7 @@ QTabBar::tab:hover:!selected {
 /* 进度条 */
 QProgressBar {
     border: 1px solid #32343a;
-    border-radius: 5px;
+    border-radius: 4px;
     text-align: center;
     background-color: #2c2d31;
     color: #e8eaed;
@@ -439,13 +445,13 @@ QProgressBar::chunk {
 QScrollBar:vertical {
     background: transparent;
     width: 10px;
-    border-radius: 5px;
+    border-radius: 4px;
     margin: 2px;
 }
 QScrollBar::handle:vertical {
     background: #4a4d54;
     min-height: 30px;
-    border-radius: 5px;
+    border-radius: 4px;
 }
 QScrollBar::handle:vertical:hover {
     background: #5c5f66;
@@ -456,13 +462,13 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 QScrollBar:horizontal {
     background: transparent;
     height: 10px;
-    border-radius: 5px;
+    border-radius: 4px;
     margin: 2px;
 }
 QScrollBar::handle:horizontal {
     background: #4a4d54;
     min-width: 30px;
-    border-radius: 5px;
+    border-radius: 4px;
 }
 QScrollBar::handle:horizontal:hover {
     background: #5c5f66;
