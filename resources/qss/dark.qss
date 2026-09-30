@@ -97,14 +97,15 @@ QToolButton::menu-indicator {
 }
 
 /* 主操作按钮（新建任务）：蓝填充。
-   填充上压白字的这三处（主按钮 / 默认按钮 / 输入框选中底）用 #2f6fe0，
-   比强调色 #4c8dff 深一档：白字对比从 3.20:1 抬到 4.70:1（WCAG 正文线 4.5）。
-   强调色本身不动——其余 6 处（选中条 / 焦点边框 / 勾选框 / 单选框）是纯图形，
-   3:1 就够，#4c8dff 对窗体底是 5.49:1。两把蓝的 CIE76 dE=11.7（>2.5 可辨），
-   所以按钮与勾选框并排时读作"深浅两档"而不是"配错了色"。 */
+   对比度按「职责分离」做（2026-09-30 定）：强调色当填充不动，压在它上面的文字换成自家最深面。
+   算过的对立约束：白字 on 强调色 = 3.20（不达 4.5）；把填充换成深一档蓝虽让白字到 4.70，
+   但同一个蓝对面板最差只剩 2.44（选中行底那块）——修好文字、拆掉按钮边界；蓝色空间里
+   「白字≥4.5 且 对最差面板≥3.0」的实色候选数 = 0，所以不换填充。
+   现在：深字 on 强调色 = 5.49（文本过），强调色对最差面板 = 3.58（非文本过）。
+   ⚠ pressed 态那档蓝配深字仍只有 4.19（配白字也 4.19）——既存问题，本轮不动；hover 档 4.61 过。 */
 QToolButton#primaryToolBtn {
-    background-color: #2f6fe0;
-    color: #ffffff;
+    background-color: #4c8dff;
+    color: #18191c;
     font-weight: 600;
 }
 QToolButton#primaryToolBtn:hover {
@@ -257,9 +258,9 @@ QPushButton:disabled {
 }
 QPushButton:default {
     /* 与 QToolButton#primaryToolBtn 同一档：这块上面也压 #ffffff 文字 */
-    background-color: #2f6fe0;
-    border-color: #2f6fe0;
-    color: #ffffff;
+    background-color: #4c8dff;
+    border-color: #4c8dff;
+    color: #18191c;
     font-weight: 600;
 }
 QPushButton:default:hover {
@@ -277,8 +278,8 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDate
     border-radius: 6px;
     background-color: #1c1d20;
     color: #e8eaed;
-    selection-background-color: #2f6fe0;
-    selection-color: #ffffff;
+    selection-background-color: #4c8dff;
+    selection-color: #18191c;
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus {
