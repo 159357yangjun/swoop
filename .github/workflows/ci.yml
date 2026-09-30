@@ -86,13 +86,21 @@ jobs:
                   IDM_FILEICON_PROBE"
           BAD=""
           TOTAL_PASS=0
+          # 判据：**红的原文必须可重取**。以前每个探针的输只活在 shell 变量里，
+          # 红的时候只 tail -25，本机想回看就得重跑碰运气（有一次 IDM_FORWARD_PROBE
+          # 红了而我只 tail -6，那次原文彻底丢了）。现在每个探针的完整 stdout+stderr
+          # 无条件落到 $RUN_LOG_DIR/<探针>.log，红项把路径打出来。目录在 TEMP 下，不进仓。
+          RUN_LOG_DIR="$IDM_SHOT_DIR/suite-$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "$RUN_LOG_DIR"
+          echo "套件日志目录：$RUN_LOG_DIR"
           for P in $PROBES; do
             # ⚠️ 必须 export：`env VAR=1 ui_snapshot.exe` 在这套工具链上会静默不传变量，
             # 探针一个都不跑、还回 0 —— 那就是一条永远不会红的假绿闸门（本机实测踩过）。
             export "$P=1"
             RC=0
-            OUT=$(./build/ui_snapshot.exe 2>&1) || RC=$?
+            ./build/ui_snapshot.exe > "$RUN_LOG_DIR/$P.log" 2>&1 || RC=$?
             unset "$P"
+            OUT=$(cat "$RUN_LOG_DIR/$P.log")
             NP=$(printf '%s' "$OUT" | grep -ac '\[PASS\]' | tail -1) || true
             NF=$(printf '%s' "$OUT" | grep -ac '\[FAIL\]' | tail -1) || true
             NP=${NP:-0}
@@ -104,12 +112,18 @@ jobs:
             if [ "$RC" != "0" ] || [ "$NF" != "0" ] || [ "$NP" = "0" ]; then
               BAD="$BAD $P"
               echo "::error::$P 未通过（rc=$RC，$NP 条 PASS，$NF 条 FAIL；非 0 退出、出现 FAIL、或一条断言都没跑，都算红）"
+              echo "::error::$P 的完整原文（stdout+stderr）在：$RUN_LOG_DIR/$P.log"
               printf '%s\n' "$OUT" | tail -25
             fi
           done
 
           if [ -n "$BAD" ]; then
             echo "::error::UI 探针未全绿：$BAD"
+            # 红项日志一份不落全打出来，让人不用去猜哪个文件有内容
+            for B in $BAD; do
+              echo "::error::$B 日志 = $RUN_LOG_DIR/$B.log（$(wc -l < "$RUN_LOG_DIR/$B.log") 行）"
+            done
+            echo "::error::本轮套件目录 = $RUN_LOG_DIR"
             exit 1
           fi
           # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 15 个模式共 62 条，
