@@ -513,8 +513,15 @@ void MainWindow::setupUi()
     // 历史/站点抓取两个表都已这么做，任务列表是漏了。
     m_taskList->verticalHeader()->setVisible(false);
 
-    // 状态列（列2）玻璃拟态进度条委托
+    // 状态列（列2）的扁平进度条/状态徽章委托（progress_delegate.h：已不用玻璃拟态渐变）
     m_taskList->setItemDelegateForColumn(2, new ProgressDelegate(this));
+
+    /* 文件名列（列0）的类型图标。以前是 TaskListModel 在 DecorationRole 里直接返回 QIcon，
+       于是 model → gui 反向依赖（分层门 tools/lint_layering.py 基线报的那一条）。
+       现在模型只报 FileTypeRole（类型键），图标在这层查表得到，方向变回 gui → model。
+       视觉产物不该变：改前/改后同一区域的像素已做过对照（见 docs/ARCHITECTURE.md §7）。 */
+    m_taskList->setItemDelegateForColumn(0,
+        new AppIcons::FileTypeIconDelegate(TaskListModel::FileTypeRole, this));
 
     // 双击任务行 → 弹出详情对话框
     connect(m_taskList, &QTableView::doubleClicked, this, &MainWindow::onTaskDoubleClicked);

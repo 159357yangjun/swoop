@@ -25,6 +25,11 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QTabWidget>
+#include <QTableView>
+#include <QHeaderView>
+#include <QStandardItemModel>
+#include <QImage>
+#include <QPainter>
 
 #include "main_window.h"
 #include "new_task_dialog.h"
@@ -748,6 +753,178 @@ int main(int argc, char** argv) {
         printf("%s 倒计时归零（sec=0）自动回落到状态文本\n",           ok3 ? "[PASS]" : "[FAIL]");
         printf("%s 429/503/408 三种文案与 sec<=0 空串都对\n",          ok4 ? "[PASS]" : "[FAIL]");
         return (ok0 && ok1 && ok2 && ok3 && ok4) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_FILEICON_PROBE=1 ──
+     * 文件名列的类型图标。方向是「模型只发类型键，图标在 gui 层查表」——
+     * 旧写法是 TaskListModel 在 Qt::DecorationRole 里直接返回 QIcon，
+     * 那是一条 model(L1) → gui(L4) 的反向依赖，被 tools/lint_layering.py 判红后按 (a) 改的。
+     *
+     * 五条断言各挡一种坏法：
+     *  [1] 模型不再返回 QIcon（否则分层门的口径又回去了）
+     *  [2] 模型报的类型键与后缀表一致（否则 zip 会画成文档图标）
+     *  [3] 装了生产委托的单元格，与「把 fileTypeIcon(类型) 放进 DecorationRole」的控制表格
+     *      **逐像素相同** —— 控制表格复刻的正是改前那条通路，所以这条相等就是
+     *      「用户看到的图标没变」的可复跑判据（不依赖 PNG 金样，换 Qt 版本也不会假红）
+     *  [4] 装了委托 ≠ 没装：同一模型不装委托时该格画出的东西必须不同（委托真的在出力）
+     *  [5] 控制格本身不是空的：ctrl 与 plain 必须不同 —— 否则 [3] 会变成「两边都空白」的假绿
+     */
+    if (qEnvironmentVariableIsSet("IDM_FILEICON_PROBE")) {
+        struct Case { const char* file; FileType want; };
+        const Case cases[] = {
+            { "a.zip",                   FileType::Compressed },
+            { "示例文档-产品说明.pdf",   FileType::Document },
+            { "示例音乐-主题曲.mp3",     FileType::Music },
+            { "示例程序-安装包.exe",     FileType::Program },
+            { "示例视频-演示片段.mp4",   FileType::Video },
+            { "README",                  FileType::Other },   // 无扩展名
+            { "archive.qqq",             FileType::Other },   // 未识别后缀
+        };
+        const int n = int(sizeof(cases) / sizeof(cases[0]));
+
+        TaskListModel model;
+        bool decoEmpty = true, keyOk = true;
+        for (int i = 0; i < n; ++i) {
+            TaskRow r{};
+            r.id         = 700 + i;
+            r.fileName   = QString::fromUtf8(cases[i].file);
+            r.state      = 1;
+            r.statusText = TaskListModel::stateText(1);
+            model.addTask(r);
+            const QModelIndex idx = model.index(i, 0);
+            if (idx.data(Qt::DecorationRole).isValid())
+                decoEmpty = false;
+            const QVariant key = idx.data(TaskListModel::FileTypeRole);
+            if (!key.isValid() || static_cast<FileType>(key.toInt()) != cases[i].want) {
+                keyOk = false;
+                printf("[fileicon] 键不符：%s 得到 %d，期望 %d\n",
+                       cases[i].file, key.toInt(), int(cases[i].want));
+            }
+        }
+
+        // 两张表：test = 生产委托；ctrl = 标准模型 + DecorationRole（= 改前的通路）
+        QStandardItemModel ctrlModel(n, 1);
+        for (int i = 0; i < n; ++i) {
+            auto* item = new QStandardItem(QString::fromUtf8(cases[i].file));
+            item->setData(AppIcons::fileTypeIcon(cases[i].want), Qt::DecorationRole);
+            ctrlModel.setItem(i, 0, item);
+        }
+
+        auto makeView = [](QAbstractItemModel* m) {
+            QTableView* v = new QTableView;
+            v->setModel(m);
+            v->horizontalHeader()->setVisible(false);
+            v->verticalHeader()->setVisible(false);
+            v->setColumnWidth(0, 300);
+            v->setTextElideMode(Qt::ElideMiddle);
+            v->setWordWrap(false);
+            v->setAlternatingRowColors(true);
+            v->setSelectionBehavior(QAbstractItemView::SelectRows);
+            v->resize(320, 24 * 12);
+            v->show();
+            for (int i = 0; i < 50 && v->visualRect(v->model()->index(0, 0)).height() <= 0; ++i)
+                QCoreApplication::processEvents();
+            return v;
+        };
+        QTableView* testView = makeView(&model);
+        testView->setItemDelegateForColumn(0,
+            new AppIcons::FileTypeIconDelegate(TaskListModel::FileTypeRole, testView));
+        QTableView* ctrlView  = makeView(&ctrlModel);
+        QTableView* plainView = makeView(&model);   // 同一个模型，不装委托
+
+        // 取每行「文件名列左端 40px」的像素：图标就在这一段
+        auto strip = [](QTableView* v, int row) {
+            const QModelIndex idx = v->model()->index(row, 0);
+            const QRect cell = v->visualRect(idx);
+            QImage img(v->size(), QImage::Format_ARGB32);
+            img.fill(Qt::transparent);
+            { QPainter p(&img); v->render(&p); }
+            return img.copy(cell.left(), cell.top(), qMin(40, cell.width()), cell.height());
+        };
+
+        auto sameImage = [](const QImage& a, const QImage& b) {
+            if (a.size() != b.size()) return false;
+            for (int y = 0; y < a.height(); ++y)
+                for (int x = 0; x < a.width(); ++x)
+                    if (a.pixel(x, y) != b.pixel(x, y)) return false;
+            return true;
+        };
+
+        bool sameAsCtrl = true, delegateVisible = false, ctrlVisible = false;
+        int  ctrlInk = 0, plainInk = 0;
+        auto ink = [](const QImage& im) {
+            int c = 0;
+            for (int y = 0; y < im.height(); ++y)
+                for (int x = 0; x < im.width(); ++x)
+                    if (qGray(im.pixel(x, y)) < 200) ++c;
+            return c;
+        };
+        for (int i = 0; i < n; ++i) {
+            const QImage t = strip(testView, i), c = strip(ctrlView, i), pl = strip(plainView, i);
+            if (sameImage(t, c) == false) sameAsCtrl = false;
+            if (!sameImage(t, pl)) delegateVisible = true;
+            if (!sameImage(c, pl)) ctrlVisible = true;
+            ctrlInk  += ink(c);
+            plainInk += ink(pl);
+        }
+        const int h0 = testView->visualRect(model.index(0, 0)).height();
+
+        /* [6] 枚举 FileType 的每一个取值，逐个断言「有图标、画得出墨、且彼此不同」。
+         * 为什么必须逐个点名：改成 model 发 enum + gui 查表之后，switch 少一个 case
+         * 不会报错、也不会红任何已有断言——它会静默落到 default，用户看到的是
+         * 「那一类文件就是没图标/和别的类型长一个样」，比原来的越界难发现得多。
+         * [7] FileType::All 是分类筛选器的「全部」档，不是一个文件的类型：
+         * 断言 detectFileType 对任何输入都不返回它。若真返回了，default 会画成
+         * OtherFile（用户看到「未知类型」图标而不是空白）——所以 All 不参与 [6] 的
+         * 互不相同比对，理由就是这句：它本来不该出现在行上。 */
+        const FileType realTypes[] = { FileType::Compressed, FileType::Document,
+                                       FileType::Music, FileType::Program,
+                                       FileType::Video, FileType::Other };
+        const char* typeNames[] = { "Compressed", "Document", "Music",
+                                    "Program", "Video", "Other" };
+        const int nt = int(sizeof(realTypes) / sizeof(realTypes[0]));
+        QImage typeImg[8];
+        bool everyTypeHasIcon = true, typesDistinct = true;
+        for (int i = 0; i < nt; ++i) {
+            const QIcon ic = AppIcons::fileTypeIcon(realTypes[i]);
+            const QImage im = ic.pixmap(16, 16).toImage();
+            typeImg[i] = im;
+            const int px = ink(im);
+            if (ic.isNull() || im.isNull() || px == 0) {
+                everyTypeHasIcon = false;
+                printf("[fileicon] 类型 %s 拿不到图标（isNull=%d 墨点=%d）\n",
+                       typeNames[i], int(ic.isNull()), px);
+            }
+        }
+        for (int i = 0; i < nt; ++i)
+            for (int j = i + 1; j < nt; ++j)
+                if (sameImage(typeImg[i], typeImg[j])) {
+                    typesDistinct = false;
+                    printf("[fileicon] 类型 %s 与 %s 画出来一模一样（switch 漏了 case？）\n",
+                           typeNames[i], typeNames[j]);
+                }
+        bool allNeverProduced = true;
+        const char* probeNames[] = { "", "README", "a.zip", "a.pdf", "a.mp3",
+                                     "a.exe", "a.mp4", "a.qqq", "tar.gz", "a." };
+        for (const char* pn : probeNames)
+            if (CategoryFilterProxy::detectFileType(QString::fromUtf8(pn)) == FileType::All) {
+                allNeverProduced = false;
+                printf("[fileicon] detectFileType(\"%s\") 返回了 All（筛选档位不该出现在行上）\n", pn);
+            }
+
+        printf("[fileicon] 行数=%d 行高=%d 列0宽=%d | ctrl 图标区墨点=%d plain=%d | 类型枚举 %d 个\n",
+               n, h0, testView->columnWidth(0), ctrlInk, plainInk, nt);
+        printf("%s 模型不再返回 QIcon（图标改由 gui 层查表）\n", decoEmpty ? "[PASS]" : "[FAIL]");
+        printf("%s 7 个样本的类型键都对（含无扩展名与未识别后缀）\n", keyOk ? "[PASS]" : "[FAIL]");
+        printf("%s 装了生产委托的单元格与改前通路逐像素相同\n", sameAsCtrl ? "[PASS]" : "[FAIL]");
+        printf("%s 委托确实在出力（不装委托时同一格不一样）\n", delegateVisible ? "[PASS]" : "[FAIL]");
+        printf("%s 对照组本身非空（防「两边都空白」的假绿）\n", ctrlVisible ? "[PASS]" : "[FAIL]");
+        printf("%s FileType 六个取值每个都画得出图标（非空且有墨）\n", everyTypeHasIcon ? "[PASS]" : "[FAIL]");
+        printf("%s 六个取值的图标两两不同（漏 case 会撞成同一个）\n", typesDistinct ? "[PASS]" : "[FAIL]");
+        printf("%s detectFileType 永不返回 All（10 种输入，含空串与「a.」）\n", allNeverProduced ? "[PASS]" : "[FAIL]");
+        delete testView; delete ctrlView; delete plainView;
+        return (decoEmpty && keyOk && sameAsCtrl && delegateVisible && ctrlVisible
+                && everyTypeHasIcon && typesDistinct && allNeverProduced) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──

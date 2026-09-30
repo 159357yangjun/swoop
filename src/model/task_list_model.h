@@ -58,7 +58,11 @@ public:
     // 供 CategoryFilterProxy 按状态过滤使用的自定义角色
     enum { StateRole = Qt::UserRole + 1, QueueRole = Qt::UserRole + 2,
            ProgressRole = Qt::UserRole + 3,   // 进度百分比 0-100（进度条委托用）
-           GroupHeaderRole = Qt::UserRole + 6 };  // 分组代理：该行是否为分组头（bool）
+           GroupHeaderRole = Qt::UserRole + 6,  // 分组代理：该行是否为分组头（bool）
+           // 文件名列（第 0 列）的类型键：存 CategoryFilterProxy::detectFileType 的结果（int）。
+           // 模型只发这个数据，**不发 QIcon**——键→图标的查表在 gui 层
+           // （AppIcons::fileTypeIcon / AppIcons::FileTypeIconDelegate），依赖方向 gui → model。
+           FileTypeRole = Qt::UserRole + 7 };
 
     // 状态枚举 → 中文文本（与 download_core.h TaskStatus 对齐：0待定 1运行 2暂停 3完成 4失败 5取消）
     static QString stateText(int state);

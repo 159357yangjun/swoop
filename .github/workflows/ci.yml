@@ -13,6 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 配置例外说明（本笔只新增一个测试入口，无新依赖、无版本变更）：这一步只跑仓库里已有的
+      # tools/lint_layering.py（纯标准库，用 windows-latest 自带的 python），不装任何东西、
+      # 不产生构建产物；它放在工具链之前是因为越界一行文本就能判，没必要等 MSYS2 装完。
+      - name: Layer gate (no low-layer include of a higher layer)
+        run: python tools/lint_layering.py --count-allowed
+        working-directory: ${{ github.workspace }}
+
       - name: Set up MSYS2 + Qt 6 toolchain
         uses: msys2/setup-msys2@v2
         with:
@@ -50,9 +57,10 @@ jobs:
       - name: UI probes (offscreen assertion suite)
         shell: msys2 {0}
         run: |
-          # 这 11 个离屏探针是 UI 侧唯一的回归网：站点口令不被掩码回写（P0）、
+          # 这 15 个离屏探针是 UI 侧唯一的回归网：站点口令不被掩码回写（P0）、
           # 代理语义两侧一致、缩放能持久化、IPC 的 listen 推迟到事件循环第一轮、
-          # 转发的四条出口各留下什么证据……以前只有我本机跑过，CI 一次都没提。
+          # 转发的四条出口各留下什么证据、文件名列的图标改由 gui 层查表之后还画不画得出来……
+          # 以前只有我本机跑过，CI 一次都没提。
           # 现在跟引擎自测一样钉成闸门，规则也一致：不 skip、不光学退出码、
           # 每个探针单独报数，红色时必须打出 ::error::（日志 403，只有 annotation 读得到）。
           # 名单里刻意不含 IDM_ICON_PROBE / IDM_ARROW_PROBE —— 那两个是把图标铺开
@@ -74,7 +82,8 @@ jobs:
                   IDM_NOTICE_PROBE IDM_IPC_PROBE IDM_FORWARD_PROBE
                   IDM_PROXY_PROBE IDM_ZOOM_PROBE IDM_TOOLPROBE_PROBE
                   IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE
-                  IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE IDM_FLUSH_PROBE"
+                  IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE IDM_FLUSH_PROBE
+                  IDM_FILEICON_PROBE"
           BAD=""
           TOTAL_PASS=0
           for P in $PROBES; do
@@ -103,14 +112,14 @@ jobs:
             echo "::error::UI 探针未全绿：$BAD"
             exit 1
           fi
-          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 14 个模式共 53 条，
-          # 留 6 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
+          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 15 个模式共 59 条，
+          # 留 9 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
           # 但整段被删空、或大面积退化仍然会红。
-          if [ "$TOTAL_PASS" -lt 46 ]; then
-            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥46）—— 断言被删了还是根本没跑？"
+          if [ "$TOTAL_PASS" -lt 50 ]; then
+            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥50）—— 断言被删了还是根本没跑？"
             exit 1
           fi
-          echo "UI 探针全绿：14 个模式共 $TOTAL_PASS 条断言"
+          echo "UI 探针全绿：15 个模式共 $TOTAL_PASS 条断言"
 
       - name: Engine self-test (local authenticated HTTP server)
         shell: msys2 {0}

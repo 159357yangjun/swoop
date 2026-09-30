@@ -3,6 +3,10 @@
 
 #include <QIcon>
 #include <QColor>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
+
+#include "category_filter_proxy.h"   // FileType：模型报上来的类型键（gui → model，向下依赖）
 
 class QPainter;
 
@@ -70,9 +74,26 @@ QIcon icon(Glyph g);
 // 取带语义着色的图标（同上：颜色实时解析，可跨主题复用）
 QIcon icon(Glyph g, Tint tint);
 
-// 按文件名后缀给出「文件类型图标」（带类型语义色）。
-// 文件类型判定复用 CategoryFilterProxy::detectFileType，全项目只有那一张后缀表。
-QIcon fileTypeIcon(const QString& fileName);
+// 按文件类型给出「文件类型图标」（带类型语义色）。
+// 参数是 model 层报上来的类型键（TaskListModel::FileTypeRole），不是文件名——
+// 后缀表全项目只有 CategoryFilterProxy::detectFileType 那一张，判定归模型，
+// 键到图标的翻译归这一层，所以依赖方向是 gui → model（见 tools/lint_layering.py）。
+QIcon fileTypeIcon(FileType fileType);
+
+/* 文件名列的绘制委托：把模型发来的类型键换成 QIcon。
+ * 用法：view->setItemDelegateForColumn(0, new AppIcons::FileTypeIconDelegate(TaskListModel::FileTypeRole, view));
+ * 只做一件事——在 QStyledItemDelegate 已经算好的样式选项上补图标，不重画文本、不改尺寸。
+ * 键无效（例如分组头行、或该列不是文件名列）时完全不干预，保持默认外观。 */
+class FileTypeIconDelegate : public QStyledItemDelegate {
+public:
+    explicit FileTypeIconDelegate(int fileTypeRole, QObject* parent = nullptr);
+
+protected:
+    void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override;
+
+private:
+    int m_fileTypeRole;
+};
 
 // 内部使用：绘制单个字形（坐标系固定 16×16，原点左上）
 void paintGlyph(QPainter* painter, Glyph g, const QColor& color);

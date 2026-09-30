@@ -383,15 +383,39 @@ QIcon icon(Glyph g, Tint t)
     return cachedIcon(g, t);
 }
 
-QIcon fileTypeIcon(const QString& fileName)
+QIcon fileTypeIcon(FileType fileType)
 {
-    switch (CategoryFilterProxy::detectFileType(fileName)) {
+    switch (fileType) {
         case FileType::Compressed: return cachedIcon(Glyph::Compressed, Tint::Amber);
         case FileType::Document:   return cachedIcon(Glyph::Document,   Tint::Indigo);
         case FileType::Music:      return cachedIcon(Glyph::Music,      Tint::Purple);
         case FileType::Program:    return cachedIcon(Glyph::Program,    Tint::Green);
         case FileType::Video:      return cachedIcon(Glyph::Video,      Tint::Rose);
         default:                   return cachedIcon(Glyph::OtherFile,  Tint::Slate);
+    }
+}
+
+FileTypeIconDelegate::FileTypeIconDelegate(int fileTypeRole, QObject* parent)
+    : QStyledItemDelegate(parent), m_fileTypeRole(fileTypeRole)
+{
+}
+
+void FileTypeIconDelegate::initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const
+{
+    QStyledItemDelegate::initStyleOption(option, index);
+    /* 基类已经把模型 DecorationRole 里的图标放进 option（现在模型不给，所以是空的）。
+       只在空的时候补，将来谁在模型侧真放了装饰图，也不会被这里覆盖成两份。
+       ⚠ 光设 option->icon 画不出来：QCommonStyle 的 drawItemData 判的是
+       QStyleOptionViewItem::HasDecoration 这个特征位，而基类只在「模型给了 DecorationRole」
+       时才置它——所以这里必须连特征位和实际尺寸一起补，否则图标静默消失
+       （第一版就是这么坏的，被 IDM_FILEICON_PROBE 的 [3][4] 两条抓住）。 */
+    if (option->icon.isNull()) {
+        const QVariant key = index.data(m_fileTypeRole);
+        if (key.isValid()) {
+            option->icon = fileTypeIcon(static_cast<FileType>(key.toInt()));
+            option->features |= QStyleOptionViewItem::HasDecoration;
+            option->decorationSize = option->icon.actualSize(option->decorationSize);
+        }
     }
 }
 

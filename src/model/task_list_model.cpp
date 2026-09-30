@@ -1,5 +1,5 @@
 #include "task_list_model.h"
-#include "app_icons.h"   // fileTypeIcon：文件名列的类型图标
+#include "category_filter_proxy.h"   // detectFileType：全项目唯一的文件后缀表（同层，model/）
 
 #include <QUrl>
 #include <QColor>
@@ -105,10 +105,13 @@ QVariant TaskListModel::data(const QModelIndex& index, int role) const
         }
         return QVariant();
     }
-    if (role == Qt::DecorationRole && index.column() == 0) {
-        // 文件名列加文件类型图标：几十行里用户是「找那个 zip」，不是「读第 7 行」。
-        // 颜色语义与左侧分类树同一套（AppIcons::fileTypeIcon，内部有缓存）。
-        return AppIcons::fileTypeIcon(m_tasks[index.row()].fileName);
+    if (role == FileTypeRole && index.column() == 0) {
+        /* 文件名列的「类型键」——几十行里用户是「找那个 zip」，不是「读第 7 行」，所以这一列要有图标；
+         * 但模型只负责报类型，不产 QIcon：键→图标（含类型语义色）的查表归 gui 层，
+         * 依赖方向因此是 gui → model（反向写法会被 tools/lint_layering.py 判红）。
+         * 判定沿用 CategoryFilterProxy::detectFileType，与分类树/筛选器同一张后缀表，
+         * 不另立第二套口径。 */
+        return static_cast<int>(CategoryFilterProxy::detectFileType(m_tasks[index.row()].fileName));
     }
     if (role != Qt::DisplayRole)
         return QVariant();
