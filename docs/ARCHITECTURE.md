@@ -688,9 +688,20 @@ CI 约一半概率红。之前写"3/8 超门槛、未定位"仍然成立，但**
 **未做**：没为变绿放宽门槛、没改判据。下一步要么把"总成本"也封顶（而不是只封单条），
 要么把判据换成"排队请求的**总**等待"而不是"单轮最长"。
 
+**红演示已做（2026-09-30）**：把 `dark.qss` 主按钮块的字色从 `#ffffff` 改成 `#18191c` 后，
+`python tools/contrast_matrix.py` 两道各咬一次 ——
+`dark: #18191c on #2f6fe0 = 3.74 < 4.5 块=QToolButton#primaryToolBtn`（GATE-A）与
+`dark: QToolButton#primaryToolBtn 块里的实际配对不是 #ffffff on #2f6fe0，而是 [('#18191c','#2f6fe0')]`（GATE-B），
+`RED_EXIT=1`；`git checkout -- resources/qss/dark.qss` 还原（`git status --porcelain resources/` 空、
+sha256 由 `cc5b2cc6631f` 回到 `c4632d38b6b5`）后 `GREEN_EXIT=0`。
+**「从未红过 ⇒ OK 不可信」这条横幅因此摘除。**
+**残余盲区（横幅摘了但它还在）**：GATE-A 只覆盖「同一个块里自己声明了 background 的文字」；
+文字底色来自**祖先块**的配对（例如 `QLabel` 无自身 background，坐在窗体上）不在覆盖内 ——
+那需要控件→表面的包含关系模型，仍未建。
+
 ### 未开工，入参写定于 2026-09-30 —— D 段要量的不是「总等待」，而是「这一轮的时间是谁花的」
 
-**今日状态**：`ahead 23`、`contrast_matrix` 的「OK 不可信」横幅**仍挂**（从未红过就不摘）、
+**今日状态**：`ahead 24`、`contrast_matrix` 的「OK 不可信」横幅**已摘**（红演示见下）、
 `?? idm-next-glass-ui.html` 等用户出清单批（未动未删）、不 push／不 tag／不改版本号。
 
 **只读代码得到的三句**（`src/app/ipc_server.cpp`）：
