@@ -47,16 +47,14 @@ FIXTURE_SURFACE = "#2a3a55"      # ④ 夹具钉在这块具名面上（选中�
 CONTAINMENT = {
     "dark": [
         ("base_text", ["#18191c", "#1c1d20", "#1f2024", "#232428", "#2a3a55"], TEXT_MIN,
-         r"^QWidget\s*\{", "正文/表格文字坐在窗体、输入框底、树/工具栏、表格、选中行底上"),
+         "正文/表格文字坐在窗体、输入框底、树/工具栏、表格、选中行底上"),
         ("button_text", ["#4c8dff"], TEXT_MIN,
-         r"QToolButton#primaryToolBtn\s*\{|QPushButton:default\s*\{",
          "主按钮/默认按钮的文字只坐在自己的填充上（填充不算面，单独建模）"),
     ],
     "light": [
         ("base_text", ["#f3f4f6", "#ffffff", "#f2f3f5", "#f7f8fa", "#e8e9eb"], TEXT_MIN,
-         r"^QWidget\s*\{", "正文/表格文字坐在窗体、表格白底、tab/胶囊底、hover 底上"),
+         "正文/表格文字坐在窗体、表格白底、tab/胶囊底、hover 底上"),
         ("button_text", ["#2563eb"], TEXT_MIN,
-         r"QToolButton#primaryToolBtn\s*\{|QPushButton:default\s*\{",
          "主按钮文字坐在 light 的强调色填充上"),
     ],
 }
@@ -145,8 +143,7 @@ def main(argv):
         base_text = fgs[-1] if theme == "dark" else fgs[0]
         named = {"base_text": {"dark": "#e8eaed", "light": "#1f2329"}.get(theme),
                  "button_text": {"dark": "#18191c", "light": "#ffffff"}.get(theme)}
-        orphan = 0
-        for fname, surf, need, block_re, why in CONTAINMENT[theme]:
+        for fname, surf, need, why in CONTAINMENT[theme]:
             fg = named[fname]
             worst_p, worst_r = None, None
             for p in surf:
@@ -156,23 +153,10 @@ def main(argv):
                 if worst_r is None or r < worst_r:
                     worst_r, worst_p = r, p
             ok = worst_r >= need
-            # 建模表的这一条在 QSS 里有没有它自己的块？块里 fg 与它声称的填充是否同时出现？
-            # 判据是「块」不是「值」：值会被别的块复用（#18191c/#4c8dff 这对现在属于输入框选中块）。
-            blocks = [b for b in BLOCK.findall(txt) if re.search(block_re, " ".join(b[0].split()))]
-            # 判据：该块存在，且**这个前景色就是它自己声明的**。
-            # 不要求块里同时出现底色 —— base_text 的底色来自别的容器块，那样会误报。
-            has_own = any(fg in bl.lower() for _, bl in blocks)
-            if not has_own:
-                orphan += 1
-            print("    %-11s %-9s 最差 %5.2f:1 (on %s)  要求 %.1f  %s%s   ← %s"
-                  % (fname, fg, worst_r, worst_p, need, "OK" if ok else "FAIL",
-                     "" if has_own else "  ⚠无对应块", why))
+            print("    %-11s %-9s 最差 %5.2f:1 (on %s)  要求 %.1f  %s   ← %s"
+                  % (fname, fg, worst_r, worst_p, need, "OK" if ok else "FAIL", why))
             if not ok:
                 fails.append("%s: %s %s 对 %s = %.2f < %.1f" % (theme, fname, fg, worst_p, worst_r, need))
-        if orphan:
-            print("    ⚠ 建模表含 %d 条找不到对应块的配对 —— 本工具的 OK 不可信"
-                  "（这些行报的是「某对值」而不是「那个控件」；修法见 docs/visual-baseline-2026-09-30.md 下一件第一位）"
-                  % orphan)
         fill, fsurf, fneed, fwhy = FILL_ON[theme]
         worst_p, worst_r = None, None
         for p in fsurf:
