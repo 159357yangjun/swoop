@@ -33,9 +33,10 @@
 | **gui → core/protocols/storage/utils** | 向下 | ✓ 唯一允许的方向 |
 
 **结论**：依赖箭头方向整体合规，没有"下层回头依赖上层"的倒挂。
-（2026-09-29 复核更正：六条"= 0"逐条重跑仍然成立（见 §7 第 6 条 V8），但**"没有倒挂"这半句已过期**
-—— 阶段 1 把 `task_list_model` 搬进 `model/` 之后，`src/model/task_list_model.cpp:2` 仍
-`#include "app_icons.h"`（gui 头），这是一条真实的 L1 → L4 反向依赖，本轮只记录、未修。）
+（2026-09-29 复核曾发现这半句不成立：阶段 1 把 `task_list_model` 搬进 `model/` 之后，
+`src/model/task_list_model.cpp` 仍 `#include "app_icons.h"`，是一条真实的 L1 → L4 反向依赖。
+**该条已按 (a) 修掉**（`d7a89ca`：模型只发 `FileTypeRole`，图标在 gui 层的 `FileTypeIconDelegate` 查表），
+现在这条结论由 `tools/lint_layering.py` 持续守着（接在 CI 第一步，越界即红）。详见 §7 第 7 条。）
 真正的结构性问题不是方向，而是**①上帝类（main_window 承担了应用编排）②文件归位错误③死代码入编④构建清单重复**。
 
 ### 1.2 边界违规（文件摆错层）
@@ -481,7 +482,7 @@ annotation 里会同时有"排队/处理/送达/客户端在不在"和第 13 步
 | 4 | `gui/glass_effect.cpp` 已停用但**仍在编译**（§1「死代码」行） | `grep -c glass_effect CMakeLists.txt`（V6a）· `grep -c glass_effect build/build.ninja`（V6b）· `ls build/CMakeFiles/idm-next.dir/src/gui/glass_effect.cpp.obj`（V6c） | **0 / 0**（旧路径 obj 存在，日期 2026-09-14） | **不成立**（这条"现状盘点"在 09-19 阶段 1 之后就已过期）。那个 `.obj` 是搬迁前的遗留产物，不能当"仍在编译"的证据 —— 与本仓库踩过的 stale-binary 同一个坑 |
 | 5 | `glass_effect.*` 移出编译、停用留档 ⇒ 可理解为"已完全废弃"（§1.2 表、§4 阶段 1） | `grep -rn glass_effect src/ --include=*.h --include=*.cpp`（V7） | **2**：`src/gui/legacy/glass_effect.cpp:1`（自身）+ **`src/gui/main_window.h:10` 仍 `#include "legacy/glass_effect.h"`** | **"移出编译"成立；"完全废弃/无人引用"不成立**：头文件仍被一个参与编译的翻译单元 include（`main_window.cpp` 内无 glass 符号，命中 0，所以只是 include 未使用） |
 | 6 | §1.1 六条"下层 → gui 引用数 = 0"（§1.1 表） | 按 `src/gui/*.h` 的 17 个头名做 include 扫描（V8） | core **0** · storage **0** · utils **0** · protocols **0** · cli **0** · host **0** | **今日复核仍成立**。对照：app **5**、model **1** |
-| 6b | §1.1 结论"没有'下层回头依赖上层'的倒挂"（§1.1 结论行） | 同 V8，再看非零明细（V12） | app 5 条**合规**（§2 的铁律允许 app 层持 gui 引用）；model **1 条不合规** | **不成立**：`src/model/task_list_model.cpp:2` → `src/gui/app_icons.h`（`fileTypeIcon` 画文件名列图标）。阶段 1 搬迁后才出现，写 §1.1 时该文件还在 `gui/` ⇒ 当时为真。§1.1 结论行已就地更正，**本轮只记录不修**（用户指令：本轮不加新活） |
+| 6b | §1.1 结论"没有'下层回头依赖上层'的倒挂"（§1.1 结论行） | 同 V8，再看非零明细（V12） | app 5 条**合规**（§2 的铁律允许 app 层持 gui 引用）；model **1 条不合规** | 当时**不成立**：`src/model/task_list_model.cpp:2` → `src/gui/app_icons.h`（`fileTypeIcon` 画文件名列图标）。阶段 1 搬迁后才出现，写 §1.1 时该文件还在 `gui/` ⇒ 当时为真。**本轮（同日 `d7a89ca`）已修**：模型改发 `FileTypeRole`，图标在 gui 层查表；V8 重跑 model=0，且这条判据从此由 `tools/lint_layering.py` 常驻把关（见 §7 第 7 条） |
 | 7 | `cfg.max_concurrent` 在引擎里"只被写入、无人读"（§7 第 1 条「改了什么」1.） | `grep -rn max_concurrent src/ tools/`（V9） | **8**，其中唯一读者 `src/core/download_core.c:550 concurrent_limit()` | **作为历史陈述成立、作为现状不成立**：`ef1fb7d` 起已有人读。原文有"以前"限定，保留；引用时须知道它已过期 |
 | 8 | 探针产物目录"仓库内零脚本依赖"（§7「（续）」的"仍然没验证"2.） | `grep -rn idm_shots --include=*.py --include=*.yml --include=*.sh --include=*.ps1 .`（V10） | **4**，全部落在 `tools/probe_artifact_inventory.py`（3 条是它自己的注释/名字族匹配逻辑 = 自指，1 条正文描述旧默认值） | **排除自指后 0 ⇒ 成立**。同一条自己留的那句"别的会话/手工习惯是否还在往这些目录写"**本机无账本可查，仍未核实** |
 | 9 | 重构前**无 `.git`**（§1「版本控制」行） | `git log --reverse` 取首笔（V11） | 首笔 `874427e`，日期 2026-09-19 | **半核实 → 降级**：只能证明"09-19 之前没有提交"，证明不了"当时目录里没有 .git"（也可能被删过）。可核写法是"首笔提交在 2026-09-19" |
@@ -551,3 +552,109 @@ V12 $ HDRS=$(find src/gui -name '*.h' -printf '%f\n'|sort -u)
 本轮**没做**的（按用户指令）：`idm-next-glass-ui.html` 一个字节没动、没搬、没进 `.gitignore`、
 没删 —— 去向仍等拍板，这条不算已处理（`git status -sb` 里它仍是 `??`）。
 第 13 步的 3 个红本轮**不收**，仍按第 5 条的门槛写作**未闭合**。
+
+### 2026-09-29（第 7 条）— 分层门常驻闸门；model→gui 那条反向依赖按「模型只发数据」修掉
+
+用户从三条候选里选了 (a)：`model` 不发图标、只发数据，view/delegate 侧查表换 `QIcon`。
+(b) 把 `app_icons.h` 下移到 model 被否（那是把越界合理化），(c) 登记豁免被否（后来人会以为这是设计）。
+
+**先立门，再改代码**（`tools/lint_layering.py`，纯标准库；层号与许可都取自本文 §2/§2.1）。
+改代码之前的基线输出（`46461b4`，恰好只有那一条，且用临时文件自证不是硬编码）：
+```
+$ python tools/lint_layering.py
+[layer-gate] 发现 1 条「低层反向依赖高层」：
+  VIOLATION model/task_list_model.cpp:2  include "app_icons.h" → gui/app_icons.h  (L1 model → L4 gui)
+LAYER_GATE_RC=1
+```
+改完之后（同一道门，未放宽任何判据）：
+```
+[layer-gate] 通过：扫了 210 条引号 include，反向依赖 0 条；文档许可的反向引用 10 条
+             （L2 app → L3 protocols ×5 · L2 app → L4 gui ×5；明细见 --count-allowed）
+LAYER_GATE_RC=0
+```
+第一版门曾报 6 条，多出的 5 条 `app→protocols` 是**我的数字比较比文档更严**（§2.1 明文允许
+L2 依赖「L3（类型）」），不是真越界；许可对登记在 `SANCTIONED` 并用 `--count-allowed` 逐条打印，
+不做静默豁免。接进 CI 的第一步（在工具链之前，一行文本就能判），yml 里留了配置例外说明。
+
+**代码**：`TaskListModel` 新增 `FileTypeRole`（第 0 列返回 `detectFileType` 的 int），
+删掉 `Qt::DecorationRole` 那一支；`AppIcons::fileTypeIcon` 改收 `FileType`；
+新增 `AppIcons::FileTypeIconDelegate` 在 `initStyleOption` 里把键翻成图标；MainWindow 装到第 0 列。
+
+⚠ **记一条 Qt 细节，它会静默吃功能**：光设 `option->icon` 画不出图标。`QCommonStyle` 的
+`drawItemData` 判的是 `QStyleOptionViewItem::HasDecoration` 特征位，而基类只在「模型给了
+DecorationRole」时才置它。所以第一版编译过、`initStyleOption` 确实被调（现场打印
+`iconNull=0 deco=16x16`）、退出码也 0，界面上文件名列的图标却**全没了**（文字左移到图标位）。
+必须连 `features |= HasDecoration` 与 `decorationSize = icon.actualSize(...)` 一起补。
+
+**测具**（`IDM_FILEICON_PROBE`，第一版 5 条、同日补到 8 条，已接进 CI 的 UI 探针闸门；
+接进去之后闸门是 15 个模式共 62 条）：
+[3] 的判法是「装生产委托的单元格」与「模型直接给 DecorationRole 的控制表格」**逐像素相同**——
+控制表格复刻的正是改前那条通路，所以这条相等就是"用户看到的没变"，且不依赖 PNG 金样。
+两次变异各只打红该红的那条：
+```
+删 features |= HasDecoration 那行 → [3][4] FAIL，rc=1（其余三条仍 PASS）
+模型恢复发 DecorationRole        → 只有 [1] FAIL，rc=1
+```
+
+**改前/改后视觉对照**（同一任务列表、同一组 7 个扩展名；走查图 `02_main_tasks` 取
+文件名列区域 `240,140..602,790`；同构建重跑两次做噪声基线，该区域差异像素 0）：
+```
+before1 sha1 = d7fd23d603b298d9d9108fde2d6c6f36072d0cc6   ← 改前
+before2 sha1 = d7fd23d603b298d9d9108fde2d6c6f36072d0cc6   ← 改前重跑（噪声基线，差异 0）
+after1  sha1 = ea5002641265ef8c911d4704d0d7dd99a9bddfb7   ← 第一版（缺 HasDecoration）：差异 7165 像素
+after2  sha1 = d7fd23d603b298d9d9108fde2d6c6f36072d0cc6   ← 修好：与改前**逐像素相同**，差异 0
+```
+也就是说：A/B 既能分辨"真坏了"（7165 像素），也对"修好了"给出与改前同一哈希——
+这条不是我声称"没变化"，是同一区域两次哈希相等。
+
+**补（同日第二轮，用户复核后）**：门与代码压成**一笔** `9f04742`（原来分三笔会让中间提交红在门上），
+还原点 `backup/pre-squash-68e38de`；探针从 5 条加到 **8 条**，门加了两处可核性：
+根路径改从 `__file__` 推（原来靠 cwd，跑错目录会"扫到 0 个文件"而退 0＝永远绿的假门），
+许可对钉上限（`app→gui ≤5`、`app→protocols ≤5`），`--count-allowed` 从"给人看的清单"变成有牙的判据：
+```
+临时在 src/app/auto_power.cpp 加第 6 条 app→gui：
+  OVERCAP app → gui：6 条，上限 5 条 —— 许可对被扩大了。…  → EXIT=1
+还原后                                                   → EXIT=0
+```
+新增的第 [7] 条（六个类型两两不同）是这轮真正的回归网，因为**像素对照抓不到静默降级**：
+```
+删掉 case FileType::Compressed: 之后
+  [fileicon] 类型 Compressed 与 Other 画出来一模一样（switch 漏了 case？）
+  [FAIL] 六个取值的图标两两不同（漏 case 会撞成同一个）
+  [PASS] 装了生产委托的单元格与改前通路逐像素相同      ← 注意这条照样绿！
+```
+控制表格用的是同一张坏表，所以"与改前一致"式的断言对漏 case 完全无感；只有逐类型点名能抓到。
+第 [8] 条钉 `FileType::All`（筛选器的"全部"档，10 种输入下都不会被 `detectFileType` 返回；
+真返回时 default 画成 OtherFile，用户看到"未知类型"而不是空白）——所以它不参与 [7] 的互异比对。
+
+A/B 取证已挪到 `%TEMP%\idm-probes\2026-09-30\`（`before_46461b4/` 是改前那两次的图，
+`after_9f04742/run1|run2/` 是改后当前构建的两次）：文件名列区域三张图 sha1 全等于
+`d7fd23d603b298d9d9108fde2d6c6f36072d0cc6`，两两差异像素 0；整图 sha1 不同（差异在速度/状态列，属噪声）。
+
+验证命令与实际输出：
+```
+cmake --build build
+  → 三个改动文件都出现对应的重编行（步号随增量构建范围变化，这里只记文件名）：
+    Building CXX object CMakeFiles/idm_app_lib.dir/src/gui/app_icons.cpp.obj
+    Building CXX object CMakeFiles/idm_app_lib.dir/src/model/task_list_model.cpp.obj
+    Building CXX object CMakeFiles/idm_app_lib.dir/src/gui/main_window.cpp.obj
+    （⚠ 中途一次我把构建输出 grep 掉了，结果构建其实失败、我读的是陈旧 exe，结论作废重做）
+python tools/lint_layering.py                       → EXIT=0（改前同一道门 EXIT=1，见上）
+python tools/lint_layering.py --count-allowed       → app→gui 5/5 · app→protocols 5/5（去重后仍 5）
+bash --noprofile --norc -eo pipefail <UI probes 步骤原文>
+  → 15 个模式 rc 全 0，「UI 探针全绿：15 个模式共 62 条断言」（下限 ≥50）
+./build/engine_selftest.exe 18190 idmuser idmpass   → 结果：142 通过，0 失败（未受影响）
+```
+
+仍然没验证 / 没做的：
+0. **一次 `IDM_FORWARD_PROBE` 的红没定位**：套件某轮它红，之后 1 次单独 + 2 次全量都绿（5/5、rc=0），
+   当时我只 `tail -6` 没留全量日志，**那次红的原文已经拿不回来了**。本机当前无残留
+   `idm-next.exe`/`ui_snapshot.exe` 进程。它与第 13 步属同一家族（单实例 IPC 的时序/残留），
+   不记为"已排除"。CI 那侧失败会打 `tail -25`，下次红就有现场。
+1. **真机界面上的观感**：像素对照只覆盖"与改前是否一致"，不等价于"人眼看着对"。
+   要看界面请用户本人跑一次（`build/idm-next.exe`，本轮没装机、没打包）。
+2. 分组模式（按类型/按队列）下的分组头行：`FileTypeRole` 在头行返回无效 ⇒ 委托不画，
+   与改前行为一致，但**这条我只在离屏单元格里验了非分组路径**，分组视图没进断言。
+3. `app→gui` 那 5 条许可里，`appearance_controller.cpp:12` 依赖的 `sidebar_panel.h` 是 QWidget 子类，
+   与 §2.1「L2 禁止持有 UI 树」相抵触——门按 §2 的括号放行了，张力留在工具注释里，本轮没动。
+4. 第 13 步仍**未闭合**（门槛：连续 14 轮 step 13 全绿）。
