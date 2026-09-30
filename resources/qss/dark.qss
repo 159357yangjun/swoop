@@ -104,8 +104,12 @@ QToolButton::menu-indicator {
    现在：深字 on 强调色 = 5.49（文本过），强调色对最差面板 = 3.58（非文本过）。
    ⚠ pressed 态那档蓝配深字仍只有 4.19（配白字也 4.19）——既存问题，本轮不动；hover 档 4.61 过。 */
 QToolButton#primaryToolBtn {
-    background-color: #4c8dff;
-    color: #18191c;
+    /* 次选：深色填充 + 1px 亮调边框 + 白字。白字 4.70（≥4.5），
+       边界由 #4c8dff 这条边提供（对最差面 #2a3a55 = 3.58 ≥3.0），
+       图标与文字同为浅色 ⇒ 按钮内部不再两种色。 */
+    background-color: #2f6fe0;
+    border: 1px solid #4c8dff;
+    color: #ffffff;
     font-weight: 600;
 }
 QToolButton#primaryToolBtn:hover {
@@ -257,10 +261,10 @@ QPushButton:disabled {
     border-color: #2c2d31;
 }
 QPushButton:default {
-    /* 与 QToolButton#primaryToolBtn 同一档：这块上面也压 #ffffff 文字 */
-    background-color: #4c8dff;
+    /* 同主按钮：深填充 + 亮边 + 白字 */
+    background-color: #2f6fe0;
     border-color: #4c8dff;
-    color: #18191c;
+    color: #ffffff;
     font-weight: 600;
 }
 QPushButton:default:hover {
