@@ -265,8 +265,9 @@ static void verify_progress_against_disk(DownloadTask *t) {
         /* 已报完成的任务被盘否证 ⇒ 退回暂停，让续传把否证掉的位重取，
          * 而不是把坏成品留在盘上。能自愈，所以不是 FAILED。 */
         if (t->status == TASK_COMPLETED) t->status = TASK_PAUSED;
-        snprintf(t->error_msg, sizeof(t->error_msg),
-                 "[STATE-CLAMP] 发现 %d 片进度被盘否证，重取 %lld 字节", n, (long long)refetch);
+        /* 文案路径已清理：自我报告只走 TaskInfo 的 clamp_chunks / clamp_refetch_bytes 两个计数。
+         * 理由见 download_core.h 里那两个字段的注释——error_msg 每次 attempt 开头会被清成空串
+         * (那是合理的局部修复)，把报告挂在它上面等于把保证押在"以后没人再清这个字段"。 */
     }
 }
 

@@ -21,7 +21,12 @@ SELFTEST_RC=2 ｜结果：171 通过，2 失败 ｜exe_sha12=7022464dafa2 ｜本
 
 ## 仍未闭合（照实写）
 
-1. `error_msg` 里那句 `[STATE-CLAMP]` 仍然 0 行（`STATE_CLAMP_lines=0`）：`download_one_chunk` 每次 attempt
+1. **（04:55 已处理）文案路径清理完毕**：`error_msg` 里那句 `[STATE-CLAMP]` 从代码里删掉了，自我报告只走
+   两个计数字段。清理后实跑 `171 通过，2 失败`（T3 04:54:26→04:55:55，exe_sha12=2f16892884b2，objs=1 真重编），
+   `clamp_rows=3 / clamp_nonzero_rows=2`（面 A 为 0、面 B/C 非零），三条 [PASS] 都在，`STATE-CLAMP` 文本 0 行——
+   这次这个 0 是**按设计**的，不是盲区。`tools/p0_rerun.sh` 里那条 `grep -ac 'STATE-CLAMP'` 同步换成数
+   `clamp_refetch=` 的行数与非零行数：**留着旧的那条，它就是一面只会印 0 的死旗子**。
+（`STATE_CLAMP_lines=0`）：`download_one_chunk` 每次 attempt
    开头清 `error_msg` 的行为**没有被改**，所以文案路径依旧读不到。现在的自我报告走的是**不被清的计数字段**
    （主控批准的候选①），文案那条路等于废弃——要不要保留写文案这段代码，下一轮判。
 2. **调用点① 仍无牙**：面 A/B/C 都调用了 `dlmgr_start`，所以②必然先于读数执行；①要长出牙需要一面

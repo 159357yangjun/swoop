@@ -48,5 +48,11 @@ grep -a '^  \[FAIL\]' "$SLOG" | tr -d '\r'
 # 于是 "STATE_CLAMP_rows=0" 会被读成"引擎没写自我报告"，而真相可能只是测具没印。
 echo "--- error_msg 读数（无条件）---"
 grep -a "error_msg=" "$SLOG" | tr -d '\r'
-echo "error_msg_rows=$(grep -ac 'error_msg=' "$SLOG" || true) STATE_CLAMP_rows=$(grep -ac 'STATE-CLAMP' "$SLOG" || true)"
+echo "error_msg_rows=$(grep -ac 'error_msg=' "$SLOG" || true)"
+# 自我报告的证人换成了两个计数字段（文案路径已清理：error_msg 每次 attempt 被清，挂不住读数）。
+# 所以这里数的是**带 clamp_refetch= 的读数行**与其中**非零**的行数；
+# 旧的 `grep -ac 'STATE-CLAMP'` 会在清理后恒等于 0 —— 那是一面只会印 0 的死旗子，不许留着。
+CL=$(grep -ac "clamp_refetch=" "$SLOG" || true)
+NZ=$(grep -ao "clamp_refetch=[0-9]*" "$SLOG" | grep -avc "clamp_refetch=0$" || true)
+echo "clamp_rows=$CL clamp_nonzero_rows=$NZ"
 exit $RC
