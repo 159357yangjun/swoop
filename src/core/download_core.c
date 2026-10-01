@@ -1121,7 +1121,19 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
      *    这里先置位，界面当下就能反映"已经拉起来了"。 */
     EnterCriticalSection(&g_lock);
     t->status = TASK_RUNNING;
-    t->error_msg[0] = '\0';   /* 清掉上一次失败留下的原因，否则重试时 GUI 还显示旧错误 */
+    /* 清掉上一次失败留下的原因，否则重试时 GUI 还显示旧错误。
+     * ⚠ 但**自愈读数不能被这一句抹掉**：本轮实测过，正是这句完全合理的局部修复
+     *    把 state-vs-盘 的自我报告擦成了空串，让"不许静默"没有证人。
+     *    所以这里不写第二份状态——直接从 `clamp_chunks`（唯一真源）**重生成**那句：
+     *    自愈还在 ⇒ 句子就在；盘与 state 一致（计数归 0）⇒ 这里就清空。
+     *    本行在 g_lock 内、且 verify_progress_against_disk(调用点②) 刚跑过，计数就是本轮真值。 */
+    if (t->clamp_chunks > 0) {
+        snprintf(t->error_msg, sizeof(t->error_msg),
+                 "[STATE-CLAMP] 发现 %d 片进度被盘否证，重取 %lld 字节",
+                 t->clamp_chunks, (long long)t->clamp_refetch_bytes);
+    } else {
+        t->error_msg[0] = '\0';
+    }
     LeaveCriticalSection(&g_lock);
 
     /* 保存目录兜底：不存在就逐级建出来。放在这里（而不是 dlmgr_add）是因为
