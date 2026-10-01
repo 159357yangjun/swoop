@@ -1,0 +1,72 @@
+--- §1 范围表 ---
+[OK]   src/ 文件数｜盘上=114 文中=114
+[OK]   src/ 字节数｜盘上=923962 文中=923962
+[FAIL] tools/ 文件数｜盘上=24 文中=26
+[FAIL] tools/ 字节数｜盘上=479919 文中=496421
+[OK]   docs/ 文件数｜盘上=12 文中=12
+[OK]   docs/ 字节数｜盘上=243669 文中=243669
+[OK]   resources/ 文件数｜盘上=17 文中=17
+[OK]   resources/ 字节数｜盘上=33821 文中=33821
+[OK]   installer/ 文件数｜盘上=2 文中=2
+[OK]   installer/ 字节数｜盘上=17671 文中=17671
+[OK]   .github/ 文件数｜盘上=2 文中=2
+[OK]   .github/ 字节数｜盘上=34986 文中=34986
+[OK]   third_party/ 文件数｜盘上=125 文中=125
+[OK]   third_party/ 字节数｜盘上=20168154 文中=20168154
+[OK]   browser-extension/ 文件数｜盘上=19 文中=19
+[OK]   browser-extension/ 字节数｜盘上=656497 文中=656497
+[FAIL] 仓根散装文件数｜盘上=9 文中=10
+[FAIL] 合计文件数｜git ls-files=324 文中=327
+[OK]   恒等式 Σ各目录+仓根==总数｜315+9==324
+[OK]   目录覆盖对称差｜盘上有而文中无=0 文中独有=0
+--- §2/§3/§4 证据锚点 ---
+[OK]   .gitignore:31｜含「browser-extension/native-messaging-host/*.exe」
+[OK]   .gitignore:32｜含「browser-extension/native-messaging-host/*.dll」
+[OK]   third_party/libcurl/include/curl/curlver.h:35｜含「LIBCURL_VERSION "8.22.0"」
+[OK]   third_party/libcurl/include/openssl/opensslv.h:6｜含「LIBRESSL_VERSION_NUMBER 0x4030200fL」
+[OK]   third_party/libcurl/README.md:20｜含「libressl 4.3.2」
+[OK]   third_party/libcurl/include/nghttp2/nghttp2ver.h:32｜含「NGHTTP2_VERSION "1.70.0"」
+[OK]   third_party/libcurl/include/nghttp3/version.h:34｜含「NGHTTP3_VERSION "1.18.0"」
+[OK]   third_party/libcurl/include/ngtcp2/version.h:39｜含「NGTCP2_VERSION "1.25.0"」
+[OK]   third_party/libcurl/include/libssh2.h:51｜含「LIBSSH2_VERSION "1.11.1"」
+[OK]   third_party/libcurl/include/zlib.h:52｜含「ZLIBNG_VERSION "2.3.3"」
+[OK]   third_party/libcurl/include/zstd.h:112｜含「ZSTD_VERSION_MAJOR 1」
+[OK]   third_party/libcurl/include/zstd.h:113｜含「ZSTD_VERSION_MINOR 5」
+[OK]   third_party/libcurl/include/zstd.h:114｜含「ZSTD_VERSION_RELEASE 7」
+[OK]   third_party/libcurl/include/libpsl.h:34｜含「PSL_VERSION "0.23.3"」
+[OK]   third_party/libcurl/README.md:21｜含「brotli 1.2.0」
+[OK]   .gitignore:49｜含「third_party/libcurl/docs/」
+[OK]   CMakeLists.txt:18｜含「find_package(Qt6 REQUIRED COMPONENTS Core Widget」
+[OK]   third_party/libcurl/README.md:17｜含「Qt 6.11.1」
+[OK]   证据锚点条数下限｜本轮解析到 18 条（下限 12 是规则，不是实测）
+--- §3 第三方版本对账 ---
+[OK]   curl / libcurl｜版本 8.22.0 出现在本行证据原文里（1 条锚点）
+[OK]   LibreSSL｜版本 4.3.2 出现在本行证据原文里（2 条锚点）
+[OK]   nghttp2｜版本 1.70.0 出现在本行证据原文里（1 条锚点）
+[OK]   nghttp3｜版本 1.18.0 出现在本行证据原文里（1 条锚点）
+[OK]   ngtcp2｜版本 1.25.0 出现在本行证据原文里（1 条锚点）
+[OK]   libssh2｜版本 1.11.1 出现在本行证据原文里（1 条锚点）
+[OK]   zlib-ng｜版本 2.3.3 出现在本行证据原文里（1 条锚点）
+[OK]   zstd｜三段合成 1.5.7 == 文中 1.5.7？（走的是拆分证据这条支路，具名登记）
+[OK]   libpsl｜版本 0.23.3 出现在本行证据原文里（1 条锚点）
+[OK]   brotli｜版本 1.2.0 出现在本行证据原文里（1 条锚点）
+[OK]   拆分证据行数上限｜本轮 1 行走拆分支路：['zstd']（只许 zstd 这一类，多出来就是要改文档）
+--- §2 许可证事实（离线） ---
+[OK]   L1 master 许可证文件计数｜命中 0 个（文中声明 =0）
+[OK]   L3 origin/main:LICENSE 的 blob sha｜实测=594869ea5e6b28156af2402367269f2c28f2fb62 文中是否含此串=True
+[OK]   L3 该文件大小｜实测=1063 文中是否含此数=True
+[OK]   L4 首行与第 3 行｜第1行=MIT License 第3行=Copyright (c) 2026 杨珺（第3行须原样出现在文中）
+[OK]   L5 徽章归因于默认分支｜symbolic-ref=refs/remotes/origin/main
+[OK]   L6 历史改过根 LICENSE 的提交数与所指提交｜实测=1 条 ['18f937d']；文中该行点名=['18f937d']
+[OK]   L9 browser-extension 首次入库｜874427e 2026-09-19（短 sha 与日期都要在文中）
+--- §2/§3/§5 盘上对账 ---
+[FAIL] 上游 docs 文件数｜盘上=57 文中=59
+[OK]   上游 docs 里许可证全文 + 该目录被忽略｜许可名文件=0 个；check-ignore rc=0
+[OK]   扩展目录被跟踪的 DLL 数｜实测=3 个：['qnetworklistmanager.dll', 'qcertonlybackend.dll', 'qschannelbackend.dll']
+[OK]   扩展入库字节数（与磁盘数分开）｜入库=656497（19 个文件）文中=656497
+[OK]   扩展磁盘字节数｜实测=16473007（文中须出现这个精确数，禁止用『约 16MB』冒充）
+[OK]   §5 运行时后端｜命中 4 个且全在 src/protocols/；可执行体 0 个；yt-dlp 命中 0 个
+--- 汇总 ---
+[NOTICE_VERIFY] rows§1=8 anchors=18 3p_rows=10 FAIL=5 tool=5af0447db23e/232行 notice_sha12=e0a0505eaff7
+未由本工具核（不得当成已验）：GitHub 徽章/公开性（要联网）、NOTICE §2 的 L7（本仓之外的工作树）、
+                      徽章所反映的**当下**默认分支内容（本地 origin/main 可能过期：git fetch 到 github.com:443 超时）。
