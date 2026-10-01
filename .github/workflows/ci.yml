@@ -20,6 +20,12 @@ jobs:
         run: python tools/lint_layering.py --count-allowed
         working-directory: ${{ github.workspace }}
 
+      # 配置例外说明（同上：仅新增一个测试入口，无新依赖、无版本变更）：文档 §1.3 的「哪份是活的」
+      # 名单必须与 CMakeLists 现算的未编译集逐字相等；表漂了或有人往 CMake 写注释洗白死文件，这里红。
+      - name: Live-roster gate (docs §1.3 table == recomputed uncompiled set)
+        run: python tools/live_roster.py
+        working-directory: ${{ github.workspace }}
+
       - name: Set up MSYS2 + Qt 6 toolchain
         uses: msys2/setup-msys2@v2
         with:
