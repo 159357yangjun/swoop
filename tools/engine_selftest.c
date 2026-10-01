@@ -2946,6 +2946,70 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ── [35] 两面差分（**测量，不是门**）：删掉前面的空闲任务，会不会让在跑任务的记账冻住 ──
+     * 机制（实读 download_core.c）：`dlmgr_remove` 只在**被删任务自己** `worker_alive>0` 时不摘槽，
+     * 而 `detach_slot` 的 memmove 移的是**整张数组**；工作线程拿的是**指针**。
+     * 两面用同一个二进制、同一个夹具，只切一个变量：`IDM_P35_NOOP=1` ⇒ 跳过那次删除。
+     * ⚠ 判据不进退出码：冻结与否取决于节流与块大小（计时类），写成断言就会闪红。
+     *    两面各印一行 `[35 读数] noop=…`，结论从**两行之差**读，不从本轮绿/红读。
+     *    这里只留一条真断言：探针必须真的跑到"非零起点"，否则两面都无意义 ⇒ 那才是红。
+     * ⚠ `.idmtmp` 的长度不作证人（并行 Range 写首采即全长），只印作对照。 */
+    {
+        char u35[160], p35f[260], d35[300];
+        const char *noop_env = getenv("IDM_P35_NOOP");
+        int noop35 = (noop_env && noop_env[0] == '1') ? 1 : 0;
+        int id_idle, id_run, i35, st_before = -1, st_after = -1, cc_after = -1, cd_after = -1;
+        long long dl0 = 0, dl_max = 0, sz0 = 0, sz1 = 0;
+        TaskInfo x35;
+        WIN32_FILE_ATTRIBUTE_DATA fa35;
+
+        snprintf(u35, sizeof(u35), "http://127.0.0.1:%d/huge.bin", port);
+        id_idle = dlmgr_add(u35, outdir, "p35_idle.bin", 1, NULL, NULL, NULL, NULL);
+        id_run  = dlmgr_add(u35, outdir, "p35_run.bin",  2, NULL, NULL, NULL, NULL);
+        snprintf(p35f, sizeof(p35f), "%s\\p35_run.bin.idmtmp", outdir);
+
+        if (id_idle <= 0 || id_run <= 0 || !(id_idle < id_run)) {
+            snprintf(d35, sizeof(d35), "id_idle=%d id_run=%d（要求都 >0 且空闲任务排在前面）", id_idle, id_run);
+            check("[35] 两个任务都建得出来且空闲任务排在前面", 0, d35);
+        } else {
+            dlmgr_start(id_run);
+            for (i35 = 0; i35 < 60; i35++) {                 /* 等记账出现非零起点：最多 6s */
+                if (dlmgr_get_task_info(id_run, &x35) != 0) break;
+                if (x35.downloaded > 0) break;
+                if (x35.status == 3 || x35.status == 4) break;
+                Sleep(100);
+            }
+            dl0 = x35.downloaded; dl_max = dl0; st_before = x35.status;
+            cc_after = x35.chunk_count; cd_after = x35.chunks_done;
+            GetFileAttributesExA(p35f, GetFileExInfoStandard, &fa35);
+            sz0 = ((long long)fa35.nFileSizeHigh << 32) | (long long)fa35.nFileSizeLow;
+
+            if (noop35) dlmgr_pause(id_run);                 /* 对照面：不删除，只停一下再续，扰动时长对齐 */
+            else        dlmgr_remove(id_idle);               /* 实验面：走 detach_slot 的 memmove 分支 */
+            Sleep(500);
+            if (noop35) dlmgr_start(id_run);
+
+            for (i35 = 0; i35 < 60; i35++) {                 /* 扰动后再观察最多 6s */
+                if (dlmgr_get_task_info(id_run, &x35) != 0) break;
+                if (x35.downloaded > dl_max) dl_max = x35.downloaded;
+                st_after = x35.status; cc_after = x35.chunk_count; cd_after = x35.chunks_done;
+                if (st_after == 3 || st_after == 4) break;
+                if (dl_max > dl0) break;                     /* 已前进就收工，少一个混淆源 */
+                Sleep(100);
+            }
+            GetFileAttributesExA(p35f, GetFileExInfoStandard, &fa35);
+            sz1 = ((long long)fa35.nFileSizeHigh << 32) | (long long)fa35.nFileSizeLow;
+            snprintf(d35, sizeof(d35),
+                     "noop=%d起点=%lld 扰动后最大=%lld 前进=%d status %d->%d chunk_count=%d chunks_done=%d"
+                     " .idmtmp %lld->%lld(不作证人)",
+                     noop35, dl0, dl_max, (dl_max > dl0) ? 1 : 0, st_before, st_after,
+                     cc_after, cd_after, sz0, sz1);
+            printf("    [35 读数] %s\n", d35); fflush(stdout);
+            check("[35] 探针跑到非零起点（两面都必须有起点，否则差分无意义）", dl0 > 0, d35);
+            dlmgr_pause(id_run); Sleep(400); utf8_delete(p35f);
+        }
+    }
+
     dlmgr_destroy();
     printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
 
