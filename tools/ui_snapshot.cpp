@@ -1409,6 +1409,77 @@ int main(int argc, char** argv) {
                    drained ? "成" : "未成", peakN, (long long)peakDrainMs,
                    (long long)worstLoopMs, ipcShare);
 
+            /* ── 轮内归因消融（IDM_ROUND_ATTR=1，只量不改判据）──
+             * IPC 只占 10~13%，剩下 ~1.5s 是谁？先做二分：把 MainWindow 子树里所有 QTimer
+             * 停掉再采一轮。掉回 ~215ms ⇒ 时间花在定时器回调上（再逐个消融定位是哪一个）；
+             * 不掉 ⇒ 与定时器无关（socket/重绘/外部事件），换一条路查。
+             * 顺带把定时器清单打出来：间隔、是否活动、宿主 objectName/类名。 */
+            if (qEnvironmentVariableIsSet("IDM_ROUND_ATTR")) {
+                const auto timers = w.findChildren<QTimer*>();
+                printf("[attr] 定时器 %d 个：\n", int(timers.size()));
+                for (QTimer* tm : timers) {
+                    if (!tm) continue;
+                    QObject* par = tm->parent();
+                    printf("     interval=%-6d active=%d 宿主=%s[%s]\n",
+                           tm->interval(), int(tm->isActive()),
+                           par ? par->metaObject()->className() : "-",
+                           par ? qUtf8Printable(par->objectName()) : "-");
+                }
+                /* ⚠ 第一版消融是错的，记在这里防重犯：我把「停掉定时器再采样」放在 D 段之后，
+                 * 而 D 段那条空转连接早被处理完了 ⇒ 之后无论停谁都是 0ms，
+                 * 4 个定时器全被判成"元凶"。消融必须**重开一份被测事件**，
+                 * 不能拿"事件已经过去了"的空窗口当对照。 */
+                auto sampleWithIdle = [&](bool timersOff) -> qint64 {
+                    QVector<bool> wasActive;
+                    if (timersOff) {
+                        for (QTimer* tm : timers) {
+                            wasActive.append(tm ? tm->isActive() : false);
+                            if (tm) tm->stop();
+                        }
+                    }
+                    std::atomic<bool> closed { false };
+                    QThread* th = QThread::create([&] {
+                        QLocalSocket s;
+                        s.connectToServer(ipcServerName());
+                        if (s.waitForConnected(3000)) { QThread::msleep(2500); s.abort(); }
+                        closed = true;
+                    });
+                    th->start();
+                    QElapsedTimer win; win.start();
+                    const qint64 start = win.elapsed();
+                    qint64 worst = 0;
+                    while (win.elapsed() - start < 2000 && !closed.load()) {
+                        QElapsedTimer one; one.start();
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                        worst = qMax(worst, one.elapsed());
+                    }
+                    while (!closed.load()) {
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                        QThread::msleep(5);
+                    }
+                    th->wait(5000);
+                    delete th;
+                    if (timersOff)
+                        for (int i = 0; i < timers.size(); ++i)
+                            if (timers[i] && wasActive.value(i)) timers[i]->start();
+                    return worst;
+                };
+                const qint64 onA  = worstLoopMs < 500 ? -1 : sampleWithIdle(false);
+                const qint64 offB = worstLoopMs < 500 ? -1 : sampleWithIdle(true);
+                const qint64 onC  = worstLoopMs < 500 ? -1 : sampleWithIdle(false);   // 排除单调漂移
+                if (worstLoopMs < 500) {
+                    printf("[attr] 本轮未复现（D 段单轮最长=%lldms < 500，IPC 自身峰值=%lldms）"
+                           "⇒ 跳过消融；消融只在复现的那一轮才有意义\n",
+                           (long long)worstLoopMs, (long long)peakDrainMs);
+                } else
+                printf("[attr] 同一测具两份窗口对照：有定时器=%lldms → 停定时器=%lldms → 再有定时器=%lldms"
+                       "（IPC 自身峰值=%lldms）⇒ %s\n",
+                       (long long)onA, (long long)offB, (long long)onC, (long long)peakDrainMs,
+                       (offB < 500 && (onA >= 500 || onC >= 500))
+                           ? "时间花在定时器回调上（对照成立：两边都塌/都高才算数）"
+                           : "对照不成立 —— 停不停都高或都低，这条归因作废，换路查");
+            }
+
             printf("[act] A 段两次 ack=%d/%d 模型行数 %d→%d 引擎任务数 %d→%d | "
                    "B 段放弃后往返=%lldms（需 <1500） | C 段 ack %d/%d | "
                    "D 段 事件循环单轮最长=%lldms（需 <500）\n",
