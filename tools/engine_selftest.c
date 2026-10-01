@@ -222,6 +222,20 @@ static void delete_matching(const char *pattern)
 }
 
 /* 攒下来的历史产物一律先扫掉：精确名单删不到「xxx (1).bin」这种引擎自己改出来的名字。 */
+static int count_matching(const char *pattern)
+{
+    wchar_t wp[MAX_PATH * 2];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int n = 0;
+    if (!test_to_wpath(pattern, wp, (int)(sizeof(wp) / sizeof(wp[0])))) return -1;
+    h = FindFirstFileW(wp, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) n++; } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+
 static void sweep_leftovers(const char *outdir)
 {
     static const char *pats[] = { "rst_a*", "rst_b*", "rst_c*", "s2_ok*", "s2_mm*",
@@ -229,7 +243,7 @@ static void sweep_leftovers(const char *outdir)
                                   "resume*", "reuse*", "shared*", "withauth*", "nocap*" };
     char pat[MAX_PATH + 96];
     for (int i = 0; i < (int)(sizeof(pats) / sizeof(pats[0])); i++) {
-        snprintf(pat, sizeof(pat), "%s\%s", outdir, pats[i]);
+        snprintf(pat, sizeof(pat), "%s\\%s", outdir, pats[i]);
         delete_matching(pat);
     }
 }
@@ -533,6 +547,25 @@ int main(int argc, char **argv)
     {
         int leftover = clean_outputs(outdir);
     sweep_leftovers(outdir);   /* 精确名单删不到引擎改名出来的「xxx (1).bin」*/
+        /* 自检（会红）：清扫自己是不是在空转。上面那行 snprintf 的转义被吃掉过一次
+         * （"%s\%s" 掉成一个反斜杠 ⇒ C 里是未知转义，模式变成 outdir 和文件名粘在一起，
+         * FindFirstFile 永远匹配不到东西，清扫静默零命中，盘上攒出 rst_a (1..3).bin）。
+         * 精确名单删不到引擎改名出来的东西，所以这条必须数通配。 */
+        {
+            char chk[MAX_PATH + 96];
+            int residue = 0, c1, c2;
+            snprintf(chk, sizeof(chk), "%s\\%s", outdir, "rst_a*");
+            c1 = count_matching(chk);
+            snprintf(chk, sizeof(chk), "%s\\%s", outdir, "s2_ok*");
+            c2 = count_matching(chk);
+            if (c1 > 0) residue += c1;
+            if (c2 > 0) residue += c2;
+            {
+                char msg[96];
+                snprintf(msg, sizeof(msg), "清扫后仍数到 rst_a*+s2_ok* 共 %d 个", residue);
+                check("启动清扫确实生效（通配数到 0 个上轮残留）", residue == 0, msg);
+            }
+        }
         printf("    输出目录 %s（清理了 %d 个上轮遗留产物）\n", outdir, leftover);
     }
 
@@ -2358,7 +2391,7 @@ int main(int argc, char **argv)
         for (int k = 0; k < bcreated; k++) {
             char fp[MAX_PATH + 64], tmpp[MAX_PATH + 80];
             dlmgr_cancel(bids[k]);
-            snprintf(fp, sizeof(fp), "%s\cap%d.bin", outdir, k);
+            snprintf(fp, sizeof(fp), "%s\\cap%d.bin", outdir, k);
             snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", fp);
             utf8_delete(fp);
             utf8_delete(tmpp);
@@ -2431,6 +2464,9 @@ int main(int argc, char **argv)
             int smp = 0, smp_absent = 0, smp_zero = 0, smp_grew = 0;
             long long tmp_max = -2, tmp_last = -2;
             int st_min = 99, st_max = -1, def_max = -1, big_max = -1;
+            long long fin_max = -2;
+            char fn_seen[256];
+            fn_seen[0] = ' ';
             for (int i = 0; i < 200; i++) {
                 if (dlmgr_get_task_info(id, &mid) != 0) { Sleep(100); continue; }
                 if (i % 5 == 0) {                      /* 500ms 一采 */
@@ -2438,6 +2474,13 @@ int main(int argc, char **argv)
                     int df = dlmgr_deferred_count();
                     int bg = server_stat(port, "big_reqs");   /* /big.bin 的 GET 次数 */
                     smp++;
+                    /* 同时采「成品路径」与引擎自己填的 filename：
+                     * 桶1b 还剩两个候选——它写到别处(i)，还是写入与计数器解耦(ii)。
+                     * 前者会让成品路径在窗口内就长起来，后者会让 filename 早已是正常值而两路都空。 */
+                    { long long fz = file_size_i64_of(path);
+                      if (fz > fin_max) fin_max = fz;
+                      if (!fn_seen[0] && mid.filename[0])
+                          snprintf(fn_seen, sizeof(fn_seen), "%s", mid.filename); }
                     if (sz < 0) smp_absent++;
                     else if (sz == 0) smp_zero++;
                     if (tmp_last >= 0 && sz > tmp_last) smp_grew++;
@@ -2483,9 +2526,10 @@ int main(int argc, char **argv)
                         bucket = "分不开：采样存在但形状不干净";
                     printf("    [分桶] %s｜采样=%d 次(每500ms,分母) 从未创建=%d 全程0字节=%d 有增长=%d "
                            "tmp最大=%lld status区间=[%d,%d](0排队/1下载中/2暂停) deferred最大=%d "
-                           "big.bin GET最大=%d ⇒ %s\n",
+                           "big.bin GET最大=%d 成品路径最大=%lld 引擎报的filename=「%s」 ⇒ %s\n",
                            F32[f].tag, smp, smp_absent, smp_zero, smp_grew, tmp_max,
-                           smp ? st_min : -1, smp ? st_max : -1, def_max, big_max, bucket);
+                           smp ? st_min : -1, smp ? st_max : -1, def_max, big_max,
+                           fin_max, fn_seen[0] ? fn_seen : "(没填过)", bucket);
                 }
             }
             /* 等暂停真的收干净：状态到 2（已暂停）且 downloaded 连续两次采样不变。
