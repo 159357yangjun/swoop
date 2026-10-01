@@ -11,15 +11,15 @@
 | 路径 | 文件数 | 字节数 | 是否在开源交付范围内 |
 |---|---|---|---|
 | `src/` | 114 | 923962 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
-| `tools/` | 26 | 496980 | ✅ 在——自测与门禁脚本 |
-| `docs/` | 13 | 253058 | ✅ 在 |
+| `tools/` | 29 | 513985 | ✅ 在——自测与门禁脚本 |
+| `docs/` | 15 | 273874 | ✅ 在 |
 | `resources/` | 17 | 33821 | ✅ 在 |
 | `installer/` | 2 | 17671 | ✅ 在 |
 | `.github/` | 2 | 34986 | ✅ 在 |
 | `third_party/` | 125 | 20168154 | ⚠️ 在范围内但**不是本项目的原创代码**，见 §3 |
 | `browser-extension/` | 19 | 656497 | ❌ **不在**——浏览器扩展不属开源交付物（所有者口头指示）；处置见 §2 |
 | 仓根散装文件 | 10 | — | ✅ 在（`CMakeLists.txt`、`README.md`、`NOTICE.md`、`vcpkg.json`、`REFACTOR_PLAN.md`、`开发文档.md`、`.gitignore`、`.gitattributes`、`.editorconfig`、`.clang-format`） |
-| **合计（`git ls-files`）** | **328** | | 恒等式 `318 + 10 = 328`，由 `--verify` 当场断言 |
+| **合计（`git ls-files`）** | **333** | | 恒等式 `323 + 10 = 333`，由 `--verify` 当场断言 |
 
 复算命令（在仓库根跑；注意 `bc` 在本机**没有**，所以求和走 `awk`，别抄成 `| bc`）：
 
@@ -108,7 +108,7 @@ git ls-files | wc -l               # 合计
 | 2 | 把 §3 各组件的上游许可证全文收进 `third_party/licenses/` 并让本表最后一列变 ✅ | 我可以做（需联网取上游文本，或从上游 zip 取） | 本轮未取网；且收哪些版本要与 §1 的决定一起定 |
 | 3 | `browser-extension/` 移出公开历史，或与 `master` 分仓 | 所有者 + 需 force-push | 不 push；共享远端上有并行会话，改写公开历史属高风险动作 |
 | 4 | `.gitignore:31-32` 与 3 个已跟踪 DLL 的矛盾：要么取消跟踪，要么删规则 | 所有者定方向 | 取消跟踪=从公开分发里删内容，属"作者权"动作 |
-| 5 | Qt6（`Core Widgets Network Charts Sql`，`CMakeLists.txt:18`）随包提供许可证与可重链接说明 | 出包环节 | 任务书 §2.1 写死本轮不出包 |
+| 5 | Qt6 随包提供许可证与可重链接说明（组件清单：`CMakeLists.txt:18 含「find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Charts Sql)」`） | 出包环节 | 任务书 §2.1 写死本轮不出包 |
 
 Qt6 的版本**不在仓库里固定**：组件清单见
 `CMakeLists.txt:18 含「find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Charts Sql)」`、

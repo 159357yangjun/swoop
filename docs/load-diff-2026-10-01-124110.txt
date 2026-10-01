@@ -1,0 +1,73 @@
+exe_sha12=e9ebbba101e2 modes=IDM_ACTIVATE_PROBE(+IDM_ROUND_ATTR) N=5 LOAD_WORKERS=16 LOAD_SECONDS=110
+cores=16
+=== 面 idle 开始 12:41:10 进程普查:      91 svchost.exe;     18 bash.exe;     14 msedge.exe;     13 Qoder CN.exe;     12 conhost.exe;      8 node.exe;      6 postgres.exe;      6 msedgewebview2.exe;      5 cmd.exe; ===
+idle-1 rc=0   单轮最长=212    B段往返=6     calib=555/498ms 该轮墙钟=4s worker存活=0 负载比=-1  /tmp/idm-probes/loaddiff-1001-124110/idle-1.log
+idle-2 rc=0   单轮最长=215    B段往返=7     calib=486/507ms 该轮墙钟=5s worker存活=0 负载比=-1  /tmp/idm-probes/loaddiff-1001-124110/idle-2.log
+idle-3 rc=0   单轮最长=215    B段往返=14    calib=555/530ms 该轮墙钟=4s worker存活=0 负载比=-1  /tmp/idm-probes/loaddiff-1001-124110/idle-3.log
+idle-4 rc=0   单轮最长=214    B段往返=8     calib=525/600ms 该轮墙钟=5s worker存活=0 负载比=-1  /tmp/idm-probes/loaddiff-1001-124110/idle-4.log
+idle-5 rc=0   单轮最长=217    B段往返=6     calib=510/528ms 该轮墙钟=5s worker存活=0 负载比=-1  /tmp/idm-probes/loaddiff-1001-124110/idle-5.log
+=== 面 idle 结束 12:41:43 ===
+idle_median_calib=525ms（本轮实测，负载比以它为分母；规则阈值 RATIO_MIN=1.5）
+load_started workers=16 deadline_seconds=110 pids=(36896,36897,36898,36899,36900,36901,36902,36903,36904,36905,36906,36907,36908,36909,36910,36911) alive_now=16
+worker_stderr_非空数=0（>0 就是发生器自己没跑起来，负载面读数全部作废）
+load_witness calib_under_load=1303ms calib_idle_baseline=520ms
+=== 面 load 开始 12:41:51 进程普查:      94 svchost.exe;     36 bash.exe;     16 python.exe;     14 msedge.exe;     13 Qoder CN.exe;     12 conhost.exe;      8 node.exe;      6 postgres.exe;      6 msedgewebview2.exe; ===
+load-1 rc=0   单轮最长=293    B段往返=27    calib=1009/1286ms 该轮墙钟=8s worker存活=16 负载比=1.92  /tmp/idm-probes/loaddiff-1001-124110/load-1.log
+load-2 rc=0   单轮最长=226    B段往返=20    calib=984/1232ms 该轮墙钟=8s worker存活=16 负载比=1.87  /tmp/idm-probes/loaddiff-1001-124110/load-2.log
+load-3 rc=0   单轮最长=231    B段往返=54    calib=935/1177ms 该轮墙钟=10s worker存活=16 负载比=1.78  /tmp/idm-probes/loaddiff-1001-124110/load-3.log
+load-4 rc=0   单轮最长=251    B段往返=47    calib=1075/1197ms 该轮墙钟=9s worker存活=16 负载比=2.05  /tmp/idm-probes/loaddiff-1001-124110/load-4.log
+load-5 rc=0   单轮最长=246    B段往返=96    calib=1370/986ms 该轮墙钟=8s worker存活=16 负载比=2.61  /tmp/idm-probes/loaddiff-1001-124110/load-5.log
+=== 面 load 结束 12:44:53 ===
+load_stopped（只杀自己起的 PID，别人会话的一个都不碰）
+=== 静置等长 183s（无我起的负载）以排除单调漂移 12:44:54 ===
+=== 面 idle_after 开始 12:47:57 进程普查:      93 svchost.exe;     24 bash.exe;     15 conhost.exe;     14 msedge.exe;     13 Qoder CN.exe;      8 node.exe;      6 postgres.exe;      6 msedgewebview2.exe;      5 cmd.exe; ===
+idle_after-1 rc=0   单轮最长=217    B段往返=14    calib=514/551ms 该轮墙钟=5s worker存活=16 负载比=0.98  /tmp/idm-probes/loaddiff-1001-124110/idle_after-1.log
+idle_after-2 rc=0   单轮最长=215    B段往返=14    calib=491/549ms 该轮墙钟=5s worker存活=16 负载比=0.94  /tmp/idm-probes/loaddiff-1001-124110/idle_after-2.log
+idle_after-3 rc=0   单轮最长=216    B段往返=13    calib=523/511ms 该轮墙钟=5s worker存活=16 负载比=1.0  /tmp/idm-probes/loaddiff-1001-124110/idle_after-3.log
+idle_after-4 rc=0   单轮最长=218    B段往返=14    calib=499/531ms 该轮墙钟=5s worker存活=16 负载比=0.95  /tmp/idm-probes/loaddiff-1001-124110/idle_after-4.log
+idle_after-5 rc=0   单轮最长=216    B段往返=14    calib=579/523ms 该轮墙钟=5s worker存活=16 负载比=1.1  /tmp/idm-probes/loaddiff-1001-124110/idle_after-5.log
+=== 面 idle_after 结束 12:48:33 ===
+=== 分布汇总 ===
+面        轮数  单轮最长(=那条<500断言的实测)      B 段往返(轻对照，产品可见)     C 段 ack   PASS/FAIL
+idle        5    n=5 min=212 median=215 max=217 全部=[212, 215, 215, 214, 217] n=5 min=6 median=7 max=14 全部=[6, 7, 14, 8, 6] 50/50,50/50,50/50,50/50,50/50 35/0
+load        5    n=5 min=226 median=246 max=293 全部=[293, 226, 231, 251, 246] n=5 min=20 median=47 max=96 全部=[27, 20, 54, 47, 96] 50/50,50/50,50/50,50/50,50/50 35/0
+idle_after  5    n=5 min=215 median=216 max=218 全部=[217, 215, 216, 218, 216] n=5 min=13 median=14 max=14 全部=[14, 14, 13, 14, 14] 50/50,50/50,50/50,50/50,50/50 35/0
+
+每轮逐条（单轮最长 / peakN / 取尽自身峰值 / IPC占比 / 排空静默 / 消融 on→off→on / 归因结论）
+  idle        idle-1.log           worst=212ms peakN=1 drain=211ms share=100% quiet=成 | 消融未跑(未复现,阈值前=212) | 跳过消融；消融只在复现的那一轮才有意义
+  idle        idle-2.log           worst=215ms peakN=1 drain=215ms share=100% quiet=成 | 消融未跑(未复现,阈值前=215) | 跳过消融；消融只在复现的那一轮才有意义
+  idle        idle-3.log           worst=215ms peakN=1 drain=215ms share=100% quiet=成 | 消融未跑(未复现,阈值前=215) | 跳过消融；消融只在复现的那一轮才有意义
+  idle        idle-4.log           worst=214ms peakN=1 drain=213ms share=100% quiet=成 | 消融未跑(未复现,阈值前=214) | 跳过消融；消融只在复现的那一轮才有意义
+  idle        idle-5.log           worst=217ms peakN=1 drain=217ms share=100% quiet=成 | 消融未跑(未复现,阈值前=217) | 跳过消融；消融只在复现的那一轮才有意义
+  load        load-1.log           worst=293ms peakN=1 drain=292ms share=100% quiet=成 | 消融未跑(未复现,阈值前=293) | 跳过消融；消融只在复现的那一轮才有意义
+  load        load-2.log           worst=226ms peakN=1 drain=220ms share=97% quiet=成 | 消融未跑(未复现,阈值前=226) | 跳过消融；消融只在复现的那一轮才有意义
+  load        load-3.log           worst=231ms peakN=1 drain=231ms share=100% quiet=成 | 消融未跑(未复现,阈值前=231) | 跳过消融；消融只在复现的那一轮才有意义
+  load        load-4.log           worst=251ms peakN=1 drain=251ms share=100% quiet=成 | 消融未跑(未复现,阈值前=251) | 跳过消融；消融只在复现的那一轮才有意义
+  load        load-5.log           worst=246ms peakN=1 drain=245ms share=100% quiet=成 | 消融未跑(未复现,阈值前=246) | 跳过消融；消融只在复现的那一轮才有意义
+  idle_after  idle_after-1.log     worst=217ms peakN=1 drain=217ms share=100% quiet=成 | 消融未跑(未复现,阈值前=217) | 跳过消融；消融只在复现的那一轮才有意义
+  idle_after  idle_after-2.log     worst=215ms peakN=1 drain=215ms share=100% quiet=成 | 消融未跑(未复现,阈值前=215) | 跳过消融；消融只在复现的那一轮才有意义
+  idle_after  idle_after-3.log     worst=216ms peakN=1 drain=216ms share=100% quiet=成 | 消融未跑(未复现,阈值前=216) | 跳过消融；消融只在复现的那一轮才有意义
+  idle_after  idle_after-4.log     worst=218ms peakN=1 drain=218ms share=100% quiet=成 | 消融未跑(未复现,阈值前=218) | 跳过消融；消融只在复现的那一轮才有意义
+  idle_after  idle_after-5.log     worst=216ms peakN=1 drain=216ms share=100% quiet=成 | 消融未跑(未复现,阈值前=216) | 跳过消融；消融只在复现的那一轮才有意义
+
+机器面标定（固定功量忙等 ms；负载比 = 本轮 pre / 本轮空闲面中位；规则阈值 1.5 —— 低于它的面不算负载面，实测中位不写死在代码里）
+  idle        pre=n=5 min=486 median=525 max=555 全部=[555, 486, 555, 525, 510]
+              墙钟秒=n=5 min=4 median=5 max=5 全部=[4, 5, 4, 5, 5] worker存活=n=5 min=0 median=0 max=0 全部=[0, 0, 0, 0, 0]
+              负载比=n=0 —（不适用/空闲=5）满足阈值的轮=0/5  ← 负载面成立
+  load        pre=n=5 min=935 median=1009 max=1370 全部=[1009, 984, 935, 1075, 1370]
+              墙钟秒=n=5 min=8 median=8 max=10 全部=[8, 8, 10, 9, 8] worker存活=n=5 min=16 median=16 max=16 全部=[16, 16, 16, 16, 16]
+              负载比=n=5 min=1.78 median=1 max=2.61 全部=[1.92, 1.87, 1.78, 2.05, 2.61]（不适用/空闲=0）满足阈值的轮=5/5  ← 负载面成立
+  idle_after  pre=n=5 min=491 median=514 max=579 全部=[514, 491, 523, 499, 579]
+              墙钟秒=n=5 min=5 median=5 max=5 全部=[5, 5, 5, 5, 5] worker存活=n=5 min=16 median=16 max=16 全部=[16, 16, 16, 16, 16]
+              负载比=n=5 min=0.94 median=0 max=1.1 全部=[0.98, 0.94, 1.0, 0.95, 1.1]（不适用/空闲=0）满足阈值的轮=0/5  ← 负载面成立
+  空闲面标定中位=525ms（负载比的分母，本轮实测）
+
+【只对满足负载阈值的轮取分布】面 / 单轮最长 / B 段往返（轻对照）
+  idle        n=5 单轮最长=n=5 min=212 median=215 max=217 全部=[212, 215, 215, 214, 217]  B段往返=n=5 min=6 median=7 max=14 全部=[6, 7, 14, 8, 6]
+  load        n=5 单轮最长=n=5 min=226 median=246 max=293 全部=[293, 226, 231, 251, 246]  B段往返=n=5 min=20 median=47 max=96 全部=[27, 20, 54, 47, 96]
+  idle_after  n=5 单轮最长=n=5 min=215 median=216 max=218 全部=[217, 215, 216, 218, 216]  B段往返=n=5 min=13 median=14 max=14 全部=[14, 14, 13, 14, 14]
+
+[LOAD_DIFF_STAT] 期望每面 5 轮；解析不足的面=无；负载面满足阈值的轮数=5（规则：≥3 轮才认为负载面成立）
+退码只表量具是否跑到东西（解析不足 / 负载面没真负载起来）；负载与空闲谁高、500ms 有没有超，全部只进上面的报告行，绝不进退码。
+idm_shots 已清（截图/tasks.json/history.db）；_data\aria2|ffmpeg|yt-dlp 保留
+load_stopped（只杀自己起的 PID，别人会话的一个都不碰）

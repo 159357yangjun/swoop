@@ -36,7 +36,11 @@ for m in $MODES; do
     IDM_ICON_PROBE|IDM_ARROW_PROBE) kind="人眼对照表（无断言，刻意排除在闸门名单外）" ;;
     *) kind="断言型" ;;
   esac
-  RC=0; export "$m=1"; "$BIN" > "$log" 2>&1 || RC=$?; unset "$m"
+  # ACTIVATE 额外带 IDM_ROUND_ATTR=1：12:05 那次红（单轮最长=3263ms ≥500）**本该自动跑消融**，
+  # 但消融由 env 闸门控制、sweep 没开 ⇒ 唯一一次最想归因的复现，日志里连一行 [attr] 都没有。
+  # 不开销别的轮：不复现时它只打印"本轮未复现⇒跳过消融"，复现那轮才有 on/off/on 三个窗口。
+  RC=0; export "$m=1"; [ "$m" = "IDM_ACTIVATE_PROBE" ] && export IDM_ROUND_ATTR=1
+  "$BIN" > "$log" 2>&1 || RC=$?; unset "$m"; unset IDM_ROUND_ATTR
   P=$(grep -ac '\[PASS\]' "$log" || true); F=$(grep -ac '\[FAIL\]' "$log" || true)
   if [ "$m" != "IDM_ICON_PROBE" ] && [ "$m" != "IDM_ARROW_PROBE" ]; then
     TOTAL_PASS=$((TOTAL_PASS + P)); TOTAL_FAIL=$((TOTAL_FAIL + F))
