@@ -66,6 +66,13 @@ jobs:
           if (-not (Test-Path build/idm-next.exe)) { throw 'idm-next.exe missing' }
           if (-not (Test-Path build/idm-next-host.exe)) { throw 'idm-next-host.exe missing' }
 
+      # 存在 ≠ 新鲜。上一位只查"文件在不在"，于是一枚不含最新提交的旧 exe 也能过关。
+      # 这道门比较"每个产物的 mtime"与"该产物输入集合里最新一次提交"，落后即退码 1。
+      # 放在 Build 之后是必须的：Build 之前产物合理地不存在，会造出假警报。
+      # 注：这里**不碰** UI 探针那道 `N≥100 且 M=0` 判据——那是另一件事。
+      - name: Freshness gate (product executables must not predate their inputs' newest commit)
+        run: python tools/freshness_gate.py
+
       - name: UI probes (offscreen assertion suite)
         shell: msys2 {0}
         run: |

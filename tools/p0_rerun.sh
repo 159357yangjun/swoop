@@ -55,4 +55,10 @@ echo "error_msg_rows=$(grep -ac 'error_msg=' "$SLOG" || true)"
 CL=$(grep -ac "clamp_refetch=" "$SLOG" || true)
 NZ=$(grep -ao "clamp_refetch=[0-9]*" "$SLOG" | grep -avc "clamp_refetch=0$" || true)
 echo "clamp_rows=$CL clamp_nonzero_rows=$NZ"
+# 复述另一道门（产物新鲜度）的读数。⚠ 本脚本的退码仍然**只等于引擎退码**——
+# "退码取引擎"是 p0_rerun.sh 的身份，把它和新鲜度混成一个数，以后就没人能从这里读出引擎跑没跑绿。
+# 新鲜度门的退码在它自己那一行里（1=有二进制落后 / 2=门自己没跑到），要拦人在自己的调用点拦。
+echo "--- 产物新鲜度（tools/freshness_gate.py，只复述不改本脚本退码）---"
+python tools/freshness_gate.py 2>&1 | tail -6
+echo "freshness_rc=${PIPESTATUS[0]}（这道门自己的退码；0=都新鲜 1=有 STALE/MISSING/DIRTY 2=门没跑到）"
 exit $RC

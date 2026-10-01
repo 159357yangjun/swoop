@@ -1976,3 +1976,58 @@ PASS=6 FAIL=1，模式退出码=1
 提交后 `--verify` 复跑 `FAIL=0`。⇒ 若下一轮还想给字节表加东西，先想清楚它会不会自举；
 真要避免，办法是把表里的字节数改成"由 `--verify` 现算现印、文档里只留规则"，但那样公开的暴露量就不再是
 可 grep 的静态数，权衡留给你定，本轮不擅自动手。
+
+
+### 2026-10-01 15:2x（第 19 条）— 出厂二进制过期这件事进门退码：`PRODUCT_EXE_STALE`
+① 具名读数（一行，可直接 grep）：
+
+```
+PRODUCT_EXE_STALE: build/idm-next.exe mtime=2026-09-30 20:04:54 -0400 sha12=45bbbab03006
+  而 HEAD=678826a 的输入集合里最新一次 src 提交=7777bce(2026-10-01 08:14:34, P0 根因修复)
+  ⇒ 差 -43780s ⇒ 这枚出厂二进制**不含**该修复
+```
+
+复算命令（一行 `stat` + 一行祖先判定 + 门本身）：
+
+```bash
+stat -c '%y %s' build/idm-next.exe
+git merge-base --is-ancestor 7777bce HEAD && echo "IS_ANCESTOR=yes"      # 本轮实测 yes
+git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- src resources third_party/libcurl/include CMakeLists.txt
+python tools/freshness_gate.py ; echo "rc=$?"                            # 本轮实测 rc=1
+```
+
+② 会自己说的门：`tools/freshness_gate.py`。四个产物各按**自己的输入集合**判，不合格分三种成因不混：
+`STALE` / `MISSING`（产物不在，响亮）/ `DIRTY_INPUT`（有未提交的输入，任何二进制都不可能含它）。
+退码：**0 全新鲜；1 有不合格；2 门自己没跑到判断**（rev 取不到或内部异常）——
+崩溃绝不能被读成"报了红"，所以 1 与 2 分开，且实测过：`python tools/freshness_gate.py --rev 不存在的rev` ⇒ `rc=2`。
+
+接线的两处（都不靠人读文档）：
+· `ci.yml` 在 `Verify expected executables` 之后加了一步跑它——放 Build 之后是必须的，Build 之前产物合理地不存在会造假警报；
+  **没碰** UI 探针那道 `N≥100 且 M=0`。但 CI 从未执行过 ⇒ 它对今天没有约束力。
+· `tools/p0_rerun.sh` 收尾复述它的读数与 `freshness_rc`，但**本脚本退码仍只等于引擎退码**
+  ——把两个数混成一个，以后就没人能从这里读出引擎跑没跑绿。
+
+两面夹具（原文各存一份）：
+
+| 面 | 命令 | 结果 |
+|---|---|---|
+| 当前盘上 | `python tools/freshness_gate.py` | `idm-next.exe STALE(-43780s)`、`idm-next-host.exe STALE(-33221s)`、`engine_selftest.exe FRESH`、`ui_snapshot.exe FRESH` ⇒ **不合格=2，rc=1** → `docs/freshness-gate-2026-10-01-1524-face1-HEAD.txt` |
+| 受控反例（取一枚早于所有产物的 rev 当基准，只读不动工作树） | `python tools/freshness_gate.py --rev 6a7cf84` | 四条全 `FRESH`、**不合格=0，rc=0** → `docs/freshness-gate-2026-10-01-1524-face2-rev6a7cf84.txt` |
+
+第二面是必要的：没有它，"这道门会报"与"这道门永远红"分不开。
+
+**建门过程中被实测否证掉的一个证人（这条比门本身更值钱）**：我一开始想让 `ninja -C build -n <目标>`
+当第二证人，结果它把 `engine_selftest.exe` 判成要重编——而那枚二进制**确实含** P0 修复
+（177/0 就是它跑出来的，`[35]` 延后压缩那两条断言是行为证人）。原因看 `-d explain`：
+`src/core/download_core.c` 的 mtime 是 **08:21:31**，比 exe 的 08:12:58 晚 8 分钟，
+可 `git status --porcelain -- <同一批输入>` 是**空的** ⇒ 内容与 HEAD 逐字相同，只是**被碰过**。
+⇒ ninja 的 mtime 规则分不清"变了"和"被碰过"，拿它定罪会把好二进制喊错。
+所以定罪权只留给：内容是否等于 HEAD（`git status`）+ 提交时间差（带容差 `GRACE_SECONDS=3600`，**规则数**），
+`ninja` 降为**提示**并在行内写明为什么不一致。容差的代价也写明：构建后 1 小时内提交的真实改动会被放过，
+这时靠 `DIRTY_INPUT` 与 `MISSING` 两条兜住，且这道门本来就不该被当成"内容相同"的证明——
+**要证明"产品 exe == 当前源码"只有一条路：重编产品目标**，本轮边界禁止。
+
+③ 时间证人为什么不用 HEAD 的提交时间：那样每一笔只改文档的提交都会让门永远红
+（本轮 HEAD 之后就有三笔文档提交），而它报的根本不是"二进制过期"。所以比较量是
+**该产物输入集合里最新一次提交的 committer 时间**，且每个产物一套输入
+（`idm-next-host` 只看 `src/host + CMakeLists.txt`，不被 `src/core` 的改动冤枉）。
