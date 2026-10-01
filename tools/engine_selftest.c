@@ -2462,6 +2462,7 @@ int main(int argc, char **argv)
              * 三个桶：①从未创建 ⇒ 根本没起（排队不推 / 槽位没归还）；②创建了但全程 0 字节 ⇒ 起了没写；
              * ③有增长 ⇒ 那是"慢"，不是本案。分不开就把"分不开"当定案理由。**只印，不进判据。** */
             int smp = 0, smp_absent = 0, smp_zero = 0, smp_grew = 0;
+            int net_smp = 0, conn_max = -1;
             long long tmp_max = -2, tmp_last = -2;
             int st_min = 99, st_max = -1, def_max = -1, big_max = -1;
             long long fin_max = -2;
@@ -2469,11 +2470,18 @@ int main(int argc, char **argv)
             fn_seen[0] = '\0';
             for (int i = 0; i < 200; i++) {
                 if (dlmgr_get_task_info(id, &mid) != 0) { Sleep(100); continue; }
-                if (i % 5 == 0) {                      /* 500ms 一采 */
+                if (1) {                              /* 100ms 一采（原来 500ms，分辨率不够）
+                                                      * ⚠️ 只有"要问服务端"的两个数按 500ms 采：
+                                                      * 每采一次就是两次 HTTP 请求，200 次会把被测
+                                                      * 对象自己扰动起来 ⇒ 便宜的量（盘/内存状态）密采，
+                                                      * 贵的量（网络计数）稀采，两个分母各自印出来。 */
                     long long sz = file_size_i64_of(tmpp);
                     int df = dlmgr_deferred_count();
-                    int bg = server_stat(port, "big_reqs");   /* /big.bin 的 GET 次数 */
+                    int bg = (i % 5 == 0) ? server_stat(port, "big_reqs") : -1;
+                    int cn = (i % 5 == 0) ? server_stat(port, "conns") : -1;
+                    if (cn > conn_max) conn_max = cn;
                     smp++;
+                    if (bg >= 0) net_smp++;
                     /* 同时采「成品路径」与引擎自己填的 filename：
                      * 桶1b 还剩两个候选——它写到别处(i)，还是写入与计数器解耦(ii)。
                      * 前者会让成品路径在窗口内就长起来，后者会让 filename 早已是正常值而两路都空。 */
@@ -2524,11 +2532,11 @@ int main(int argc, char **argv)
                         bucket = "桶3：有增长 ⇒ 属「慢」，不是本案";
                     else
                         bucket = "分不开：采样存在但形状不干净";
-                    printf("    [分桶] %s｜采样=%d 次(每500ms,分母) 从未创建=%d 全程0字节=%d 有增长=%d "
+                    printf("    [分桶] %s｜采样=%d 次(每100ms,分母) 从未创建=%d 全程0字节=%d 有增长=%d "
                            "tmp最大=%lld status区间=[%d,%d](0排队/1下载中/2暂停) deferred最大=%d "
-                           "big.bin GET最大=%d 成品路径最大=%lld 引擎报的filename=「%s」 ⇒ %s\n",
+                           "big.bin GET最大=%d conns最大=%d 网络采样数=%d 成品路径最大=%lld 引擎报的filename=「%s」 ⇒ %s\n",
                            F32[f].tag, smp, smp_absent, smp_zero, smp_grew, tmp_max,
-                           smp ? st_min : -1, smp ? st_max : -1, def_max, big_max,
+                           smp ? st_min : -1, smp ? st_max : -1, def_max, big_max, conn_max, net_smp,
                            fin_max, fn_seen[0] ? fn_seen : "(没填过)", bucket);
                 }
             }
