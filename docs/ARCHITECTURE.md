@@ -1215,3 +1215,12 @@ tmp 与成品都到达完整 12,582,912，而 `TaskInfo.downloaded` 与 `chunks[
 那时 `avail = 0` ⇒ ①-clamp 会把整份重拉一遍，把"盘比 state 多"这一支误伤成"数据丢失"。
 ⇒ 第 3 步的实现必须**同时看两条路径**（`.idmtmp` 与成品 `filename`），并在两面各自验一遍：
 `tmp 缺失 + 成品完整` ⇒ 判定已完成、补拉 0 字节；`tmp 缺失 + 成品也不在` ⇒ 才允许全量重拉。
+
+### 未开工，入参写定于 2026-10-01 —— MC-3 第 3 步（唯一改 `src/core/download_core.c` 的那一步）
+
+1. 先对账红基线：`bash %TEMP%\idm-probes\2026-09-30\loop-evidence\s0_run.sh`，要求 `docs/p0-red-baseline-2026-10-01.txt` 里那三条 `[FAIL]` **逐字**相同；T3 与 `Building C object`／`ninja: no work to do` 二选一照实写。
+2. 落点：`dlmgr_load_state()`（`:1921..2079`，在 `:2042` 拼完 `t->tmp_path` 之后）。对**两条路径**取尺寸：`.idmtmp` 与成品 `filename`；按片 `avail = 实际长 − start`，`downloaded = min(claimed, max(0, avail))`，`avail > claimed` ⇒ **保持 claimed**（这一支就是"盘比 state 多不是数据丢失"）。
+3. 新断言：被夹掉时把"发现 N 片进度被盘否证"写进 `TaskInfo.error_msg`（状态仍进行中）——**必须引擎自己报**，测具的内容比对不算。
+4. 两桶各演一次会红：A `tmp 缺失 + 成品完整` ⇒ 判已完成、补拉 0 字节；B `tmp 缺失 + 成品也不在` ⇒ 才全量重拉（面 C 现成）。A 桶需新造夹具。
+5. 收尾：三条红转绿 + 两面输出入档；明写残余（尺寸对、内容错的稀疏洞 size 判据看不见，封它需 `idmFormat` 2→3 的每片校验和）。
+边界：不 push、不 tag、不改版本号、不出包、不碰 `N≥100 且 M=0`；`src/` 除本步外不动。
