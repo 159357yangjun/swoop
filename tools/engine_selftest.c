@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>   /* vsnprintf（S2 子进程留档行的可变参拼接）*/
 #include <time.h>    /* time / gmtime / strftime（[20] Retry-After 的 HTTP-date 用例） */
 #include <wchar.h>   /* wmemmove / wcsncpy（长路径前缀拼接用） */
 #include <windows.h>
@@ -234,12 +235,15 @@ static long long first_mismatch_offset(const char *path, long long expect_size, 
 /* 删除测试产物（含 .idmtmp）。必须走宽字符 API，理由同 utf8_fopen_rb。
  * ⚠️ 不做这一步的话，上一轮遗留的产物会让「落盘文件与下载字节一致」在
  * 本轮完全失败的情况下依然通过——测试自己制造假阳性，比没有测试更糟。 */
-static void utf8_delete(const char *path)
+static int utf8_delete(const char *path)
 {
     wchar_t wpath[MAX_PATH * 2];
+    /* 原来这里返回 void 并丢掉 DeleteFileW 的结果 ⇒ 删除失败完全看不出来，
+     * [33] 面 B 就因此"造了个不匹配"却没造成，读数长得像正常重启现场。
+     * 现在把 BOOL 交回调用方；不关心成败的老调用点照旧忽略它。 */
     if (!test_to_wpath(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))))
-        return;
-    DeleteFileW(wpath);
+        return 0;
+    return DeleteFileW(wpath);
 }
 
 /* 清除本轮会写入的所有产物，返回清理前残留的非空文件数（>0 说明上轮有遗留） */
@@ -335,12 +339,122 @@ static long sink_peek(int port, const char *outdir, const char *user, const char
     return (r.success == 1 && n > 0) ? n : -1;
 }
 
+/* ── S2：子进程模式（真·跨进程重启）─────────────────────────────────────
+ * 用法：engine_selftest.exe --resume <statefile> <port> <user> <pass> <resultfile> <wantfile>
+ * 为什么必须由**第二个进程**来做：[32] 是同进程 save→load，"重启"这两个字其实没被测到 ——
+ * 真重启走的是 MainWindow 构造里那一次 dlmgr_load_state。子进程手上只有两个文件：
+ * 状态 JSON 与盘上的 .idmtmp，没有任何内存态。这才是用户「关掉再打开」时引擎看见的东西。
+ * 退码 = 它自己数出来的问题数（0 = 它认为一切正常），结论同时逐行写进 resultfile 留档。
+ * ⚠️ 子进程绝不喊 /_shutdown：父进程还要用同一个服务跑第二面。 */
+static char g_rbuf[8192];
+static size_t g_rlen = 0;
+static void rlog(const char *fmt, ...)
+{
+    va_list ap;
+    if (g_rlen + 1 >= sizeof(g_rbuf)) return;
+    va_start(ap, fmt);
+    int n = vsnprintf(g_rbuf + g_rlen, sizeof(g_rbuf) - g_rlen, fmt, ap);
+    va_end(ap);
+    if (n > 0) g_rlen += (size_t)n;
+    if (g_rlen + 1 < sizeof(g_rbuf)) g_rbuf[g_rlen] = '\0';
+}
+
+static int run_child_resume(const char *statefile, int port, const char *user, const char *pass,
+                            const char *resultfile, const char *wantfile)
+{
+    char outdir[MAX_PATH], path[MAX_PATH + 64], tmpp[MAX_PATH + 80], d[240];
+    snprintf(outdir, sizeof(outdir), "%s\\idm_selftest_out", getenv("TEMP") ? getenv("TEMP") : ".");
+    snprintf(path,   sizeof(path),   "%s\\%s", outdir, wantfile);
+    snprintf(tmpp,   sizeof(tmpp),   "%s.idmtmp", path);
+
+    rlog("[子进程] pid=%lu exe 自己拼出来的路径=%s\n", GetCurrentProcessId(), path);
+    dlmgr_init(NULL);
+    {
+        DownloadConfig cfg = dlmgr_get_config();
+        memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+        cfg.site_login_count = 1;
+        strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+        strncpy(cfg.site_logins[0].user,  user,      sizeof(cfg.site_logins[0].user)  - 1);
+        strncpy(cfg.site_logins[0].pass,  pass,      sizeof(cfg.site_logins[0].pass)  - 1);
+        dlmgr_set_config(&cfg);
+    }
+
+    int ld = dlmgr_load_state(statefile);
+    rlog("[子进程] load_state(「%s」)=%d\n", statefile, ld);
+
+    int target = -1;
+    long long want_size = -1;
+    {
+        TaskInfo arr[64];
+        int n = dlmgr_get_task_infos(arr, 64);
+        rlog("[子进程] 载入后队列条数=%d\n", n);
+        for (int i = 0; i < n && i < 64; i++) {
+            snprintf(d, sizeof(d), "[子进程] 第%d条 id=%d file=「%s」 size=%lld downloaded=%lld status=%d chunk_count=%d\n",
+                     i, arr[i].task_id, arr[i].filename,
+                     (long long)arr[i].file_size, (long long)arr[i].downloaded,
+                     arr[i].status, arr[i].chunk_count);
+            rlog("%s", d);
+            if (strcmp(arr[i].filename, wantfile) == 0) { target = arr[i].task_id; want_size = arr[i].file_size; }
+        }
+    }
+    if (target < 0) {
+        rlog("[子进程] ★队列里找不到「%s」⇒ 列表恢复本身就失败了\n", wantfile);
+        utf8_write_file(resultfile, g_rbuf);
+        dlmgr_destroy();
+        return 1;
+    }
+
+    long long tmp_before = file_size_i64_of(tmpp);
+    long long fin_before = file_size_i64_of(path);
+    rlog("[子进程] 动手前盘上：.idmtmp=%lld 成品=%lld（-1=不存在）state 里记的 size=%lld\n",
+         tmp_before, fin_before, want_size);
+
+    dlmgr_start(target);
+    int st = 0; int64_t dl = 0;
+    int wf = wait_final(target, 90000, &st, &dl);
+    TaskInfo fin;
+    memset(&fin, 0, sizeof(fin));
+    dlmgr_get_task_info(target, &fin);
+
+    long long fsz = file_size_i64_of(path);
+    int mc = content_matches_pattern(path, want_size);
+    long long bad_cnt = 0;
+    long long bad0 = first_mismatch_offset(path, want_size, &bad_cnt);
+    int has_err = (fin.error_msg[0] != '\0');
+    rlog("[子进程] 结局：wait=%d status=%d 成品=%lld/%lld 内容比对=%d（1对 0错位 -1长度错 -2无文件）"
+         " 首个错位=%lld 错位字节=%lld error_msg=%s\n",
+         wf, st, fsz, want_size, mc, bad0, bad_cnt, has_err ? fin.error_msg : "(空)");
+
+    /* 判据与 [32] 逐字同一条，不许在子进程这边放宽：
+     * 报"完成"就必须内容对；内容不对就必须让调用方看见错误。 */
+    int problems = 0;
+    if (st == 3 && mc != 1 && !has_err) {
+        rlog("[子进程] ★静默产出坏文件：status=3 + 尺寸对 + 内容错 + error_msg 空\n");
+        problems++;
+    }
+    if (st != 3 && st != 4) { rlog("[子进程] ★没走到终态（status=%d）\n", st); problems++; }
+    rlog("[子进程] 结论：问题数=%d（退码就是这个数）\n", problems);
+    utf8_write_file(resultfile, g_rbuf);
+    dlmgr_destroy();
+    return problems;
+}
+
 int main(int argc, char **argv)
 {
     /* 关掉 stdout 缓冲：自测若在收尾阶段崩掉，全缓冲会把最后一批输出整体丢掉，
      * 现场只剩半句断言文字，完全看不出后面发生了什么。
      * （真实踩过：输出停在「多级目录」，实际是缓冲未 flush。） */
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* S2 子进程模式：argv[1] 不是端口而是 --resume ⇒ 这一个进程只做「读状态文件 + 继续 + 交结论」。
+     * 必须是**同一个可执行体**（不是为 S2 造的第二个 exe），否则"跨进程"退化成同进程两份内存态。 */
+    if (argc > 1 && strcmp(argv[1], "--resume") == 0) {
+        if (argc < 8) {
+            printf("--resume 需要 <statefile> <port> <user> <pass> <resultfile> <wantfile>\n");
+            return 2;
+        }
+        return run_child_resume(argv[2], atoi(argv[3]), argv[4], argv[5], argv[6], argv[7]);
+    }
 
     int port = (argc > 1) ? atoi(argv[1]) : 18080;
     const char *user = (argc > 2) ? argv[2] : "idmuser";
@@ -2422,6 +2536,154 @@ int main(int argc, char **argv)
 
             dlmgr_cancel(id);
             utf8_delete(path); utf8_delete(tmpp); utf8_delete(stp);
+            dlmgr_remove(id);
+        }
+    }
+
+    /* ── 33. 真·跨进程重启（S2）：第二个进程手上只有状态文件与盘 ─────────────
+     * [32] 是同进程 save→load，"重启"其实没被测到。这里让**同一个 exe**（不是为 S2 造的
+     * 第二个可执行体）以 --resume 再起一次：它自己 dlmgr_init + dlmgr_load_state，
+     * 看不见父进程任何内存态，只有两个文件。
+     * 两面各留档成文件（state + 子进程结论），设了 IDM_SELFTEST_EVIDENCE_DIR 就再复制一份进去，
+     * 这样"跑过了"变成别人能复算的东西。
+     * 会红的一面：面 B 故意给一份"状态说若干片 done=1、盘上 .idmtmp 已删"的不匹配组合 ⇒
+     * 子进程必须报出问题（退码 >0）。它今天报不出来，就是 [32] 那条 P0 跨过了进程边界。
+     * 边界说明（不装成完全干净）：父进程还活着，只是那条任务已暂停、无线程无句柄
+     * （不能用 cancel+remove 来"退场"：dlmgr_cancel 会删掉 .idmtmp，面 A 就变侧面了）。 */
+    printf("\n[33] 真·跨进程重启（第二个进程只有状态文件与盘，没有内存态）\n");
+    {
+        const long long FULL33 = 12LL * 1024 * 1024;
+        char u33[512], exe[MAX_PATH * 2];
+        snprintf(u33, sizeof(u33), "http://127.0.0.1:%d/big.bin", port);
+        DWORD elen = GetModuleFileNameA(NULL, exe, (DWORD)(sizeof(exe) - 1));
+        exe[elen > 0 ? elen : 0] = '\0';
+        const char *evd = getenv("IDM_SELFTEST_EVIDENCE_DIR");
+        printf("    [环境] 本 exe=「%s」 证据目录=%s\n", exe,
+               evd ? evd : "(未设 IDM_SELFTEST_EVIDENCE_DIR：只留 outdir，随收尾清掉)");
+        check("能取到自己的路径（子进程要起的就是它）", elen > 0, exe);
+
+        static const struct { const char *file, *state, *result, *tag, *what; int mismatch; }
+            G33[2] = {
+                { "s2_ok.bin", "s2_ok.json", "s2_ok.result.txt", "面A",
+                  "state 与盘匹配（正常重启：半成品还在，进度能用）", 0 },
+                { "s2_mm.bin", "s2_mm.json", "s2_mm.result.txt", "面B",
+                  "故意不匹配：state 说若干片 done=1，盘上 .idmtmp 已删", 1 }
+            };
+
+        for (int f = 0; f < 2; f++) {
+            char path[MAX_PATH + 64], tmpp[MAX_PATH + 80], stp[MAX_PATH + 64];
+            char rfp[MAX_PATH + 64], cmd[1400], d[400];
+            snprintf(path, sizeof(path), "%s\\%s", outdir, G33[f].file);
+            snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", path);
+            snprintf(stp,  sizeof(stp),  "%s\\%s", outdir, G33[f].state);
+            snprintf(rfp,  sizeof(rfp),  "%s\\%s", outdir, G33[f].result);
+            utf8_delete(path); utf8_delete(tmpp); utf8_delete(stp); utf8_delete(rfp);
+            server_reset(port);
+
+            int id = dlmgr_add(u33, outdir, G33[f].file, 4, NULL, NULL, NULL, NULL);
+            if (id < 0) { check("跨进程重启的任务创建成功", 0, "dlmgr_add < 0"); continue; }
+            dlmgr_start(id);
+            TaskInfo mid;
+            memset(&mid, 0, sizeof(mid));
+            for (int i = 0; i < 200; i++) {
+                if (dlmgr_get_task_info(id, &mid) != 0) { Sleep(100); continue; }
+                if (mid.downloaded >= 5LL * 1024 * 1024) break;
+                if (mid.status == 3 || mid.status == 4) break;
+                Sleep(100);
+            }
+            dlmgr_pause(id);
+            /* 交接前必须证明"父进程真的不再写字节了"。
+             * ⚠️ 这里曾经静悄悄出过两件事：① 交出时盘还在长 ⇒ 那根本不是"重启现场"，
+             * 而是同一个进程里两组线程在动同一个文件；② 面 B 的 utf8_delete 因为文件还被
+             * 父进程握着而失败（Windows 上有句柄未关时 DeleteFile 会分享冲突），
+             * 我不查返回值 ⇒ 面 B 退化成面 A，却照样全绿。所以这一面先把轨迹印出来，
+             * 再用断言钉住：交出时尺寸必须稳定不变、且面 B 必须真的不存在。 */
+            long long t_prev = file_size_i64_of(tmpp), t_now = t_prev;
+            int stable_ms = 0;
+            for (int i = 0; i < 60; i++) {                /* 最多再等 6s */
+                Sleep(100); stable_ms += 100;
+                t_now = file_size_i64_of(tmpp);
+                if (t_now == t_prev && stable_ms >= 2000) break;
+                t_prev = t_now;
+            }
+            dlmgr_get_task_info(id, &mid);
+            snprintf(d, sizeof(d), "status=%d 已下=%lld .idmtmp=%lld（稳定观察 %dms 后不再变）",
+                     mid.status, (long long)mid.downloaded, t_now, stable_ms);
+            check("交出前父进程确实停了笔（状态=已暂停 且 文件尺寸不再增长）",
+                  mid.status == 2 && t_now == t_prev, d);
+
+            int sv = dlmgr_save_state(stp);
+            int deleted = 1;
+            DWORD del_err = 0;
+            if (G33[f].mismatch) {
+                deleted = utf8_delete(tmpp);              /* utf8_delete：成功返回非 0 */
+                del_err = GetLastError();
+                snprintf(d, sizeof(d), "删除返回=%d GetLastError=%lu 删后 .idmtmp=%lld（期望 -1=真没了）",
+                         deleted, del_err, file_size_i64_of(tmpp));
+                check("面 B：不匹配是**真的**造出来了（.idmtmp 确实不存在，不是删除失败装了个假的）",
+                      deleted && file_size_i64_of(tmpp) < 0, d);
+            }
+            long long tmp_out = file_size_i64_of(tmpp);
+            snprintf(d, sizeof(d), "save=%d 交出时 .idmtmp=%lld（-1=不存在）state=%lld 字节 已下=%lld%s",
+                     sv, tmp_out, file_size_i64_of(stp), (long long)mid.downloaded,
+                     G33[f].mismatch ? (deleted ? " ［不匹配已造出］" : " ［★删除失败=这一面不可信］") : "");
+            check("父进程把带进度的状态交出去了（面 A/B 共同前提）",
+                  sv == 0 && file_size_i64_of(stp) > 0 && mid.downloaded > 0, d);
+            printf("    [父] %s｜%s｜%s\n", G33[f].tag, G33[f].what, d);
+
+            snprintf(cmd, sizeof(cmd), "\"%s\" --resume \"%s\" %d %s %s \"%s\" \"%s\"",
+                     exe, stp, port, user, pass, rfp, G33[f].file);
+            STARTUPINFOA si; PROCESS_INFORMATION pi;
+            memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+            memset(&pi, 0, sizeof(pi));
+            int started = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+            snprintf(d, sizeof(d), "CreateProcess 失败 GetLastError=%lu 命令行=「%s」",
+                     GetLastError(), cmd);
+            check("子进程真的起来了（跨进程边界成立，不是同进程两份内存态）", started, d);
+            if (!started) { dlmgr_cancel(id); dlmgr_remove(id); continue; }
+
+            DWORD wr = WaitForSingleObject(pi.hProcess, 180000);
+            DWORD ec = 0xFFFFFFFF;
+            if (wr == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &ec);
+            CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+            snprintf(d, sizeof(d), "等待结果=%d（0=自己收尾，258=180s 还没回）退码=%lu", wr, ec);
+            check("子进程自己收尾并交出退码", wr == WAIT_OBJECT_0, d);
+
+            char res[8192];
+            res[0] = '\0';
+            long rn = utf8_read_file(rfp, res, sizeof(res) - 1);
+            printf("    [子进程留档 %s｜%ld 字节]\n%s", rfp, rn,
+                   rn > 0 ? res : "(★没有留档文件 ⇒ 这一面不可复算)\n");
+            if (evd && rn > 0) {
+                char dst[MAX_PATH + 96], sbody[4096];
+                snprintf(dst, sizeof(dst), "%s\\%s", evd, G33[f].result);
+                utf8_write_file(dst, res);
+                sbody[0] = '\0';
+                if (utf8_read_file(stp, sbody, sizeof(sbody) - 1) > 0) {
+                    snprintf(dst, sizeof(dst), "%s\\%s", evd, G33[f].state);
+                    utf8_write_file(dst, sbody);
+                }
+            }
+
+            long long fsz33 = file_size_i64_of(path);
+            int mc33 = content_matches_pattern(path, FULL33);
+            if (f == 0) {
+                snprintf(d, sizeof(d), "子进程退码=%lu 父进程独立复核：成品=%lld/%lld 内容=%d",
+                         ec, fsz33, FULL33, mc33);
+                check("面 A：真重启之后下得完，且父进程独立复核逐字节一致",
+                      ec == 0 && fsz33 == FULL33 && mc33 == 1, d);
+            } else {
+                /* 极性说明（别改回去）：判据是"**这个组合必须被妥善处理**"⇒ 退码必须 0。
+                 * 今天它是红的，因为引擎既没报错、内容又是坏的（子进程独立逐字节核出来的）。
+                 * 上一版我写的是 `ec != 0`（"子进程必须发现不匹配"）—— 那等于**把当前缺陷钉成
+                 * 通过**：谁把引擎修好了，这条反而会红。护栏的绿必须落在"修好了"那一侧。 */
+                snprintf(d, sizeof(d), "子进程退码=%lu（期望 0=妥善处理：要么报错，要么下出正确内容）"
+                         " 父进程看到成品=%lld/%lld 内容=%d", ec, fsz33, FULL33, mc33);
+                check("面 B：state 与盘不匹配时必须被妥善处理，不许静默交出坏成品", ec == 0, d);
+            }
+
+            dlmgr_cancel(id);
+            utf8_delete(path); utf8_delete(tmpp);
             dlmgr_remove(id);
         }
     }
