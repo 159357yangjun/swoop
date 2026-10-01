@@ -1,0 +1,7 @@
+# 全仓 warning 清单（由 tools/warning_inventory.py 生成；命令取自 ninja -t commands）
+# 复算：python tools/warning_inventory.py > 本文件   核对：--verify 本文件
+扫描 TU 数=64 ｜干净通过=64 ｜源码里报 error=0 ｜未覆盖(命令没吃下)=0 ｜warning 行数=0
+
+## 按类别（次数）
+
+## 逐条

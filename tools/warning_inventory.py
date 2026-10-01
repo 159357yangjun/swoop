@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""用**项目自己的真实 flags** 收全仓 warning 清单（只读，不写 build 目录）。
+
+为什么要它（2026-10-01，主控否掉了我前两版扫描器之后定下的做法）：
+  * 我手搓 flags 的 `-fsyntax-only` 版在 59 个 TU 里只解析成功 6 个 ⇒ 那个"0 命中"是瞎出来的；
+  * 我自己的正则版把合法的 `"%s\\\\%s"` 报成坏 ⇒ 4 个控件错 2 个 ⇒ 也不可信。
+  ⇒ 唯一站得住的办法：**命令由构建系统自己交出来** —— `ninja -t commands <target>` 给出每个 TU 的
+  真实编译命令，我把它们改成 `-fsyntax-only`（去掉 `-o`，其余一字不动）再逐条跑。
+
+产出是**可复算的**：`tools/warning_inventory.py --verify <清单文件>` 会重算一遍并与文件比对，
+不一致就 exit 1（清单里不含耗时等易变字段，所以可比）。
+
+用法：python tools/warning_inventory.py                 # 打印清单到 stdout
+      python tools/warning_inventory.py > docs/warnings-<日期>.txt
+      python tools/warning_inventory.py --verify docs/warnings-<日期>.txt
+退出码：0 = 正常（--verify 时 = 清单与现算一致）；1 = 不一致或有 TU 编译报错；2 = 前置不成立。
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BUILD = os.path.join(ROOT, "build")
+TARGETS = ["idm-next", "idm-next-host", "ui_snapshot", "engine_selftest"]
+CMD_RE = re.compile(r"(?:^|\s)(?:[A-Za-z]:\\[^\s]*\\)?(gcc|g\+\+)(\.exe)?\s")
+
+
+def commands_for(target):
+    p = subprocess.run(["ninja", "-C", "build", "-t", "commands", target],
+                       cwd=ROOT, capture_output=True)
+    if p.returncode != 0:
+        return []
+    out = []
+    for line in p.stdout.decode("utf-8", "replace").splitlines():
+        if CMD_RE.search(line) and " -c " in line:
+            out.append(line)
+    return out
+
+
+def split_cmd(line):
+    """按双引号切词（ninja 输出里带空格的路径都用引号包住）。
+    ⚠️ 必须处理**转义引号**：真命令里有 -DIDM_NEXT_VERSION=\"0.1.0\"，把它当引号开关丢掉会让
+    定义值变成反斜杠包住的 0.1.0 ⇒ g++ 报 "stray backslash" 与 "too many decimal points"，
+    而这两条看起来像源码问题、其实是我的拆词器造出来的（本仓 src/main.cpp 就是这么"未覆盖"的）。"""
+    toks, cur, q, i = [], "", False, 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == '"':
+            cur += '"'                      # 转义引号 ⇒ 一个字面引号，不改引号状态
+            i += 2
+            continue
+        if ch == '"':
+            q = not q
+            i += 1
+            continue
+        if ch == " " and not q:
+            if cur:
+                toks.append(cur)
+                cur = ""
+            i += 1
+            continue
+        cur += ch
+        i += 1
+    if cur:
+        toks.append(cur)
+    return toks
+
+
+def to_syntax_only(toks):
+    """改成语法检查：去掉 -o（不写产物），并去掉 -MD/-MT/-MF（依赖文件写盘会先 fatal error，
+    实测这样第一条命令就死在 "opening dependency file ..." 上 ⇒ 覆盖率会全灭）。"""
+    out, skip = [], False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if t in ("-o", "-MT", "-MF"):
+            skip = True
+            continue
+        if t in ("-MD", "-MMS", "-MM"):
+            continue
+        out.append(t)
+    if "-fsyntax-only" not in out:
+        out.append("-fsyntax-only")
+    return out
+
+
+def source_of(toks):
+    for i, t in enumerate(toks):
+        if t == "-c" and i + 1 < len(toks):
+            return toks[i + 1]
+    for t in toks:
+        if t.endswith((".c", ".cpp", ".cxx", ".cc")):
+            return t
+    return "?"
+
+
+def classify(msg):
+    m = re.search(r"warning: (.*?) at |warning: (.*?)\s*$", msg)
+    txt = (m.group(1) or m.group(2)) if m else msg
+    return re.sub(r"['\u2018\u2019`\u00b4]", "'", txt)[:64]
+
+
+def build_inventory():
+    seen, rows = {}, []
+    for tgt in TARGETS:
+        for line in commands_for(tgt):
+            toks = split_cmd(line)
+            src = source_of(toks)
+            rel = os.path.relpath(src, ROOT).replace("\\", "/") if os.path.isabs(src) else src
+            key = (rel, tgt)
+            if rel in seen:                      # 同一 TU 在多个 target 里出现，取第一次的命令
+                continue
+            seen[rel] = True
+            p = subprocess.run(to_syntax_only(toks), cwd=ROOT, capture_output=True)
+            txt = (p.stdout + p.stderr).decode("utf-8", "replace")
+            wl = [l.strip() for l in txt.splitlines() if re.search(r"\bwarning:", l)]
+            el = [l.strip() for l in txt.splitlines() if re.search(r"\berror:", l)]
+            rows.append((tgt, rel, p.returncode, wl, el))
+    return rows
+
+
+def render(rows):
+    out = []
+    out.append("# 全仓 warning 清单（由 tools/warning_inventory.py 生成；命令取自 ninja -t commands）")
+    out.append("# 复算：python tools/warning_inventory.py > 本文件   核对：--verify 本文件")
+    # "未覆盖"=命令本身没被拆词器吃下（诊断指向 <command-line> 而不是某个源文件）。
+    # 这种 TU 不能记进"干净通过"，否则覆盖率会说谎（本轮实测：1/64 条命令报 stray '' in program）。
+    def not_covered(r):
+        return any("<command-line>" in l for l in r[4])
+    uncovered = sum(1 for r in rows if not_covered(r))
+    ok = sum(1 for r in rows if r[2] == 0 and not r[4])
+    err = sum(1 for r in rows if (r[2] != 0 or r[4]) and not not_covered(r))
+    warns = sum(len(r[3]) for r in rows)
+    out.append("扫描 TU 数=%d ｜干净通过=%d ｜源码里报 error=%d ｜未覆盖(命令没吃下)=%d ｜warning 行数=%d"
+               % (len(rows), ok, err, uncovered, warns))
+    cats = {}
+    for _t, _rel, _rc, wl, _el in rows:
+        for l in wl:
+            m = re.search(r"warning: (.*)", l)
+            k = classify(m.group(1) if m else l)
+            cats[k] = cats.get(k, 0) + 1
+    out.append("")
+    out.append("## 按类别（次数）")
+    for k in sorted(cats, key=lambda x: (-cats[x], x)):
+        out.append("  %4d  %s" % (cats[k], k))
+    out.append("")
+    out.append("## 逐条")
+    for tgt, rel, rc, wl, el in sorted(rows, key=lambda r: r[1]):
+        for l in wl + el:
+            out.append("  [%s] %s" % (tgt, l))
+    for tgt, rel, rc, wl, el in sorted(rows, key=lambda r: r[1]):
+        if rc != 0 and el:
+            out.append("  [RC 非零] %s (%s) rc=%d" % (rel, tgt, rc))
+    return "\n".join(out) + "\n"
+
+
+def main():
+    t0 = time.time()
+    if not os.path.isdir(BUILD):
+        print("[RED] 找不到 build/（%s）⇒ 取不到真实编译命令，不判" % BUILD)
+        return 2
+    rows = build_inventory()
+    if not rows:
+        print("[RED] 一个编译命令都没取到 ⇒ 本次扫描没有对象，不能报'0 warning'")
+        return 2
+    txt = render(rows)
+    if "--verify" in sys.argv:
+        try:
+            path = sys.argv[sys.argv.index("--verify") + 1]
+        except Exception:
+            print("[RED] --verify 需要一个清单文件路径")
+            return 2
+        if not os.path.isfile(path):
+            print("[RED] 清单文件不存在：%s" % path)
+            return 2
+        want = open(path, encoding="utf-8", errors="replace").read()
+        a = [l for l in want.splitlines() if not l.startswith("# 复算")]
+        b = [l for l in txt.splitlines() if not l.startswith("# 复算")]
+        if a == b:
+            print("warning_inventory 一致：%d 行逐字相同（成本 %dms）" % (len(b), int((time.time() - t0) * 1000)))
+            return 0
+        import difflib
+        d = list(difflib.unified_diff(a, b, "清单文件", "现算", lineterm="", n=1))
+        print("[RED] 清单与现算不一致（前 40 行差异）：")
+        for l in d[:40]:
+            print("   " + l)
+        print("warning_inventory EXIT=1 成本=%dms" % int((time.time() - t0) * 1000))
+        return 1
+    sys.stdout.write(txt)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

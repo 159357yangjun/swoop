@@ -1114,3 +1114,33 @@ python 当场把它吃成一个 0x01 字节 ⇒ `yaml.safe_load` 直接拒绝解
 注释里的示例不值得冒这个险（CI 那条注释最终改成不含任何反斜杠的措辞）。
 CI 接线：`Control-byte gate (no bare control bytes in tracked text files)`，先 `--selftest` 再正式扫。
 **入口已接，未执行过**（见「CI 执行状态」一节）。
+
+### 2026-10-01（第 3 条）— 全量 warning 清单入仓：`tools/warning_inventory.py` + `docs/warnings-2026-10-01.txt`
+
+**做法（被前两版否掉之后才定的）**：不手搓 flags、不自己写正则扫源码 ——
+命令由构建系统自己交出来：`ninja -C build -t commands <target>` 给出每个 TU 的**真实编译命令**，
+我只做两件事：去掉 `-o/-MD/-MT/-MF`（不然第一条就死在 `opening dependency file ...`），
+加 `-fsyntax-only`（不写产物）。目标 = `idm-next`、`idm-next-host`、`ui_snapshot`、`engine_selftest`。
+
+**清单（可复算，产物已入仓）**：`扫描 TU 数=64 ｜干净通过=64 ｜源码里报 error=0 ｜未覆盖=0 ｜warning 行数=0`，
+成本约 **129–131s**，`--verify` 连跑两次逐字一致 ⇒ 现况是**全仓在自己的 flags 下 0 warning**。
+复算：`python tools/warning_inventory.py --verify docs/warnings-2026-10-01.txt`。
+
+**扫描器自己被抓到两次缺陷，都是"覆盖率计数"发现的，不是我发现的**（这条比清单本身重要）：
+1. 第一版全部 64 条命令都 `fatal error: opening dependency file ...` ⇒ 打印出来是
+   **`干净通过=0`** —— 那个 0 立刻暴露"命令没跑成"，而不是"没 warning"。
+2. 第二版 `src/main.cpp` 报 6 条 `<command-line>: error: stray '\'`，被我归进"未覆盖"并**具名印出文件**；
+   追下去是我的分词器把 `-DIDM_NEXT_VERSION=\"0.1.0\"` 里的**转义引号当引号开关丢掉**，
+   定义值变成 `\0.1.0\` ⇒ 那 6 条错是我造的，不是源码的。修完 64/64 覆盖。
+   ⇒ 通用形状：**凡"扫出来是 0"，必须有一分母 + 一个未覆盖桶 + 一次正例对照**，三样缺一就不能引用那个 0。
+
+**正例对照（证明扫描器不瞎）**：往 `tools/engine_selftest.c` 种一个
+`snprintf(b, sizeof b, "%s\cCTRL-MARK")` ⇒ 清单如实报出
+`tools/engine_selftest.c:503:91: warning: unknown escape sequence: '\c'`，类别直方图 `1 unknown escape sequence: '\c'`、
+`warning 行数=1`；随后 `git checkout -- tools/engine_selftest.c` 拔除，`grep -c CTRL-MARK` = 0、
+`git diff --numstat` 为空 ⇒ 仓回到 HEAD 内容（二进制也仍对应这份内容，本轮没有未编译漂移）。
+
+**与前两条门的接缝**：这条清单也回答了上一轮"同形具名清单"的欠账 —— 编译器路径下
+`unknown escape sequence` 在 64 个 TU 里 **0 处**（我先前那两处已修），而 GCC 对 `\%` 依旧零警告
+（见 `mutation_fixture_sweep.py` 那节）⇒ 所以那类 bug 仍只能靠 `lint_control_bytes` 的行为自检拦。
+边界：只编现有目标、不新增依赖、不出包、不 push；产物入仓可复算。
