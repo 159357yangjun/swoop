@@ -45,6 +45,7 @@
 #include "schedule_service.h"
 #include "tool_probe.h"
 #include "cli_forward.h"
+#include "ipc_server.h"   // IDM_ACTIVATE_PROBE D 段归因：drainStat()（取尽条数 N / 取尽自身耗时）
 #include "off_thread.h"    // IDM_OFFTHREAD_PROBE：自愈不再冻住 GUI 线程
 #include "socket_drain.h"  // IDM_FLUSH_PROBE：回话必须推完才允许关
 #include <stdio.h>
@@ -1350,6 +1351,19 @@ int main(int argc, char** argv) {
              * 正好把这一秒吞在自己的计时之外，量到的是"事后"。改测直接量：
              * 事件循环单轮的最大耗时（= GUI 线程被独占多久）。 */
             std::atomic<bool> idleClosed { false };
+            /* 排空 + 静默（入参第 1 条）：D 段之前 C 段刚跑完 50 次往返。
+             * 若 accept 队列里还有残留，D 段量到的高 N / 高耗时就可能是**上一段造的**，
+             * 而不是产品行为。判据：连续两轮 150ms 静置里「取尽最久一次」不增长 ⇒ 认为已排空。 */
+            qint64 quietMax = IpcServer::drainStat().maxMs;
+            int quietRounds = 0;
+            for (int i = 0; i < 20 && quietRounds < 2; ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                QThread::msleep(150);
+                const qint64 nowMax = IpcServer::drainStat().maxMs;
+                if (nowMax == quietMax) ++quietRounds;
+                else { quietRounds = 0; quietMax = nowMax; }
+            }
+            const bool drained = (quietRounds >= 2);
             QThread* idle = QThread::create([&] {
                 QLocalSocket s;
                 s.connectToServer(ipcServerName());
@@ -1363,12 +1377,17 @@ int main(int argc, char** argv) {
             QElapsedTimer idleWindow;
             idleWindow.start();
             qint64 worstLoopMs = 0;
+            int peakN = 0;               // 窗口内「一次取尽」的最大连接数
+            qint64 peakDrainMs = 0;      // 窗口内「一次取尽」的最大自身耗时
             const qint64 sampleStart = idleWindow.elapsed();
             while (idleWindow.elapsed() - sampleStart < 2000 && !idleClosed.load()) {
                 QElapsedTimer one;
                 one.start();
                 QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
                 worstLoopMs = qMax(worstLoopMs, one.elapsed());
+                const IpcServer::DrainStat ds = IpcServer::drainStat();
+                peakN = qMax(peakN, ds.connections);
+                peakDrainMs = qMax(peakDrainMs, ds.lastMs);
             }
             while (!idleClosed.load()) {
                 QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
@@ -1378,6 +1397,17 @@ int main(int argc, char** argv) {
             delete idle;
             okIdleAck = (worstLoopMs > 0);      // 采到样本才算这条测试跑过
             idleBehindMs = worstLoopMs;
+
+            /* 归因（入参第 2 条）：把「这一轮的时间是谁花的」拆开印出来，不再靠猜。
+             *   peakN>1  ⇒ 串行宽限解释得通；peakN==1 而单轮仍高 ⇒ 别的东西占大头
+             *   IPC 占比 = 取尽自身耗时峰值 / 单轮最长
+             * 只量、不改判据、不放宽 500。 */
+            const double ipcShare = worstLoopMs > 0
+                                  ? (100.0 * double(peakDrainMs) / double(worstLoopMs)) : 0.0;
+            printf("[act] D 段归因：排空静默=%s peakN=%d 取尽自身峰值=%lldms "
+                   "单轮最长=%lldms IPC占比=%.0f%%\n",
+                   drained ? "成" : "未成", peakN, (long long)peakDrainMs,
+                   (long long)worstLoopMs, ipcShare);
 
             printf("[act] A 段两次 ack=%d/%d 模型行数 %d→%d 引擎任务数 %d→%d | "
                    "B 段放弃后往返=%lldms（需 <1500） | C 段 ack %d/%d | "

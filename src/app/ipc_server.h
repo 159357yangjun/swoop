@@ -34,6 +34,20 @@ public:
     // "list" 命令响应所需的当前任务数（由 MainWindow 注入：m_taskModel->rowCount()）
     void setTaskCountProvider(std::function<int()> cb);
 
+    /* ── 测具读数（不参与任何行为；IDM_ACTIVATE_PROBE D 段用它做归因）──
+     * 一次 onNewConnection() 会「取尽」若干条连接，每条最多在 handleClient 里付 ~200ms 宽限。
+     * D 段原先只印「事件循环单轮最长」，那个数**混进了同轮里的重绘/定时器**，
+     * 所以它涨到 2500ms 时无法判断是不是这条串行宽限路径造成的。
+     * 这三个数把「取尽几条 / 取尽本身花了多久 / 历史上最久一次」分开，
+     * 于是「单轮最长 ≈ 取尽耗时」⇒ IPC 串行；「单轮最长 ≫ 取尽耗时」⇒ 别的东西占大头。
+     * 只增计数、不改任何控制流。 */
+    struct DrainStat {
+        int   connections = 0;   // 最近一次取尽的连接数 N
+        qint64 lastMs = 0;       // 最近一次取尽本身耗时
+        qint64 maxMs = 0;        // 本进程内取尽耗时的历史最大
+    };
+    static DrainStat drainStat();
+
 private slots:
     void onNewConnection();
 
@@ -43,6 +57,8 @@ private:
     QLocalServer* m_server = nullptr;
     std::function<void(const QString&, const QString&, const QString&, int, const QString&, const QString&)> m_addTask;
     std::function<int()> m_taskCount;
+
+    static DrainStat s_drainStat;   // 单进程内只跑一个 IpcServer，测具用静态量最省事
 };
 
 #endif // IDM_APP_IPC_SERVER_H

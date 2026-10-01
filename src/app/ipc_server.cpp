@@ -76,15 +76,32 @@ bool IpcServer::start()
     return true;
 }
 
+IpcServer::DrainStat IpcServer::s_drainStat;
+
+IpcServer::DrainStat IpcServer::drainStat()
+{
+    return s_drainStat;
+}
+
 void IpcServer::onNewConnection()
 {
     // newConnection 可能一次积累多个客户端；全部取出，避免短时间浏览器/CLI 连发时
     // 有连接滞留到下一次信号才被处理。
+    QElapsedTimer drain;
+    drain.start();
+    int taken = 0;
     while (m_server && m_server->hasPendingConnections()) {
         QLocalSocket* client = m_server->nextPendingConnection();
-        if (client)
+        if (client) {
+            ++taken;
             handleClient(client);
+        }
     }
+    // 测具读数：只记，不影响上面任何一步控制流
+    s_drainStat.connections = taken;
+    s_drainStat.lastMs = drain.elapsed();
+    if (s_drainStat.maxMs < s_drainStat.lastMs)
+        s_drainStat.maxMs = s_drainStat.lastMs;
 }
 
 void IpcServer::handleClient(QLocalSocket* client)
