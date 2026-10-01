@@ -187,6 +187,50 @@ static int wait_final(int id, int timeout_ms, int *out_status, int64_t *out_down
     return -1;
 }
 
+/* 把文件截到 keep 字节（面 B 用：让引擎记录的写偏移跑到文件尾之后）。
+ * 走 Win32 而不是 _chsize_s：要截的常常是被占着的 .idmtmp，且必须吃 UTF-8 长路径。 */
+static int test_truncate(const char *path, long long keep)
+{
+    wchar_t wpath[MAX_PATH * 2];
+    if (!test_to_wpath(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0])))) return 0;
+    HANDLE h = CreateFileW(wpath, FILE_WRITE_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER li; li.QuadPart = keep;
+    int ok = SetFilePointerEx(h, li, NULL, FILE_BEGIN) && SetEndOfFile(h);
+    CloseHandle(h);
+    return ok;
+}
+
+/* 找出与 i%251 模式**第一个**不一致的偏移，并统计不一致总字节数（bad_cnt 可为 NULL）。
+ * 为什么单独要这个数：`content_matches_pattern` 只回 0/1，而"哪里开始错"才是修的人第一件要知道的事
+ * ——是开头就错（整份重下没发生）、还是从某个 chunk 边界开始错（兜底新建的空洞）。
+ * 返回 -2 = 打不开/长度不对；-1 = 全对。 */
+static long long first_mismatch_offset(const char *path, long long expect_size, long long *bad_cnt)
+{
+    FILE *f = utf8_fopen_rb(path);
+    unsigned char buf[65536];
+    long long off = 0, bad = -1, cnt = 0;
+    size_t got;
+    if (bad_cnt) *bad_cnt = 0;
+    if (!f) return -2;
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return -2; }
+    if (_ftelli64(f) != expect_size)     { fclose(f); return -2; }
+    if (_fseeki64(f, 0, SEEK_SET) != 0)  { fclose(f); return -2; }
+    while (off < expect_size && (got = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t k = 0; k < got; k++) {
+            if (buf[k] != (unsigned char)((off + (long long)k) % 251)) {
+                if (bad < 0) bad = off + (long long)k;
+                cnt++;
+            }
+        }
+        off += (long long)got;
+    }
+    fclose(f);
+    if (bad_cnt) *bad_cnt = cnt;
+    return bad;
+}
+
 /* 删除测试产物（含 .idmtmp）。必须走宽字符 API，理由同 utf8_fopen_rb。
  * ⚠️ 不做这一步的话，上一轮遗留的产物会让「落盘文件与下载字节一致」在
  * 本轮完全失败的情况下依然通过——测试自己制造假阳性，比没有测试更糟。 */
@@ -2162,6 +2206,224 @@ int main(int argc, char **argv)
         cfg = dlmgr_get_config();
         cfg.max_concurrent = 3;
         dlmgr_set_config(&cfg);
+    }
+
+    /* ── 32. 重启后带进度的恢复：save → load → 继续（三面：正常 / 截短 / 删掉 .idmtmp）──
+     *
+     * 为什么补这条（2026-09-30，主控巡视问"主用户闭环跑过没有"时查出来的洞）：
+     * 老的三条 load 用例（[10]/[10b]/[11]）写死 `"downloaded":0, "chunks":[]` ——
+     * **带进度的恢复一条都没有**。而 `dlmgr_load_state()` 从不去核对磁盘上到底有多少字节
+     * （该函数体内 GetFileAttributes/_stat/尺寸比对命中数 = 0），它照状态文件记的 offset
+     * 去 `r+b` 打开 `.idmtmp`（download_core.c:793-794 / :1127-1128，**写入路径**，不在 load 里）。
+     * 所以"文件被截短/被删掉"时会发生什么，是**未测区**。
+     *
+     * 三面的分工（用户 2026-09-30 定的，面 B 不许冒充面 C）：
+     *   面 A 正常：接得上、尺寸对、逐字节对、带过 Range（不是整份重下）。
+     *   面 B 截短：`r+b` 会成功 ⇒ 它测的是"写偏移跑到文件尾之外会发生什么"，**没触发兜底**，
+     *      读数里必须具名印出这点，不许记成"兜底已测"。
+     *   面 C 删除：`r+b` 必失败 ⇒ 才真走 `w+b` 兜底。断言三件：最终尺寸、中间逐字节、
+     *      有没有任何错误送到调用方（`TaskInfo.error_msg`）。
+     * 判据形状：B/C 只判"**不得静默把坏内容报成完成**"（st==4 或 error_msg 非空 或 逐字节对）。
+     * 若某一面红在这里（尺寸对、内容错、全程无错），那是一条数据完整性 P0 候选，
+     * **按用户指令只固定现场、不改产品代码**：现场 = 输入 URL、两个文件的路径与尺寸、maxoff、
+     * 以及 status/内容比对/error_msg 的原文。 */
+    printf("\n[32] 重启后带进度恢复（面 A 正常 / 面 B 截短 / 面 C 删 .idmtmp）\n");
+    {
+        const long long FULL32 = 12LL * 1024 * 1024;      /* /big.bin，12 MiB → 3 片 */
+        const long long KEEP32 = 4096;                    /* 面 B 截到这个长度 */
+        char u32[512];
+        snprintf(u32, sizeof(u32), "http://127.0.0.1:%d/big.bin", port);
+
+        static const struct { const char *file, *state, *tag, *what; }
+            F32[3] = {
+                { "rst_a.bin", "rst_a.json", "面A", "正常恢复（盘没被动过）" },
+                { "rst_b.bin", "rst_b.json", "面B", "截短 .idmtmp（r+b 会成功 ⇒ 未触发兜底）" },
+                { "rst_c.bin", "rst_c.json", "面C", "删掉 .idmtmp（r+b 必失败 ⇒ 真走 w+b 兜底）" }
+            };
+
+        for (int f = 0; f < 3; f++) {
+            char path[MAX_PATH + 64], tmpp[MAX_PATH + 80], stp[MAX_PATH + 64], d[320];
+            snprintf(path, sizeof(path), "%s\\%s", outdir, F32[f].file);
+            snprintf(tmpp, sizeof(tmpp), "%s.idmtmp", path);
+            snprintf(stp,  sizeof(stp),  "%s\\%s", outdir, F32[f].state);
+            utf8_delete(path); utf8_delete(tmpp); utf8_delete(stp);
+            server_reset(port);
+
+            int id = dlmgr_add(u32, outdir, F32[f].file, 4, NULL, NULL, NULL, NULL);
+            if (id < 0) {
+                snprintf(d, sizeof(d), "dlmgr_add 返回 %d", id);
+                check("重启恢复任务创建成功", 0, d);
+                continue;
+            }
+            dlmgr_start(id);
+
+            /* 等到真的有进度再暂停（固定 Sleep 取到 downloaded=0 的教训见 [26]）。
+             * ⚠️ 查不到任务时必须**继续等**而不是 break：任务登记与第一次进度回写之间有几拍，
+             * 一 break 就把"我还没等到"读成"引擎一个字节都没下"，实测会造一条假 FAIL。 */
+            TaskInfo mid;
+            memset(&mid, 0, sizeof(mid));
+            for (int i = 0; i < 200; i++) {
+                if (dlmgr_get_task_info(id, &mid) != 0) { Sleep(100); continue; }
+                if (mid.downloaded >= 5LL * 1024 * 1024) break;
+                if (mid.status == 3 || mid.status == 4) break;
+                Sleep(100);
+            }
+            dlmgr_pause(id);
+            /* 前提读数：面 A 连续两轮都在 20s 里一个字节没下（同一段代码的面 B/C 却能下到
+             * 9.4MB），差别只有一个——A 是 [32] 里第一个起的任务，跑在 [31] 的
+             * 「cancel + remove 四个任务」之后。把 status 与引擎自己报的等待数一起印出来：
+             * status=0（还在排队）+ deferred>0 ⇒ 槽位在取消/删除后没归还，新任务永远起不来。
+             * 这条不是本用例要判的东西，只固定现场；要不要钉成一条独立用例交回用户拍。 */
+            {
+                TaskInfo pre;
+                memset(&pre, 0, sizeof(pre));
+                dlmgr_get_task_info(id, &pre);
+                printf("    [前提读数] %s｜20s 轮询后 status=%d downloaded=%lld deferred=%d"
+                       "（status=0 且 deferred>0 ⇒ 任务压根没被起来过）\n",
+                       F32[f].tag, pre.status, (long long)pre.downloaded, dlmgr_deferred_count());
+            }
+            /* 等暂停真的收干净：状态到 2（已暂停）且 downloaded 连续两次采样不变。
+             * ⚠️ 公开快照 TaskInfo **没有 worker_alive 字段**（它在内部 DownloadTask 上），
+             * 所以测具无法直接断言"本代线程已退出"——只能拿"状态已翻 + 字节数不再动"当代理。
+             * 这是一条真实的小缺口，记在这儿而不是假装它不存在（load 会 reset_all_tasks，
+             * 线程若还持有槽位指针就是 [25] 那条单代原则在挡）。 */
+            int64_t prev_dl = -1;
+            int quiescent = 0;
+            for (int i = 0; i < 100; i++) {
+                TaskInfo w;
+                memset(&w, 0, sizeof(w));
+                if (dlmgr_get_task_info(id, &w) != 0) { Sleep(100); continue; }
+                if (w.status == 2 && w.downloaded == prev_dl) { quiescent = 1; break; }
+                prev_dl = w.downloaded;
+                Sleep(100);
+            }
+            if (dlmgr_get_task_info(id, &mid) != 0) memset(&mid, 0, sizeof(mid));
+
+            int sv = dlmgr_save_state(stp);
+            /* 前提断言：状态文件里必须真的写着分片进度 —— 老的三条 load 用例写死
+             * "downloaded":0 与 "chunks":[]，所以"load 恢复了进度"这句话从来没有前提。
+             * 顺带从这里算出「状态文件让引擎去写的最大偏移」：公开 TaskInfo 不暴露 chunks[]，
+             * 而这个数恰恰就是 load 之后会被用到的那个 offset，拿文件里的比拿内存的更贴近被测点。 */
+            char body[16384];
+            body[0] = '\0';
+            long rd = utf8_read_file(stp, body, sizeof(body));
+            int json_prog = 0;
+            long long maxoff = 0;
+            char *chunks_txt = NULL;
+            {
+                /* ⚠️ 必须先定位到**本任务那个对象**：状态文件写的是整个队列，里面还有
+                 * 别的任务（前面用例留下的），直接 strstr 第一个 "chunks":[ 会读到别人的
+                 * 进度并把自己判成"没带进度"——实测造出过三条假 FAIL。 */
+                char needle[300];
+                snprintf(needle, sizeof(needle), "\"file\":\"%s\"", F32[f].file);
+                char *mine = strstr(body, needle);
+                char *ca = mine ? strstr(mine, "\"chunks\":[") : NULL;
+                char *ce = ca ? strchr(ca, ']') : NULL;
+                char *p = ca;
+                chunks_txt = ca;
+                if (!mine) { snprintf(d, sizeof(d), "状态文件里找不到「%s」这个对象", needle); printf("    [警告] %s\n", d); }
+                while (p && p < ce && (p = strstr(p, "\"start\":")) != NULL && p < ce) {
+                    long long s = atoll(p + 8);
+                    char *q = strstr(p, "\"downloaded\":");
+                    long long dd = (q && q < ce) ? atoll(q + 13) : 0;
+                    if (dd > 0) json_prog = 1;
+                    if (s + dd > maxoff) maxoff = s + dd;
+                    p = (q && q < ce) ? q + 13 : p + 8;
+                }
+            }
+            snprintf(d, sizeof(d), "downloaded=%lld chunk_count=%d chunks_done=%d 静默=%d "
+                     "状态文件里的最大写偏移=%lld（期望 >0 且 <%lld）",
+                     (long long)mid.downloaded, mid.chunk_count, mid.chunks_done,
+                     quiescent, maxoff, FULL32);
+            check("暂停发生在中途，且状态里带着非零进度",
+                  quiescent && mid.downloaded > 0 && mid.downloaded < FULL32
+                  && mid.chunk_count >= 2 && maxoff > 0, d);
+            snprintf(d, sizeof(d), "save 返回=%d 文件字节=%ld 里有 id=%d chunks 带进度=%d",
+                     sv, rd, strstr(body, "\"id\":") != NULL, json_prog);
+            check("save 写出的状态文件确实带着分片进度（面 A/B/C 共同前提）",
+                  sv == 0 && rd > 0 && json_prog, d);
+            /* 原文照贴：这条是"每片 downloaded 到底有没有被写出去"的一手物证，
+             * 别只留一个 0/1 让下一个读者去猜。 */
+            printf("    [状态] %s｜总 downloaded=%lld｜本任务的 chunks 原文=「%.320s」\n",
+                   F32[f].tag, (long long)mid.downloaded,
+                   chunks_txt ? chunks_txt : "(状态文件里没找到本任务的 chunks 段)");
+
+            int ld = dlmgr_load_state(stp);
+            TaskInfo rst;
+            memset(&rst, 0, sizeof(rst));
+            int got = (dlmgr_get_task_info(id, &rst) == 0);
+            snprintf(d, sizeof(d), "load 返回=%d 查到=%d 恢复 downloaded=%lld（暂停时 %lld）"
+                     "chunk_count=%d→%d 文件名字节对得上=%d",
+                     ld, got, (long long)rst.downloaded, (long long)mid.downloaded,
+                     mid.chunk_count, rst.chunk_count,
+                     strcmp(rst.filename, F32[f].file) == 0);
+            check("load 回来的任务带着原来的进度与分片（不是从 0 重来）",
+                  ld == 0 && got && rst.downloaded == mid.downloaded
+                  && rst.chunk_count == mid.chunk_count
+                  && strcmp(rst.filename, F32[f].file) == 0, d);
+
+            /* ── 分面对磁盘动手，然后继续 ── */
+            long long size_before_tamper = file_size_i64_of(tmpp);
+            int tamper_ok = 1;
+            if (F32[f].file[4] == 'b') {                      /* 面 B：截短 */
+                tamper_ok = test_truncate(tmpp, KEEP32);
+                snprintf(d, sizeof(d), "截短前=%lld 截短后=%lld（期望 %lld，且 < 最大写偏移 %lld）",
+                         size_before_tamper, file_size_i64_of(tmpp), KEEP32, maxoff);
+                check("面 B：截短确实生效（写偏移已跑到文件尾之外）",
+                      tamper_ok && file_size_i64_of(tmpp) == KEEP32 && maxoff > KEEP32, d);
+            } else if (F32[f].file[4] == 'c') {               /* 面 C：删掉 */
+                utf8_delete(tmpp);
+                snprintf(d, sizeof(d), "删除前面=%lld 删除后=%lld（期望 -1=不存在 ⇒ r+b 必失败）",
+                         size_before_tamper, file_size_i64_of(tmpp));
+                check("面 C：.idmtmp 确实不存在（r+b 打不开 ⇒ 才走 w+b 兜底）",
+                      file_size_i64_of(tmpp) < 0, d);
+            }
+
+            dlmgr_start(id);
+            int st = 0; int64_t dl = 0;
+            wait_final(id, 60000, &st, &dl);
+            TaskInfo fin;
+            memset(&fin, 0, sizeof(fin));
+            dlmgr_get_task_info(id, &fin);
+            long long fsz = file_size_i64_of(path);
+            int mc = content_matches_pattern(path, FULL32);
+            long long bad_cnt = 0;
+            long long bad0 = first_mismatch_offset(path, FULL32, &bad_cnt);
+            int ranges = server_stat(port, "ranges");
+            int has_err = (fin.error_msg[0] != '\0');
+
+            /* 读数面：三面都印。面 B 必须自己标"未触发兜底"——它不能被记成"兜底已测"。
+             * 首个错位偏移是给修的人定位用的：0 = 开头就错（压根没续传）；
+             * 某个 chunk 边界 = 那里有个洞（兜底新建的空文件被 seek 写过去了）。 */
+            printf("    [读数] %s｜%s｜status=%d 成品=%lld/%lld 内容=%d（1对 0错位 -1长度错 -2无文件）"
+                   " 首个错位偏移=%lld 错位字节=%lld error_msg=%s Range=%d 最大写偏移=%lld"
+                   "｜兜底=%s\n",
+                   F32[f].tag, F32[f].what, st, fsz, FULL32, mc, bad0, bad_cnt,
+                   has_err ? fin.error_msg : "(空)", ranges, maxoff,
+                   f == 1 ? "未触发（文件存在，r+b 成功）" :
+                   f == 2 ? "已触发（文件不存在 ⇒ w+b 新建）" : "不涉及（盘未动）");
+
+            if (f == 0) {
+                snprintf(d, sizeof(d), "status=%d 成品=%lld 内容=%d Range=%d", st, fsz, mc, ranges);
+                check("面 A：接得上并下完（尺寸对且逐字节正确）",
+                      st == 3 && fsz == FULL32 && mc == 1, d);
+                snprintf(d, sizeof(d), "Range 请求数=%d（进度已恢复却没带 Range ⇒ 是整份重下）", ranges);
+                check("面 A：续传而不是整份重下", ranges >= 1, d);
+            } else {
+                snprintf(d, sizeof(d),
+                         "status=%d 成品=%lld 内容=%d error_msg=%s（三者同时"
+                         "「报完成 + 尺寸对 + 内容错 + 无错」=静默产出坏文件）",
+                         st, fsz, mc, has_err ? fin.error_msg : "(空)");
+                check(F32[f].file[4] == 'b'
+                          ? "面 B：截短后不得静默把坏内容报成完成"
+                          : "面 C：删掉 .idmtmp 后不得静默把坏内容报成完成",
+                      st == 4 || has_err || mc == 1, d);
+            }
+
+            dlmgr_cancel(id);
+            utf8_delete(path); utf8_delete(tmpp); utf8_delete(stp);
+            dlmgr_remove(id);
+        }
     }
 
     dlmgr_destroy();
