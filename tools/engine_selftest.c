@@ -190,6 +190,50 @@ static int wait_final(int id, int timeout_ms, int *out_status, int64_t *out_down
 
 /* 把文件截到 keep 字节（面 B 用：让引擎记录的写偏移跑到文件尾之后）。
  * 走 Win32 而不是 _chsize_s：要截的常常是被占着的 .idmtmp，且必须吃 UTF-8 长路径。 */
+static int utf8_delete(const char *path);   /* 前向声明：定义在下面，delete_matching 要用它 */
+
+/* 按通配删干净（模式形如 outdirst_a*，含引擎改名出来的「名字 (1).ext」这类）。
+ * 为什么需要：clean_outputs 走精确名单，而 [32]/[33] 用的是新文件名——上一轮的成品删不掉，
+ * 下一轮引擎收尾时就挑「xxx (1).bin」，而我的收尾只删得到原名 ⇒ 产物一层层攒起来
+ * （实测盘上攒出 rst_a (1)..(5).bin 五份 12,582,912 字节），我采的那个 .idmtmp 根本不是引擎在用的名字。 */
+static void delete_matching(const char *pattern)
+{
+    wchar_t wp[MAX_PATH * 2];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    char dir[MAX_PATH + 96];
+    const char *ps = strrchr(pattern, '\\');
+    size_t dlen = ps ? (size_t)(ps - pattern) : 0;
+    if (dlen == 0 || dlen + 1 > sizeof(dir)) return;
+    memcpy(dir, pattern, dlen);
+    dir[dlen] = '\0';
+    if (!test_to_wpath(pattern, wp, (int)(sizeof(wp) / sizeof(wp[0])))) return;
+    h = FindFirstFileW(wp, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        char utf8name[MAX_PATH * 3], full[MAX_PATH * 4];
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1,
+                                utf8name, (int)sizeof(utf8name), NULL, NULL) <= 0) continue;
+        snprintf(full, sizeof(full), "%s\\%s", dir, utf8name);
+        utf8_delete(full);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+/* 攒下来的历史产物一律先扫掉：精确名单删不到「xxx (1).bin」这种引擎自己改出来的名字。 */
+static void sweep_leftovers(const char *outdir)
+{
+    static const char *pats[] = { "rst_a*", "rst_b*", "rst_c*", "s2_ok*", "s2_mm*",
+                                  "cap*", "throttle_free*", "throttle_limited*",
+                                  "resume*", "reuse*", "shared*", "withauth*", "nocap*" };
+    char pat[MAX_PATH + 96];
+    for (int i = 0; i < (int)(sizeof(pats) / sizeof(pats[0])); i++) {
+        snprintf(pat, sizeof(pat), "%s\%s", outdir, pats[i]);
+        delete_matching(pat);
+    }
+}
+
 static int test_truncate(const char *path, long long keep)
 {
     wchar_t wpath[MAX_PATH * 2];
@@ -250,6 +294,9 @@ static int utf8_delete(const char *path)
 static int clean_outputs(const char *outdir)
 {
     static const char *names[] = { "noauth.bin", "withauth.bin", "nocap.bin",
+                                   "rst_a.bin", "rst_b.bin", "rst_c.bin",
+                                   "s2_ok.bin", "s2_mm.bin",
+                                   "throttle_free.bin", "throttle_limited.bin",
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
                                    "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
@@ -485,6 +532,7 @@ int main(int argc, char **argv)
 
     {
         int leftover = clean_outputs(outdir);
+    sweep_leftovers(outdir);   /* 精确名单删不到引擎改名出来的「xxx (1).bin」*/
         printf("    输出目录 %s（清理了 %d 个上轮遗留产物）\n", outdir, leftover);
     }
 
@@ -2376,8 +2424,30 @@ int main(int argc, char **argv)
              * 一 break 就把"我还没等到"读成"引擎一个字节都没下"，实测会造一条假 FAIL。 */
             TaskInfo mid;
             memset(&mid, 0, sizeof(mid));
+            /* ── 不动 src/ 的代理量（用户 2026-09-30 给的方法）：TaskInfo 不暴露 worker_alive，
+             * 但测具手上拿得到「.idmtmp 的存在性与尺寸」和「时间」。20s 窗口里每 500ms 采一次，
+             * 三个桶：①从未创建 ⇒ 根本没起（排队不推 / 槽位没归还）；②创建了但全程 0 字节 ⇒ 起了没写；
+             * ③有增长 ⇒ 那是"慢"，不是本案。分不开就把"分不开"当定案理由。**只印，不进判据。** */
+            int smp = 0, smp_absent = 0, smp_zero = 0, smp_grew = 0;
+            long long tmp_max = -2, tmp_last = -2;
+            int st_min = 99, st_max = -1, def_max = -1, big_max = -1;
             for (int i = 0; i < 200; i++) {
                 if (dlmgr_get_task_info(id, &mid) != 0) { Sleep(100); continue; }
+                if (i % 5 == 0) {                      /* 500ms 一采 */
+                    long long sz = file_size_i64_of(tmpp);
+                    int df = dlmgr_deferred_count();
+                    int bg = server_stat(port, "big_reqs");   /* /big.bin 的 GET 次数 */
+                    smp++;
+                    if (sz < 0) smp_absent++;
+                    else if (sz == 0) smp_zero++;
+                    if (tmp_last >= 0 && sz > tmp_last) smp_grew++;
+                    tmp_last = sz;
+                    if (sz > tmp_max) tmp_max = sz;
+                    if (df > def_max) def_max = df;
+                    if (bg > big_max) big_max = bg;
+                    if ((int)mid.status < st_min) st_min = (int)mid.status;
+                    if ((int)mid.status > st_max) st_max = (int)mid.status;
+                }
                 if (mid.downloaded >= 5LL * 1024 * 1024) break;
                 if (mid.status == 3 || mid.status == 4) break;
                 Sleep(100);
@@ -2395,6 +2465,28 @@ int main(int argc, char **argv)
                 printf("    [前提读数] %s｜20s 轮询后 status=%d downloaded=%lld deferred=%d"
                        "（status=0 且 deferred>0 ⇒ 任务压根没被起来过）\n",
                        F32[f].tag, pre.status, (long long)pre.downloaded, dlmgr_deferred_count());
+                {
+                    const char *bucket;
+                    if (pre.downloaded >= 5LL * 1024 * 1024)
+                        bucket = "对照：正常拿到进度 ⇒ 本案这一轮未复现";
+                    else if (smp == 0)
+                        bucket = "★一次都没采到（轮询在采样前就 break 了）⇒ 分不开";
+                    else if (smp_absent == smp && big_max <= 0)
+                        bucket = "桶1a：.idmtmp 从未出现，且 /big.bin 一次 GET 都没发 ⇒ 压根没取字节";
+                    else if (smp_absent == smp)
+                        bucket = "桶1b：.idmtmp 从未出现，但 GET 已发出 ⇒ 取了字节却没落到文件";
+                    else if (smp_zero + smp_absent == smp)
+                        bucket = "桶2：创建了但全程 0 字节 ⇒ 起了没写";
+                    else if (smp_grew > 0)
+                        bucket = "桶3：有增长 ⇒ 属「慢」，不是本案";
+                    else
+                        bucket = "分不开：采样存在但形状不干净";
+                    printf("    [分桶] %s｜采样=%d 次(每500ms,分母) 从未创建=%d 全程0字节=%d 有增长=%d "
+                           "tmp最大=%lld status区间=[%d,%d](0排队/1下载中/2暂停) deferred最大=%d "
+                           "big.bin GET最大=%d ⇒ %s\n",
+                           F32[f].tag, smp, smp_absent, smp_zero, smp_grew, tmp_max,
+                           smp ? st_min : -1, smp ? st_max : -1, def_max, big_max, bucket);
+                }
             }
             /* 等暂停真的收干净：状态到 2（已暂停）且 downloaded 连续两次采样不变。
              * ⚠️ 公开快照 TaskInfo **没有 worker_alive 字段**（它在内部 DownloadTask 上），
