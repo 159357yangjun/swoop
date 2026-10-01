@@ -14,7 +14,7 @@
 | 最大文件 | `src/gui/main_window.cpp` **1,836 行**（Stage 3 抽 traffic+web+appearance 后；Stage 2 末 2,004，初始 2,883） |
 | 次大 | `core/download_core.c` 1,597 · `storage/html_parser.c` 901 · `core/network_curl.c` 573 |
 | 目录 | core 7 · gui 41 · utils 5 · storage 6 · protocols 23 · cli 1 · host 1 · tools 8 |
-| 死代码 | 2026-09-19 当时：`core/network.c`（WinHTTP 874 行）**未编译**；`gui/glass_effect.cpp` 已停用但**仍在编译**。2026-09-29 复核：两个路径都已搬迁（现 `src/core/legacy/network_winhttp.c`、`src/gui/legacy/glass_effect.cpp`），`glass_effect.cpp` **也不再编译**（`grep -c glass_effect build/build.ninja` = 0，原表这一格已过期）；但 `src/gui/main_window.h:10` 仍 `#include "legacy/glass_effect.h"` ⇒ "完全断开"不成立。逐条命令与命中数见 §7「否定式断言全表核」 |
+| 死代码 | 2026-09-19 当时：`core/network.c`（WinHTTP 874 行）**未编译**；`gui/glass_effect.cpp` 已停用但**仍在编译**。2026-09-29 复核：两个路径都已搬迁（现 `src/core/legacy/network_winhttp.c`、`src/gui/legacy/glass_effect.cpp`），`glass_effect.cpp` **也不再编译**（`grep -c glass_effect build/build.ninja` = 0，原表这一格已过期）；但 `src/gui/main_window.h:10` 仍 `#include "legacy/glass_effect.h"` ⇒ "完全断开"不成立。逐条命令与命中数见 §7「否定式断言全表核」；**活/死名单与复算命令见 §1.3（有门）** |
 | 构建 | 两个目标（`idm-next`、`ui_snapshot`）各抄一份源清单，易漂移 |
 | 版本控制 | 重构前**无 `.git`**，本次已 `git init` 建基线（`874427e`） |
 
@@ -49,6 +49,62 @@
 | `gui/task_group_proxy.{h,cpp}` | `src/gui/` | `src/model/` | 代理模型，数据层 |
 | `core/network.c` | `src/core/` | `src/core/legacy/` | WinHTTP 参考实现，未编译 |
 | `gui/glass_effect.{h,cpp}` | `src/gui/` | `src/gui/legacy/`（移出编译） | 停用功能留档 |
+
+> ⚠️ 上面这张表是**阶段 1 之前的"现在位置"**，其中 6 行已经搬完，按字面读会走错目录。复算命令与结果
+> （2026-09-30 实测，全部 GONE ⇒ 6 行都已落地）：
+> ```bash
+> for p in src/gui/web_server.cpp src/gui/task_list_model.cpp src/gui/category_filter_proxy.cpp \
+>          src/gui/task_group_proxy.cpp src/core/network.c src/gui/glass_effect.cpp; do
+>     [ -f "$p" ] && echo "EXISTS $p" || echo "GONE   $p"; done
+> ```
+> 归位后的活路径见 §1.3。
+
+### 1.3 哪一份是活的（名单 + 复算命令，漂移即红）
+
+这一节存在的理由：仓里有**读起来像活的、其实一行都不进编译**的文件，也有**五份名字像新旧版、其实是并存分派**
+的文件。以前"哪份是活的"只能靠反推 `CMakeLists.txt` 得出 —— 没登记、没门。现在登记在这里，旁边就是复算命令，
+不一致由 `tools/live_roster.py` 报红（已接进 CI）。**列名与「类别」四个取值是门的解析锚点，改表必须同批改门。**
+
+未编译集的复算命令（原样可跑，输出应当与下表 `未编译` 桶逐字相同）：
+
+```bash
+comm -23 <(find src tools -type f \( -name '*.c' -o -name '*.cpp' \) | sort) \
+         <(grep -vE '^[[:space:]]*#' CMakeLists.txt | grep -oE '(src|tools)/[A-Za-z0-9_./-]+\.(c|cpp)' | sort -u)
+```
+
+```
+src/core/legacy/network_winhttp.c
+src/gui/legacy/glass_effect.cpp
+```
+
+命令里 `grep -vE '^[[:space:]]*#'` 不是装饰：**先把 CMake 注释行去掉再匹配**。少了它，谁在注释里写一句
+`# network_winhttp.c 已停用`，该文件就会被当成"被 CMake 点名"而从未编译集里蒸发 —— 门反而把真陷阱洗白。
+（本仓已入库的规矩：任何靠文本锚点工作的工具，输入必须先过去注释。）
+
+| 文件 | 类别 | 判活依据（可复算） |
+|---|---|---|
+| `src/core/legacy/network_winhttp.c` | 未编译 | 874 行、不在任何 target；与活的 `src/core/network_curl.c` **对外符号同名 9 个**（`network_init`、`network_cleanup`、`network_set_http2_enabled`、`network_default_options`、`network_get_html`、`network_post`、`network_probe`、`network_download_range`、`network_download_range_fp`）⇒ 改网络行为只改 curl 那份，改这里不会生效也不会报错 |
+| `src/gui/legacy/glass_effect.cpp` | 未编译 | 140 行、不在任何 target；`grep -c glass_effect build/build.ninja` = 0 |
+| `src/gui/legacy/glass_effect.h` | 仅声明型死头 | 被 `src/gui/main_window.h:10` include ⇒ **声明进编译、实现不进**；`Glass::` 在去注释后的全 `src/` 调用点 = 0 ⇒ 谁去调 `Glass::` 就是链接错误。别把它读成"玻璃拟态还在用" |
+| `tools/ui_snapshot.cpp` | 开关才编译 | `option(IDM_BUILD_UI_SNAPSHOT "Build offscreen UI snapshot tool" OFF)` ⇒ 默认构建里没有它是正常的，探针/截图要 `-DIDM_BUILD_UI_SNAPSHOT=ON` |
+| `tools/engine_selftest.c` | 开关才编译 | `option(IDM_BUILD_ENGINE_SELFTEST "Build engine self-test (needs local auth HTTP server)" OFF)` |
+| `src/protocols/idownloader.cpp、src/protocols/*_downloader.cpp` | 并存分派，不是两版 | 同一个名字家族 5 份、**同时进编译**：`src/protocols/protocol_factory.cpp` 按 URL 谓词择一分派（HLS → Torrent → Video → Http 兜底）的是 4 份实现；第 5 份 `idownloader.cpp` 不是"第 5 种下载器"，全文只有 `#include "idownloader.h"`，是给 header-only 的 `IDownloader`（带 Q_OBJECT）喂 AUTOMOC 的占位 TU ⇒ 5 份之间没有"新旧版"关系，不许"合并去重" |
+| `src/protocols/video_backend.cpp、src/protocols/torrent_backend.cpp` | 并存分派，不是两版 | 名字与上一行只差一个词、职责不同：`*_backend` 管外部工具（yt-dlp / aria2 式）自检与自动下载，`*_downloader` 才是 `IDownloader` 实现。两份都在用，调用点 `src/gui/main_window.cpp:342` 与 `src/gui/main_window.cpp:351`；分派点 `src/gui/main_window.cpp` |
+
+门（跑这个，退出码 1 = 表与集合不一致）：
+
+```bash
+python tools/live_roster.py
+```
+
+**范围**：只覆盖 `src/` + `tools/` 的 C/C++ 翻译单元（磁盘 59 个 TU = 编译 57 + 未编译 2，恒等式由门自己印）。
+另有三处也会让人读错"哪份是活的"，不进表，各给一句判据：`fdm-ref/` 是外部参考树，`.gitignore:38` 已忽略，
+`git ls-files fdm-ref | wc -l` = 0 ⇒ 它 617 个 `.c/.cpp` 一份都不跟踪、也不进编译；`third_party/libcurl/`
+是 vendored 依赖，由 `CMakeLists.txt` 的 `LIBCURL_*` 变量指路；`browser-extension/*.js` 不是 TU，本命令根本不涉及。
+
+**残余盲区（明写，不当已覆盖）**：命令判的是"CMake 有没有点名"，不是"跑起来有没有用到"。头文件是否活要靠
+包含图（所以 `仅声明型死头` 单列一类，由门做传递可达性判断），而"同名双定义 9 个符号"这类**人读错**的陷阱只能靠
+这张表登记 —— 门能证明集合没漂移，不能证明依据列里那句话还成立；依据列的符号名改动不会被抓到。
 
 ---
 
