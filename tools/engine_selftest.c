@@ -2466,7 +2466,7 @@ int main(int argc, char **argv)
             int st_min = 99, st_max = -1, def_max = -1, big_max = -1;
             long long fin_max = -2;
             char fn_seen[256];
-            fn_seen[0] = ' ';
+            fn_seen[0] = '\0';
             for (int i = 0; i < 200; i++) {
                 if (dlmgr_get_task_info(id, &mid) != 0) { Sleep(100); continue; }
                 if (i % 5 == 0) {                      /* 500ms 一采 */
