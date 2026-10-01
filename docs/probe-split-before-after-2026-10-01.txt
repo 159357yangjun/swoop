@@ -1,0 +1,52 @@
+# 拆名前后两面输出（2026-10-01 14:0x，本机 Git Bash）
+
+## 二进制身份（编译前后各报一次）
+
+| 阶段 | 绝对路径 | mtime | 字节数 | exe_sha12 | 源文件哈希 |
+|---|---|---|---|---|---|
+| 改前（原样 `ninja` 一次） | `/d/visual studio/lianxi/MFC/idm-next/build/ui_snapshot.exe` | 2026-10-01 08:25:23 | 2281493 | `e9ebbba101e2` | `176f4dd5e4cdf46b1ee44885ff2b01a5ae146e8b` |
+| 拆名后第一次编 | 同上 | 2026-10-01 13:58:xx | 2298816 | `71463b68309b` | `da28821a8b258176d2526adbf988aea09c3986e5` |
+| 扰动演示（+1 行 msleep(800)） | 同上 | 14:00:0x | — | `d78187202dfb` | （da28821a + 那一行） |
+| 还原后重编 | 同上 | 2026-10-01 14:00:51 | — | `944123ae728b` | `da28821a8b258176d2526adbf988aea09c3986e5` ← **与扰动前逐字相等** |
+
+编译命令原文（只这一个目标）：
+
+```bash
+ninja -C build ui_snapshot
+# [1/4] Automatic MOC and UIC for target ui_snapshot
+# [2/3] Building CXX object CMakeFiles/ui_snapshot.dir/tools/ui_snapshot.cpp.obj
+# [3/3] Linking CXX executable ui_snapshot.exe; 拷贝 libcurl 运行期文件: libcurl-x64.dll -> ui_snapshot; …
+```
+没有编任何产品目标；没有下载任何东西（`ninja 1.13.1 / cmake 4.1.0 / g++ 15.2.0`，均在 `D:/mingw64`）。
+
+**"同一源文件 ⇒ 同一 exe 哈希"这次被当场实测否证**：源哈希 `da28821a` 编出两次，
+exe 分别是 `71463b68309b` 与 `944123ae728b`。所以还原证人只能是 `git hash-object` + `git diff` 为空，
+不能是 exe 哈希（链接时间戳）。
+
+## 第一面：拆名前的读数（`e9ebbba101e2`，12:54 那次 sweep）
+
+```
+[act] D 段归因：排空静默=成 peakN=1 取尽自身峰值=213ms 单轮最长=213ms IPC占比=100%
+[PASS] 一条空转连接占着 GUI 线程时，后面那条正常请求仍 <500ms 拿到回话（实测 213ms）
+```
+⇒ 打印里"213ms"是**事件循环单轮最长**（`idleBehindMs = worstLoopMs`），可句子说的是"那条请求拿到回话"。
+本段里从未发出过请求，所以"请求的完成时间"这个量当时**不存在**。
+
+## 第二面：拆名后的读数（`944123ae728b`，14:01 那次 sweep）
+
+```
+[act] D 段归因：排空静默=成 peakN=1 取尽自身峰值=215ms 单轮最长=215ms IPC占比=100%
+[PASS] 空转连接占着 GUI 线程时，最长一次事件循环轮次仍 <500ms（量的是 GUI 线程被独占多久，不是请求延迟；实测 215ms）
+[report] 压在空转连接后面的那条真请求：往返=218ms ack=1（同窗口最长轮次=219ms 取尽连接数 peakN=1；本轮首次测量、无基线⇒不进判据、不配阈值）
+```
+拆名后单跑 3 轮的新读数：`217 / 217 / 218ms`，各自同窗口最长轮次 `218 / 219 / 220ms`，`ack=1×3`。
+
+⇒ 两个量第一次被分开且各自有名：**GUI 被独占 ~215ms**，而**压在那之后的那条请求确实等了 ~218ms** 才拿到回话
+——比它自己那一轮的时间还长一点，说明它排在一次取尽之后。历史上那个"14ms"从此不再被引用。
+
+## 回归证人：16 个别的模式一字未动
+
+12:54（旧 exe）vs 14:01（新 exe），逐模式 `[PASS]/[FAIL]` 计数**全部相同**
+（ACTIVATE 7/0、FILEICON 8/0、FORWARD 5/0、NOTICE 5/0、SITEAUTH 5/0、PROXY 5/0、ZOOM 4/0、IPC 4/0、
+OFFTHREAD 4/0、TOOLPROBE 4/0、SETTINGS 4/0、SCHEDULE 3/0、FLUSH 2/0、TEXT 1/0、CONCURRENCY 1/0、
+ICON 0/0、ARROW 0/0）；两轮 sweep 均 `PASS=62 FAIL=0 零断言模式=0`。

@@ -1205,7 +1205,16 @@ int main(int argc, char** argv) {
         bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false, ok6 = false, ok7 = false;
         bool firstAbandonedAck = false;
         bool okIdleAck = false;
-        qint64 idleBehindMs = -1;
+        /* 两个读数分开命名，各说各的量（以前是一个数顶着另一句话）：
+         *   worstEventLoopTurnMs —— D 段窗口里最长的一次 processEvents 轮次，= GUI 线程被独占多久；
+         *     进判据（500ms 挂在它身上，与它实际测的东西一致）。
+         *   idleBehindReplyMs —— 同一窗口里一条真请求从发出到拿到回话的往返，由**它自己的线程**计时；
+         *     只进报告行（本轮首次测量、没有分布 ⇒ 给它配阈值就是拍数）。 */
+        qint64 worstEventLoopTurnMs = -1;
+        qint64 idleBehindReplyMs = -1;
+        qint64 turnBehindMs = 0;     // 第二个读数自己那一轮里的最长轮次（与它同窗口，才能对得上）
+        int nBehind = 0;             // 那一轮里一次取尽到的最大连接数
+        bool okIdleReply = false;
         int stressAcks = 0, stressTotal = 0;
         qint64 roundTripMs = -1;
         int rowsBefore = -1, rowsAfter = -1;
@@ -1396,7 +1405,78 @@ int main(int argc, char** argv) {
             idle->wait(5000);
             delete idle;
             okIdleAck = (worstLoopMs > 0);      // 采到样本才算这条测试跑过
-            idleBehindMs = worstLoopMs;
+            worstEventLoopTurnMs = worstLoopMs;
+
+            /* ── 第二个具名读数：被空转连接压在后面的**那条真请求**，真实往返 ──
+             * 它必须**自己开一份事件**（另起一轮 idle 连接 + 一条真请求），不能塞进上面那个 D 段窗口。
+             * 理由不是风格，是实测：把第二条连接放进同一个窗口后，`IpcServer` 的
+             * `s_drainStat.lastMs` 会被**后一次快取尽**覆盖（src/app/ipc_server.cpp:101-104 写的是
+             * "最近一次取尽"），于是 D 段的 `取尽自身峰值` 从 213ms 掉到 0ms、`IPC占比` 从 100% 掉到 0%——
+             * 等于把我自己做归因要用那个证人打瞎（0% 正是"别的东西占大头"的形状）。
+             * 同理 :1349 那条教训：消融必须重开一份被测事件，不能拿事件已经过去了的空窗口当对照。
+             * 形状复用 askActivate（独立 QThread + 本线程 QEventLoop），但**不用它的等待循环**——
+             * 那个循环在 GUI 线程上 processEvents，会把"我的等待"混进被测量。 */
+            {
+                std::atomic<bool> rDone { false }, rAck { false };
+                std::atomic<bool> bClosed { false };
+                std::atomic<qint64> rMs { -1 };
+                QThread* idle2 = QThread::create([&] {
+                    QLocalSocket s;
+                    s.connectToServer(ipcServerName());
+                    if (s.waitForConnected(3000)) {
+                        QThread::msleep(2500);      // 与 D 段同一条空转连接：连上、一个字不发
+                        s.abort();
+                    }
+                    bClosed = true;
+                });
+                QThread* req2 = QThread::create([&] {
+                    QElapsedTimer et;
+                    et.start();
+                    QLocalSocket s;
+                    s.connectToServer(ipcServerName());
+                    if (s.waitForConnected(2000)) {
+                        QJsonObject req;
+                        req[QStringLiteral("command")] = QStringLiteral("activate");
+                        req[QStringLiteral("t0")] =
+                            static_cast<double>(QDateTime::currentMSecsSinceEpoch());
+                        s.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+                        s.flush();
+                        QEventLoop loop;
+                        QTimer deadline;
+                        deadline.setSingleShot(true);
+                        QObject::connect(&s, &QLocalSocket::readyRead, &loop, &QEventLoop::quit);
+                        QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+                        deadline.start(5000);
+                        loop.exec();
+                        const QJsonObject resp = QJsonDocument::fromJson(s.readAll()).object();
+                        rAck = resp.value(QStringLiteral("success")).toBool(false);
+                        s.disconnectFromServer();
+                    }
+                    rMs = et.elapsed();
+                    rDone = true;
+                });
+                idle2->start();
+                QThread::msleep(50);   // 让两条连接都到达 accept 队列，第一次取尽才会"空转在前"
+                req2->start();
+                QElapsedTimer w2;
+                w2.start();
+                const qint64 s2 = w2.elapsed();
+                while (w2.elapsed() - s2 < 3000 && !rDone.load()) {
+                    QElapsedTimer one;
+                    one.start();
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                    turnBehindMs = qMax(turnBehindMs, one.elapsed());
+                    const IpcServer::DrainStat ds = IpcServer::drainStat();
+                    nBehind = qMax(nBehind, ds.connections);
+                }
+                req2->wait(9000);
+                idle2->wait(6000);
+                for (int i = 0; i < 20; ++i) QCoreApplication::processEvents();
+                idleBehindReplyMs = rMs.load();
+                okIdleReply = rAck.load();
+                delete req2;
+                delete idle2;
+            }
 
             /* 归因（入参第 2 条）：把「这一轮的时间是谁花的」拆开印出来，不再靠猜。
              *   peakN>1  ⇒ 串行宽限解释得通；peakN==1 而单轮仍高 ⇒ 别的东西占大头
@@ -1500,9 +1580,16 @@ int main(int argc, char** argv) {
                (ok5 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
         printf("%s 连续投递 %d 次全部拿到回话（%d/%d；回话被丢掉就在这里红）\n",
                ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
-        ok7 = (okIdleAck && idleBehindMs >= 0 && idleBehindMs < 500);
-        printf("%s 一条空转连接占着 GUI 线程时，后面那条正常请求仍 <500ms 拿到回话（实测 %lldms）\n",
-               ok7 ? "[PASS]" : "[FAIL]", (long long)idleBehindMs);
+        ok7 = (okIdleAck && worstEventLoopTurnMs >= 0 && worstEventLoopTurnMs < 500);
+        printf("%s 空转连接占着 GUI 线程时，最长一次事件循环轮次仍 <500ms"
+               "（量的是 GUI 线程被独占多久，不是请求延迟；实测 %lldms）\n",
+               ok7 ? "[PASS]" : "[FAIL]", (long long)worstEventLoopTurnMs);
+        /* 第二个具名读数：本轮首次测量、无基线 ⇒ 只进报告行，不进退码、不配阈值。
+         * 攒到能看出抖动振幅的轮数之后，再谈它是否进判据（阈值要从读数里取，不许拍）。 */
+        printf("[report] 压在空转连接后面的那条真请求：往返=%lldms ack=%d"
+               "（同窗口最长轮次=%lldms 取尽连接数 peakN=%d；本轮首次测量、无基线⇒不进判据、不配阈值）\n",
+               (long long)idleBehindReplyMs, int(okIdleReply),
+               (long long)turnBehindMs, nBehind);
         return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
                 && roundTripMs >= 0 && roundTripMs < 1500) ? 0 : 1;
     }
