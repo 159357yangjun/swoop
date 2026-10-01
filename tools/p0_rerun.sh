@@ -43,5 +43,10 @@ echo "SLOG=$SLOG"
 grep -a "结果：" "$SLOG" | tail -1 | tr -d '\r'
 echo "FAIL_rows=$(grep -ac '^  \[FAIL\]' "$SLOG" || true)"
 grep -a '^  \[FAIL\]' "$SLOG" | tr -d '\r'
-echo "STATE_CLAMP_rows=$(grep -ac 'STATE-CLAMP' "$SLOG" || true)"
+# 无条件印：所有带 error_msg 的读数行，**绿侧也印**。
+# 这一行存在的理由：旧版只在失败行里印 error_msg ⇒ 通过时盘上一行证据都没有，
+# 于是 "STATE_CLAMP_rows=0" 会被读成"引擎没写自我报告"，而真相可能只是测具没印。
+echo "--- error_msg 读数（无条件）---"
+grep -a "error_msg=" "$SLOG" | tr -d '\r'
+echo "error_msg_rows=$(grep -ac 'error_msg=' "$SLOG" || true) STATE_CLAMP_rows=$(grep -ac 'STATE-CLAMP' "$SLOG" || true)"
 exit $RC
