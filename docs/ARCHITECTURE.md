@@ -810,3 +810,64 @@ sha256 由 `cc5b2cc6631f` 回到 `c4632d38b6b5`）后 `GREEN_EXIT=0`。
 
 验证：`bash <UI probes 步骤原文>` → 15 模式 rc 全 0、62 条全绿；`lint_layering` EXIT=0；
 构建有 `Building CXX object .../ipc_server.cpp.obj` 与 `.../ui_snapshot.cpp.obj` 两行。
+
+### 2026-09-30（再续）— 「哪一份是活的」进了名单，并且配了一道会咬的门
+
+起因是用户实跑点出的那条：`src/core/legacy/network_winhttp.c` 874 行**一行都不进编译**，却与活的
+`network_curl.c` 对外符号同名 9 个 —— 这种文件的存在方式就是"读代码的人会改错那一份，而且改了不报错"。
+名单落在 §1.3，判据按用户给的条件：**表旁边就是可跑的复算命令，且"表里列的未编译集 == 命令算出的集"，不一致就红。**
+
+三笔：`6421a66`（§1.3 表 + `tools/live_roster.py` + `tools/mutation_fixture_live_roster.py` + 夹具登记）、
+`4ffeffa`（CI 第 3 步）、本笔（台账）。门与表放在同一笔里，是为了不留下"门红着提交"的中间状态。
+
+**先红后绿（原文）**：
+
+```
+[RED] ROSTER-ANCHOR: 文档里找不到 §1.3 这一节（表被删了/被注释了/编号改了）
+[RED] ROSTER-ANCHOR: 未编译集现算 2 条：src/core/legacy/network_winhttp.c, src/gui/legacy/glass_effect.cpp
+[RED] ROSTER-ANCHOR 是**红**，不是跳过：本门退出码 1
+live_roster EXIT=1 cost=22ms
+```
+
+加完表之后：
+
+```
+TU 恒等式：磁盘 59 = 编译 57 + 未编译 2  [OK]
+表行数=7（未编译桶 2）｜现算未编译=2：src/core/legacy/network_winhttp.c, src/gui/legacy/glass_effect.cpp
+live_roster OK: 表与复算集合一致（未编译 2 条全部登记，四个类别全部建模）｜成本 53ms
+```
+
+**九道变异全按预期**（`python tools/mutation_fixture_live_roster.py` → `10/10 道按预期（红/绿）`，
+完整 stdout 在 `%TEMP%\idm-probes\2026-09-30\live_roster\mutation-*.log`）：M1 漏登记 MISSING、
+M2 标错死活 LIVENESS、M3 名单过期 STALE、M4 类别没登记 UNKNOWN-CATEGORY、**M5 两面**（往 CMakeLists
+加一行注释点名死文件 ⇒ 门仍绿，而不去注释的 naive grep 把它洗白 ⇒ 证明 `grep -vE '^[[:space:]]*#'` 承重）、
+M6 依据列删符号名 BASIS、M7 整表被 HTML 注释藏起 ANCHOR、M8 开关默认翻 ON OPTION-STALE、M9 表头列名被改 ANCHOR。
+还原核对：**干净（逐字一致）**，还原后再跑门 rc=0。
+
+**这一轮我自己错过的两处，都写在这儿而不是只写结论**：
+1. **M6 第一次跑是绿的** —— 依据列里删掉 `Glass::` 之后，"调用点 = 0"这条检查没有对象，静默跳过，门照样
+   退 0。判据（`ROSTER-BASIS`）是看到这个洞之后才补的，补完同一道变异退 1。
+   第一次尝试 M6 还不算变异：那行里另有一处 `Glass::enableGlassWindow` 留下了符号名，输出里"调用点=0"
+   那行照印 ⇒ 靠这条尾巴认出空变异。
+2. **M7 第一次的红是插错地方换来的** —— 夹具用 `| 文件` 定位表头，而 §1.2 的表头也叫 `| 文件 | 现在位置 |`，
+   于是注释插到 §1.2 上、§1.3 的表还活着，门退 0，读起来像"这条判据咬不动"。定位串换成 `| 文件 | 类别 |` 整串
+   之后才拿到真的 ROSTER-ANCHOR 红。
+⇒ 共同教训：**跑错的夹具比不跑夹具更容易让人相信门是好的**；夹具自身也要有"锚点必须存在"的断言。
+
+**新登记的数（都在 §1.3，且门只保证集合不漂移，不保证下面这些文字）**：
+`src/` + `tools/` 共 **59** 个 TU = 编译 **57** + 未编译 **2**；winhttp 与 curl 同名对外符号 **9** 个；
+`*_downloader.cpp` 名字家族 **5** 份里只有 **4** 份是下载器实现，第 5 份 `idownloader.cpp` 全文只有
+`#include "idownloader.h"`，是给 header-only 的 `IDownloader`（带 `Q_OBJECT`）喂 AUTOMOC 的占位 TU；
+`fdm-ref/` **617** 个 `.c/.cpp` 一份都不跟踪（`git ls-files fdm-ref | wc -l` = 0，`.gitignore:38`）。
+
+**明写的降级与残余盲区**：
+- 门判的是"CMake 有没有点名"，不是"跑起来有没有用到"；依据列里那句"同名 9 个符号""调用点=0"里的**文字**
+  不会被证明，符号名本身由 M6 强制必须存在。
+- 头文件可达性用 basename 兜底（对应 CMake 那 9 个 include 目录），同名头会让判断**偏松**（少报红方向）。
+- 恒等式只覆盖 `src/` + `tools/`；`fdm-ref/`、`third_party/`、`browser-extension/` 不进表，§1.3 末尾各给了一句判据。
+- §1.2 那张表我只加了"已搬完"的复算命令与指针，**没有重写整张表的"现在位置"列** —— 那是另一件事，没顺手做。
+
+验证：`live_roster` EXIT=0、`lint_layering --count-allowed` EXIT=0（210 条 include，反向 0，许可 10 条 =
+app→gui 5/5 + app→protocols 5/5）、PyYAML 解析 ci.yml 通过（windows-build 16 步，新步为第 3 步）、
+夹具 10/10 且还原干净。本轮没动任何 C/C++ 源文件 ⇒ 没有新的 `Building CXX object` 行可贴，UI 探针套件不重跑。
+
