@@ -1144,3 +1144,19 @@ CI 接线：`Control-byte gate (no bare control bytes in tracked text files)`，
 `unknown escape sequence` 在 64 个 TU 里 **0 处**（我先前那两处已修），而 GCC 对 `\%` 依旧零警告
 （见 `mutation_fixture_sweep.py` 那节）⇒ 所以那类 bug 仍只能靠 `lint_control_bytes` 的行为自检拦。
 边界：只编现有目标、不新增依赖、不出包、不 push；产物入仓可复算。
+
+### 2026-10-01（第 4 条）— 给"0 warning"标射程：项目**一条 -W 都没开**，且 `-fsyntax-only` 无 codegen
+
+主控追问两句，第一句当场量出结果，而且比措辞更要紧：**四个目标的真命令里抽 `-W*`，只有链接器用的 `-Wl,`，
+`CMakeLists.txt` 里也没有 `add_compile_options`** ⇒ 上一节那条"全仓 0 warning"的准确读法是
+**「在只要求 GCC 默认诊断的前提下 0」，不是"代码干净"**。同一条清单也不是死的：零 `-W` 条件下它照样抓到
+我种进去的未知转义（那属默认诊断）⇒ 上限=默认开的那部分，写清楚了才不会被下一个人当"全量已清"。
+
+第二句是射程：`-fsyntax-only` 不走 codegen ⇒ 只在生成阶段报的那类（典型 `-Wmaybe-uninitialized`）**不在内**。
+
+两条落法（都不重跑那 130s）：① 头部固定印 `warning 开关=…` 与 `适用域=…` 两行；② 抬上限不需要动构建——
+`--extra-w "-Wall -Wextra"` 只加在**本工具自己拼的命令**上，`build/` 与 `CMakeLists.txt` 一字不改；
+**默认不开**（不开才与历史清单可比），也**本笔没跑**（那是"要不要引入 -Wall 语境"的决定，属主控/用户，
+而且第一次开必然冒出一批旧 warning，属"当场变红的门交回他定"）。
+`--verify` 的归一化里把这两行排除在外：它们是静态射程说明、不来自测量，改它们不该逼一次全量重跑；
+真正参与比对的仍是计数行、类别直方图与逐条清单。本轮**没有**重跑 `--verify`（成本 130s，主控明令不为此重跑）。
