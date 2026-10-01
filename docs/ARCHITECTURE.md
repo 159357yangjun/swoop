@@ -36,7 +36,7 @@
 （2026-09-29 复核曾发现这半句不成立：阶段 1 把 `task_list_model` 搬进 `model/` 之后，
 `src/model/task_list_model.cpp` 仍 `#include "app_icons.h"`，是一条真实的 L1 → L4 反向依赖。
 **该条已按 (a) 修掉**（`d7a89ca`：模型只发 `FileTypeRole`，图标在 gui 层的 `FileTypeIconDelegate` 查表），
-现在这条结论由 `tools/lint_layering.py` 持续守着（接在 CI 第一步，越界即红）。详见 §7 第 7 条。）
+现在这条结论由 `tools/lint_layering.py` 守着（**入口已接在 CI，未执行过** —— 见 §7「CI 执行状态」）。详见 §7 第 7 条。）
 真正的结构性问题不是方向，而是**①上帝类（main_window 承担了应用编排）②文件归位错误③死代码入编④构建清单重复**。
 
 ### 1.2 边界违规（文件摆错层）
@@ -63,7 +63,7 @@
 
 这一节存在的理由：仓里有**读起来像活的、其实一行都不进编译**的文件，也有**五份名字像新旧版、其实是并存分派**
 的文件。以前"哪份是活的"只能靠反推 `CMakeLists.txt` 得出 —— 没登记、没门。现在登记在这里，旁边就是复算命令，
-不一致由 `tools/live_roster.py` 报红（已接进 CI）。**列名与「类别」四个取值是门的解析锚点，改表必须同批改门。**
+不一致由 `tools/live_roster.py` 报红（**入口已接 CI，未执行过**，见 §7「CI 执行状态」）。**列名与「类别」四个取值是门的解析锚点，改表必须同批改门。**
 
 未编译集的复算命令（原样可跑，输出应当与下表 `未编译` 桶逐字相同）：
 
@@ -254,7 +254,7 @@ python tools/live_roster.py
 - `protocols` 补 `FtpDownloader`/`BtDownloader`（需 vcpkg 依赖，见 REFACTOR_PLAN 务实调整）
 - `storage` 由 JSON 切 SQLite（历史库已在用 Qt Sql）
 - 日志 `logger.h` 增加级别/过滤/文件落盘（替代散落的 `qDebug`）
-- CI：`.github/workflows/build.yml`（CMake + Ninja 构建 + 引擎自测）
+- CI：工作流文件名以现算为准 —— `ls .github/workflows/` 当前只有 `ci.yml` 与 `release.yml`，**没有 `build.yml`**（本行原写 `build.yml`，是找不到的名字，2026-09-30 更正）。其中"引擎自测入闸门"这半句已落地（`ci.yml` 第 9 步，入口存在、**未执行过**，见本节末「CI 执行状态」）；剩下的候选是给三道文本门加覆盖率类检查。
 
 ---
 
@@ -642,7 +642,7 @@ LAYER_GATE_RC=0
 ```
 第一版门曾报 6 条，多出的 5 条 `app→protocols` 是**我的数字比较比文档更严**（§2.1 明文允许
 L2 依赖「L3（类型）」），不是真越界；许可对登记在 `SANCTIONED` 并用 `--count-allowed` 逐条打印，
-不做静默豁免。接进 CI 的第一步（在工具链之前，一行文本就能判），yml 里留了配置例外说明。
+不做静默豁免。入口已接在 CI（工具链之前，一行文本就能判），yml 里留了配置例外说明；**该步从未在 runner 上执行过**。
 
 **代码**：`TaskListModel` 新增 `FileTypeRole`（第 0 列返回 `detectFileType` 的 int），
 删掉 `Qt::DecorationRole` 那一支；`AppIcons::fileTypeIcon` 改收 `FileType`；
@@ -654,7 +654,7 @@ DecorationRole」时才置它。所以第一版编译过、`initStyleOption` 确
 `iconNull=0 deco=16x16`）、退出码也 0，界面上文件名列的图标却**全没了**（文字左移到图标位）。
 必须连 `features |= HasDecoration` 与 `decorationSize = icon.actualSize(...)` 一起补。
 
-**测具**（`IDM_FILEICON_PROBE`，第一版 5 条、同日补到 8 条，已接进 CI 的 UI 探针闸门；
+**测具**（`IDM_FILEICON_PROBE`，第一版 5 条、同日补到 8 条，入口已接进 CI 的 UI 探针闸门、**该探针从未在 runner 上跑过**（见本节末「CI 执行状态」）；
 接进去之后闸门是 15 个模式共 62 条）：
 [3] 的判法是「装生产委托的单元格」与「模型直接给 DecorationRole 的控制表格」**逐像素相同**——
 控制表格复刻的正是改前那条通路，所以这条相等就是"用户看到的没变"，且不依赖 PNG 金样。
@@ -757,7 +757,9 @@ sha256 由 `cc5b2cc6631f` 回到 `c4632d38b6b5`）后 `GREEN_EXIT=0`。
 
 ### 未开工，入参写定于 2026-09-30 —— D 段要量的不是「总等待」，而是「这一轮的时间是谁花的」
 
-**今日状态**：`ahead 24`、`contrast_matrix` 的「OK 不可信」横幅**已摘**（红演示见下）、
+**今日状态（`ahead` 是活数字，别信字面量）**：现测以
+`git log origin/master..HEAD --oneline | wc -l` 为准（2026-09-30 主控巡视那轮 = 30，本笔提交后会变 31 ——
+原写死的 `ahead 24` 就是这类会随交接传下去的陈旧数，已删）；`contrast_matrix` 的「OK 不可信」横幅**已摘**（红演示见下）、
 `?? idm-next-glass-ui.html` 等用户出清单批（未动未删）、不 push／不 tag／不改版本号。
 
 **只读代码得到的三句**（`src/app/ipc_server.cpp`）：
@@ -818,7 +820,7 @@ sha256 由 `cc5b2cc6631f` 回到 `c4632d38b6b5`）后 `GREEN_EXIT=0`。
 名单落在 §1.3，判据按用户给的条件：**表旁边就是可跑的复算命令，且"表里列的未编译集 == 命令算出的集"，不一致就红。**
 
 三笔：`6421a66`（§1.3 表 + `tools/live_roster.py` + `tools/mutation_fixture_live_roster.py` + 夹具登记）、
-`4ffeffa`（CI 第 3 步）、本笔（台账）。门与表放在同一笔里，是为了不留下"门红着提交"的中间状态。
+`4ffeffa`（CI 第 3 步的**入口**，该步未执行过，见下「CI 执行状态」）、本笔（台账）。门与表放在同一笔里，是为了不留下"门红着提交"的中间状态。
 
 **先红后绿（原文）**：
 
@@ -870,4 +872,19 @@ M6 依据列删符号名 BASIS、M7 整表被 HTML 注释藏起 ANCHOR、M8 开�
 验证：`live_roster` EXIT=0、`lint_layering --count-allowed` EXIT=0（210 条 include，反向 0，许可 10 条 =
 app→gui 5/5 + app→protocols 5/5）、PyYAML 解析 ci.yml 通过（windows-build 16 步，新步为第 3 步）、
 夹具 10/10 且还原干净。本轮没动任何 C/C++ 源文件 ⇒ 没有新的 `Building CXX object` 行可贴，UI 探针套件不重跑。
+
+### CI 执行状态（2026-09-30 主控巡视时核，写在这里防止被读成「CI 保住了」）
+
+**判据（一条命令现算，别信本文件里任何写死的 ahead）**：
+`git log origin/master..HEAD --oneline | wc -l` = 本轮实测 **30**，`origin/master = 4d7c4ab`。
+
+- **入口已接、未执行过**：分层门（`46461b4`）、`IDM_FILEICON_PROBE`（`d7a89ca`）、名单门 `live_roster`
+  （`6421a66` + `4ffeffa`）——这三件全在**未推的 30 笔里**，所以它们**一次都没在 runner 上跑过**。
+  文档/提交信息里凡是读起来像"CI 会拦住"的措辞，一律按「入口已接，未执行过」理解。
+- **确实执行过的**：UI 探针闸门与引擎自测这**两步本身**在 `90ac237`（已在 `origin/master`）那一轮
+  runner 上按 step-level conclusions 核实为 success —— 但那时探针名单是 14 模式 / 54 条，
+  不含 FILEICON，也不含上面三道门。**"这一步曾成功"不等于"这一步现在的内容曾成功"。**
+- 本地已跑的等价验证（可复算，见上"验证"段）：两道门 + 夹具 + PyYAML。**这只证明脚本本身，不证明流水线。**
+- **要把这三道门变成被验证的闸门，需要用户单独授权一次 push**（云端执行不是我能启动的动作）。
+
 
