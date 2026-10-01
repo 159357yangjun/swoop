@@ -1,0 +1,53 @@
+# MC-3 第 3 步：改完之后仍有两面红 —— 原文归档（产品代码随后已回退到 HEAD）
+
+跑的是**改过的**引擎：本轮真重编（`Building C object ... src/core/download_core.c.obj`，非 `no work to do`）。
+T3_start=2026-10-01 03:47:34 -0400 ｜T3_end=2026-10-01 03:48:59 -0400
+SELFTEST_RC=4 ｜结果：166 通过，4 失败 ｜FAIL_rows=4 ｜STATE_CLAMP_rows=0
+exe_mtime=2026-10-01 03:47:18.395190200 -0400 ｜exe_sha12=6c159dc923cd
+（对照基线：改前 165/5，三条 P0 红逐字见 docs/p0-red-baseline-2026-10-01.txt:10-12）
+本轮源日志（带时刻戳，不再用固定名）=C:/Users/yyyy/AppData/Local/Temp/idm-probes/p0-runs\selftest-1001-034730.log
+
+## 结论：落点不够。三条红里只有一条能被"load 时夹"关掉
+
+- **转绿的那条**：`[33]`B 跨进程（子进程真的走 `dlmgr_load_state`）。
+- **仍然红的两条**：`[32]`B 截短、`[32]`C 删除 —— 它们是**同进程内的暂停→续传**，
+  被信的那份 `done=1` 在**内存里的 task 结构**上，根本不经过 load_state；在盘上那份 `tasks.json` 里
+  `chunks_done=0`、`downloaded=0`（正是 #17 那条：进度字段恒为 0）。⇒ 在 load 边界夹，
+  夹到的是"一份本来就什么都没声称"的状态，**结构上夹不到害人的那一份**。
+- `STATE_CLAMP_rows=0` **不能**读成"夹没触发"：测具只在失败行里打印 `error_msg`，通过行不印 ⇒
+  这是测具的盲区，也正是前置② 还没装的原因（断言要长在引擎自己写出的 `error_msg` 上，且必须在
+  绿的那一侧也看得见一次读数）。
+
+## 逐字输出（本轮真产物，非转述）
+[32] 重启后带进度恢复（面 A 正常 / 面 B 截短 / 面 C 删 .idmtmp）
+  [FAIL] 暂停发生在中途，且状态里带着非零进度  -> downloaded=0 chunk_count=3 chunks_done=0 静默=1 状态文件里的最大写偏移=8388608（期望 >0 且 <12582912）
+  [FAIL] save 写出的状态文件确实带着分片进度（面 A/B/C 共同前提）  -> save 返回=0 文件字节=800 里有 id=1 chunks 带进度=0
+    [读数] 面A｜正常恢复（盘没被动过）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=(空) Range=24 最大写偏移=8388608｜兜底=不涉及（盘未动）
+    [读数] 面B｜截短 .idmtmp（r+b 会成功 ⇒ 未触发兜底）｜status=3 成品=12582912/12582912 内容=0（1对 0错位 -1长度错 -2无文件） 首个错位偏移=4096 错位字节=9395506 error_msg=(空) Range=12 最大写偏移=9437184｜兜底=未触发（文件存在，r+b 成功）
+  [FAIL] 面 B：截短后不得静默把坏内容报成完成  -> status=3 成品=12582912 内容=0 error_msg=(空)（三者同时「报完成 + 尺寸对 + 内容错 + 无错」=静默产出坏文件）
+    [读数] 面C｜删掉 .idmtmp（r+b 必失败 ⇒ 真走 w+b 兜底）｜status=3 成品=12582912/12582912 内容=0（1对 0错位 -1长度错 -2无文件） 首个错位偏移=1 错位字节=9399585 error_msg=(空) Range=12 最大写偏移=9437184｜兜底=已触发（文件不存在 ⇒ w+b 新建）
+  [FAIL] 面 C：删掉 .idmtmp 后不得静默把坏内容报成完成  -> status=3 成品=12582912 内容=0 error_msg=(空)（三者同时「报完成 + 尺寸对 + 内容错 + 无错」=静默产出坏文件）
+[33] 真·跨进程重启（第二个进程只有状态文件与盘，没有内存态）
+[子进程] pid=12284 exe 自己拼出来的路径=C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_ok.bin
+[子进程] load_state(「C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_ok.json」)=0
+[子进程] 载入后队列条数=2
+[子进程] 第0条 id=9127 file=「cap1.bin」 size=12582912 downloaded=0 status=5 chunk_count=3
+[子进程] 第1条 id=9133 file=「s2_ok.bin」 size=12582912 downloaded=9437184 status=2 chunk_count=3
+[子进程] 动手前盘上：.idmtmp=12582912 成品=-1（-1=不存在）state 里记的 size=12582912
+[子进程] 结局：wait=0 status=3 成品=12582912/12582912 内容比对=1（1对 0错位 -1长度错 -2无文件） 首个错位=-1 错位字节=0 error_msg=(空)
+[子进程] 结论：问题数=0（退码就是这个数）
+[子进程] pid=18644 exe 自己拼出来的路径=C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_mm.bin
+[子进程] load_state(「C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_mm.json」)=0
+[子进程] 载入后队列条数=2
+[子进程] 第0条 id=9127 file=「cap1.bin」 size=12582912 downloaded=0 status=5 chunk_count=3
+[子进程] 第1条 id=9134 file=「s2_mm.bin」 size=12582912 downloaded=0 status=2 chunk_count=3
+[子进程] 动手前盘上：.idmtmp=-1 成品=-1（-1=不存在）state 里记的 size=12582912
+[子进程] 结局：wait=0 status=3 成品=12582912/12582912 内容比对=1（1对 0错位 -1长度错 -2无文件） 首个错位=-1 错位字节=0 error_msg=(空)
+[子进程] 结论：问题数=0（退码就是这个数）
+== 结果：166 通过，4 失败 ==
+
+## 已执行的回退
+
+`git checkout -- src/core/download_core.c` 回到 HEAD（`0b076e2`），随后重编一次让 build/ 里的二进制
+与 HEAD 源码一致（否则下一个会话会把"我改过的那版"的行为当成现行）。
+未提交任何产品代码；本文件与 `tools/p0_rerun.sh`（带时刻戳输出的重跑器）是本轮留下的全部实物。
