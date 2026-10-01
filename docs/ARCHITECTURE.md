@@ -1546,3 +1546,22 @@ clamp 与 chunk-granular 都随缺口线性放大。
    "为什么 `result.bytes_written` 累加不到 X 的格子"以外去找（比如读的是不是同一个 `g_tasks` 实例/
    两个数组之间的映射）。
 测具位置：`tools/engine_selftest.c` 里新开一节即可，`p0_rerun.sh` 不用改（它跑的就是全量）。
+
+
+**[35] 探针跑过两轮，结论是"未决"，而且我自己找到了它未决的原因（07:10 交）**
+判据是"删掉排在前面、`worker_alive==0` 的空闲任务（`dlmgr_remove` 因此走 `detach_slot` 的 memmove 分支）
+之后，正在跑的任务的 `downloaded` 必须继续前进"。两轮读数：
+- 第一轮 `downloaded 2,097,152 -> 3,145,728` ⇒ 前进了（假设不支持）；同轮我原先的"文件必须增长"判据
+  把这一轮误判成"未决"——**那是我的代理判据坏了**：多路 Range 并行写先 seek 到高偏移，`.idmtmp` 首采
+  就等于全长 `41,943,040`，它对"有没有在前进"零信息。已把长度从判据里删掉，只印出来做对照。
+- 第二轮（判据修正后）`downloaded 4,194,304 -> 4,194,304` ⇒ **冻住**，形状与假设一致。
+
+**但这轮红我不留在仓里冒充结论**，因为它和"下载已经完成所以不再前进"这两种成因在我现有的读数量下**分不开**
+——详情行里只有 `downloaded` 与 `.idmtmp` 两个数，没有 X 的 `status`/`chunk_count`/`chunks_done`。
+⇒ 已 `git checkout -- tools/engine_selftest.c` 把探针退回（`REBUILD_RC`/`exe_sha12` 见上），
+仓库回到 `173/2` 的形状，**不带着一条解释不清的红**。
+
+**下一轮要加的量（三个，缺一不足以判）**：详情里同印 X 的 `status`、`chunk_count`、`chunks_done`；
+判据改成条件式——`status` 仍是 RUNNING/PAUSED（未到终态）而 `downloaded` 不变 ⇒ 成立；
+`status==3` ⇒ 本轮未决、要求重跑或把 URL 换成 `/huge.bin` 之外的更大目标。
+两个数都要印，因为这条假设的预测是"**冻结**"，而完成也会造成冻结。
