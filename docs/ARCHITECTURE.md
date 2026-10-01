@@ -1415,3 +1415,25 @@ clamp 与 chunk-granular 都随缺口线性放大。
   代价是补拉量必然大于 0 —— 语义上就该如此。
 - **B 桶**（`tmp 缺 + 成品也不在`）⇒ `clamp_refetch_bytes == file_size`（全量重拉，夹具现成）。
 ① 在 A'/B 长出来之前仍按**不占功**写，不进"两面都有证人"。下一轮顺序：A 桶 → A' 桶 → 完成路径 → MUT-A' 复跑。
+
+
+### 2026-10-01 05:0x（第 12 条）— A 桶夹具施工图（只写图，不写代码：本轮剩下的量不够走完那条链）
+
+要补的是 `tools/engine_selftest.c` 里一面新夹具。三件要紧的：
+
+1. **读数时刻**必须在 `dlmgr_load_state()` 之后、任何 `dlmgr_start()` 之前 —— 那是调用点① 唯一的证人时刻。
+   之前 `[32]`/`[33]` 三面都调了 start，所以②必然先执行，①因此无牙（MUT-A 与不摘逐字相同）。
+2. **两面**：
+   - **A 桶（不误报）**：手写 state，3 片全 `"done":1`、`"downloaded"` 写整片长；**成品 `filename` 存在且长度 == `"size"`**，
+     `.idmtmp` **不存在** ⇒ 断言 `clamp_chunks==0 && clamp_refetch_bytes==0 && status==COMPLETED`。
+     它钉住主控点名的衍生风险："盘比 state 多/相等"绝不能判成数据丢失、更不能整份重下。
+   - **A″ 桶（① 的牙）**：同一份 state，成品**截半**（或成品与 tmp 都不在）⇒ 同一时刻必须读到
+     `clamp_refetch_bytes>0` 且等于缺口、`status != COMPLETED`。
+3. **判别式与出口**：把①摘掉（`if (0)`）⇒ A″ 必须红、而 `[32]`/`[33]` 照旧全绿（②兜住了它们）。
+   若 A″ 摘① 仍不红 ⇒ **摘掉①**，不留第二处无牙的护栏；不许为了让它存在而补判据。
+
+键名与签名都是这轮从盘上读的，不是记忆：状态文件吃的键是 `"id":`/`"size":`/`"downloaded":`/`"status":`/`"chunks":[`
+（`download_core.c:2049/2063/2067/2071/2080` 处的 `strstr(p, "\"key\":")`），片内是 `"start"/"end"/"downloaded"/"done"`；
+测具用 `static void check(const char *what, int ok, const char *detail)`（`engine_selftest.c:35`）与既有的
+`outdir/path/tmpp/d` 缓冲。夹具**必须自己删干净产物**（`clean_outputs()` 的名单要加新文件名，这一条我已经踩过一次：
+名单漏了新文件 ⇒ 采到的 `.idmtmp` 不是引擎那条路径 ⇒ 整轮结论作废）。
