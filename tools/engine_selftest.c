@@ -2859,6 +2859,93 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ── [34] A 桶 / A″ 桶：给调用点① 造它唯一的证人时刻 ──
+     * 读数必须在 `dlmgr_load_state()` 之后、任何 `dlmgr_start()` 之前 —— [32]/[33] 都调了 start，
+     * 续传入口②必然先执行，所以它们**证不了①**（MUT-A 实测：摘① 与不摘逐字相同）。
+     * 这两面是①的第一批证人；摘掉① 时 A″ 必须转红。
+     * 产物在本块内自删，块开头也先删一次 ⇒ 上一轮中途崩掉也不会脏这一轮。 */
+    {
+        char root34[MAX_PATH + 8], j34[MAX_PATH + 48], f34[MAX_PATH + 48], t34[MAX_PATH + 48];
+        char js34[1400], d34[240];
+        static char zbuf34[65536];
+        const long long TOT34 = 12582912LL;          /* 与夹具里 12MiB 成品同长 */
+        const long long SPAN34 = TOT34 / 3;          /* 3 片，整片长 */
+        DWORD attr34;
+        FILE *fp34;
+        TaskInfo i34;
+        int bkt34, rc34, want_chunks34;
+        long long want_refetch34, len34, put34;
+
+        snprintf(root34, sizeof(root34), "%s", outdir);
+        for (bkt34 = 0; bkt34 < 2; bkt34++) {
+            const char *nm34 = bkt34 ? "b34_mm.bin" : "b34_ok.bin";
+            snprintf(j34, sizeof(j34), "%s\\b34_%s.json", root34, bkt34 ? "mm" : "ok");
+            snprintf(f34, sizeof(f34), "%s\\%s", root34, nm34);
+            snprintf(t34, sizeof(t34), "%s.idmtmp", f34);
+            utf8_delete(j34); utf8_delete(f34); utf8_delete(t34);
+
+            /* state：3 片全部声称 done=1、downloaded=整片长；任务本身声称已完成(status=3) */
+            snprintf(js34, sizeof(js34),
+                "{\"tasks\":[{\"id\":7341,\"url\":\"http://127.0.0.1:1/big.bin\","
+                "\"file\":\"%s\",\"dir\":\"%s\",\"size\":%lld,\"downloaded\":%lld,\"status\":3,"
+                "\"chunks\":["
+                "{\"start\":0,\"end\":%lld,\"downloaded\":%lld,\"done\":1},"
+                "{\"start\":%lld,\"end\":%lld,\"downloaded\":%lld,\"done\":1},"
+                "{\"start\":%lld,\"end\":%lld,\"downloaded\":%lld,\"done\":1}]}]}",
+                nm34, root34, TOT34, TOT34,
+                SPAN34 - 1, SPAN34,
+                SPAN34, 2 * SPAN34 - 1, SPAN34,
+                2 * SPAN34, 3 * SPAN34 - 1, SPAN34);
+            fp34 = fopen(j34, "wb");
+            if (!fp34) { check("[34] 状态文件写得出来", 0, j34); continue; }
+            fwrite(js34, 1, strlen(js34), fp34);
+            fclose(fp34);
+
+            /* A 桶：成品**完整**(长度==size)、`.idmtmp` 不存在 ⇒ 盘支持 state 的全部声称。
+             * A″ 桶：成品只有**前一半** ⇒ 后半段的 done=1 被盘否证。 */
+            len34 = bkt34 ? TOT34 / 2 : TOT34;
+            put34 = 0;
+            fp34 = fopen(f34, "wb");
+            if (!fp34) { check("[34] 成品写得出来", 0, f34); continue; }
+            while (put34 < len34) {
+                size_t n34 = (size_t)((len34 - put34 > (long long)sizeof(zbuf34))
+                                      ? sizeof(zbuf34) : (size_t)(len34 - put34));
+                if (fwrite(zbuf34, 1, n34, fp34) != n34) break;
+                put34 += (long long)n34;
+            }
+            fclose(fp34);
+            want_refetch34 = bkt34 ? (TOT34 - len34) : 0;
+            want_chunks34 = bkt34 ? 2 : 0;      /* 半份 ⇒ 片1 被截 + 片2 全无 */
+
+            rc34 = dlmgr_load_state(j34);
+            memset(&i34, 0, sizeof(i34));
+            if (dlmgr_get_task_info(7341, &i34) != 0) {
+                check("[34] load 之后按 id 读得到该任务", 0, j34);
+            } else if (bkt34 == 0) {
+                snprintf(d34, sizeof(d34),
+                         "clamp_chunks=%d clamp_refetch=%lld status=%d（期望 0/0/3=完成）",
+                         i34.clamp_chunks, (long long)i34.clamp_refetch_bytes, i34.status);
+                check("A 桶：成品完整 + .idmtmp 缺失 ⇒ 引擎**不误报**、也不许整份重下",
+                      i34.clamp_chunks == 0 && i34.clamp_refetch_bytes == 0 && i34.status == 3, d34);
+            } else {
+                snprintf(d34, sizeof(d34),
+                         "clamp_chunks=%d clamp_refetch=%lld（期望 %d/%lld）status=%d（期望 !=3）",
+                         i34.clamp_chunks, (long long)i34.clamp_refetch_bytes,
+                         want_chunks34, (long long)want_refetch34, i34.status);
+                check("A″ 桶：成品只剩前半 ⇒ ① 在 load 当场报出非零缺口并收回『已完成』",
+                      i34.clamp_chunks == want_chunks34 &&
+                      i34.clamp_refetch_bytes == want_refetch34 && i34.status != 3, d34);
+            }
+            attr34 = GetFileAttributesA(t34);
+            printf("    [34 读数] %s｜盘上成品=%lld｜load_rc=%d｜%s｜.idmtmp=%s\n",
+                   bkt34 ? "A″" : "A", (long long)len34, rc34, d34,
+                   (attr34 == INVALID_FILE_ATTRIBUTES) ? "不存在(与夹具一致)" : "存在(夹具没料到的)");
+            fflush(stdout);
+            dlmgr_remove(7341);
+            utf8_delete(j34); utf8_delete(f34); utf8_delete(t34);
+        }
+    }
+
     dlmgr_destroy();
     printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
 
