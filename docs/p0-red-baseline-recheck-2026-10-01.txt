@@ -58,7 +58,8 @@ bash "C:/Users/yyyy/AppData/Local/Temp/idm-probes/2026-09-30/loop-evidence/s0_ru
 
 1. `docs/p0-red-baseline-2026-10-01.txt:2` 那句复算命令**反斜杠被写入时的 shell 吃掉**了
    （盘上读回来是 `%TEMP%-idm-probes6-09-30\loop-evidence\s0_run.sh`）⇒ 那行照抄不可跑。
-   正确形式在 `docs/ARCHITECTURE.md` §7 第 1221 行，本文件第 5 行的代码块是第三次写它。
+   正确形式就是本文件「复算命令」那一节的代码块（§7 第 3 步第 1 项现在只留"已完成＋会覆盖日志"的警告，
+   不再含命令）。这里原来写的是两处**行号**，两处都已漂——写行号引用等于给自己埋雷，改按节名引。
 2. 等式**没有随仓的生成器**：`tools/` 里不存在任何解析器（`ls tools/` 可核），当时是 Bash 里的一次性
    inline python。⇒ 制品里的算术行属于"产物里录了、仓里没有重算入口"的数字。本轮我已把算法逐字写进
    上面第 2 节（`zero = (L-1-first)//251+1`，`first=(251−start)%251`），下一轮要么落成 `tools/` 脚本，

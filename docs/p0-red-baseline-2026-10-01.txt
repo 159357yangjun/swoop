@@ -25,7 +25,8 @@ preflight_listening=0 ｜after_start_listening=1 ｜T3_start=2026-10-01 01:41:11
 
 1. **第 2 行的复算命令不可照抄**：写入它的 shell 吃掉了反斜杠，盘上这行读回来是
    `%TEMP%-idm-probes6-09-30\loop-evidence\s0_run.sh`。可跑的形式在
-   `docs/p0-red-baseline-recheck-2026-10-01.txt` 的代码块与 `docs/ARCHITECTURE.md` §7 第 8.1 条。
+   `docs/p0-red-baseline-recheck-2026-10-01.txt`「复算命令」那一节的代码块
+   （`docs/ARCHITECTURE.md` §7 第 8.1 条是这件事长出的规矩，不含命令本身）。
 2. **第 15–17 行三行算术：无仓内生成器，不可复算**。当时是 Bash 里的一次性内联 python，
    `tools/` 下不存在任何解析器（`ls tools/` 可核）。我不伪造一个生成器的名声；算法已逐字写进
    复算制品第 2 节（`zero=(L-1-first)//251+1`，`first=(251−start)%251`，`pred=L-zero`）。
