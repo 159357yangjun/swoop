@@ -87,6 +87,9 @@ typedef struct {
      * removed = 1 表示调用方已请求删除，等最后一个线程退出时再由它就地摘除本槽位。 */
     int         worker_alive;
     int         removed;
+    /* 已请求摘除、但当时**还有别的任务在跑** ⇒ 不能 memmove（会把别人的槽位挪走，而他们的线程正持着指针）。
+     * 置 1 后由最后一个退出的工作线程统一清扫。见 download_core.c 的 detach_slot/sweep_pending_detach_locked。 */
+    int         pending_detach;
     /* 有线程在跑时收到「重新开始」→ 置位。等线程全部退出后再走一遍重启流程，
      * 避免出现两组线程同时写同一个 .idmtmp 的场面。 */
     int         restart_pending;

@@ -697,9 +697,30 @@ static void advance_wanted(void) {
 /* 就地摘除某个槽位（memmove 保序）。**调用者必须已持有 g_lock**，
  * 且必须确认该槽位没有活动线程（worker_alive == 0）——有线程时挪动槽位会让
  * 线程手里的指针指向别的任务。 */
+/* 除 `self_id` 外是否还有任务的工作线程活着。调用者必须已持有 g_lock。
+ * 这是"能不能安全 memmove"的唯一判据：memmove 会把后面的槽位整体前移，
+ * 而那些槽位可能正被别人的线程以指针形式持有（跨任务污染，且无法事后察觉）。 */
+static int any_worker_locked(int self_id) {
+    for (int i = 0; i < g_task_count; i++) {
+        if (g_tasks[i].task_id != self_id && g_tasks[i].worker_alive > 0) return 1;
+    }
+    return 0;
+}
+
 static int detach_slot(int task_id) {
     for (int i = 0; i < g_task_count; i++) {
         if (g_tasks[i].task_id == task_id) {
+            /* 延后压缩：还有别的任务在跑就不动数组，只登记待摘。
+             * 该槽在清扫前仍会被遍历到，但它的 `removed`/`TASK_CANCELLED` 早已由调用方置好，
+             * 语义与"被删但线程还没清空"的既有状态同形，不是新引入的行为面。 */
+            if (any_worker_locked(task_id)) {
+                /* 延后压缩，但**删除这件事当场生效**：不这么处理，GUI 点了"删除"会因为还有别的任务在跑而毫无反应。 */
+                g_tasks[i].pending_detach = 1;
+                g_tasks[i].removed        = 1;
+                g_tasks[i].status         = TASK_CANCELLED;
+                want_del_locked(task_id);
+                return 0;
+            }
             memmove(&g_tasks[i], &g_tasks[i + 1],
                     (size_t)(g_task_count - i - 1) * sizeof(DownloadTask));
             g_task_count--;
@@ -711,6 +732,20 @@ static int detach_slot(int task_id) {
         }
     }
     return 0;
+}
+
+/* 清扫所有 `pending_detach` 的槽位。只在"当前没有任何工作线程"时才真正压缩，否则继续等。
+ * 从后往前扫：一次 memmove 会让高下标整体左移，正向扫会作废手里的下标。
+ * 调用者必须已持有 g_lock，且**不再使用任何跨压缩的 DownloadTask 指针**（清扫会挪动数组）。 */
+static void sweep_pending_detach_locked(void) {
+    for (int i = g_task_count - 1; i >= 0; i--) {
+        if (i >= g_task_count) continue;                 /* 前面的压缩可能已缩短数组 */
+        if (g_tasks[i].pending_detach) {
+            int id = g_tasks[i].task_id;
+            g_tasks[i].pending_detach = 0;               /* 先清标记，避免 detach 再置回去 */
+            detach_slot(id);
+        }
+    }
 }
 
 /* 生效的每任务并发连接数：由「请求值」与「每服务器连接数上限」取小。
@@ -1367,6 +1402,14 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
      * 三个终态都要补：失败也算「这一个不再占位」，否则队列会卡死在半路。 */
     else if (st == TASK_COMPLETED || st == TASK_FAILED || st == TASK_CANCELLED)
         advance_wanted();
+
+    /* 本任务的线程已经全部退出 ⇒ 这里是安全压缩那些"被延后的摘除"的时机。放在函数最末是因为清扫会 memmove
+     * 整段数组，任何跨清扫继续持有的 DownloadTask* 都会指到别人身上。
+     * g_lock 可重入（CRITICAL_SECTION 按持有者计数），已持有时无害、未持有时自平衡。 */
+    EnterCriticalSection(&g_lock);
+    sweep_pending_detach_locked();
+    LeaveCriticalSection(&g_lock);
+
     return 0;
 }
 

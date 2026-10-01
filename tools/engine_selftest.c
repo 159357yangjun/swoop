@@ -3006,6 +3006,10 @@ int main(int argc, char **argv)
                      cc_after, cd_after, sz0, sz1);
             printf("    [35 读数] %s\n", d35); fflush(stdout);
             check("[35] 探针跑到非零起点（两面都必须有起点，否则差分无意义）", dl0 > 0, d35);
+            /* 这条才是牙：扰动之后记账必须继续前进。修之前这一条在 noop=0 面是假的
+             * （实档 `selftest-1001-075131.log`：起点 2,097,152、扰动后最大 2,097,152、前进=0），
+             * 两面都断言是因为对照面同样不该倒退——回归时无需知道跑的是哪一面。 */
+            check("[35] 扰动之后记账必须继续前进（修前 noop=0 面是 前进=0）", dl_max > dl0, d35);
             dlmgr_pause(id_run); Sleep(400); utf8_delete(p35f);
         }
     }
