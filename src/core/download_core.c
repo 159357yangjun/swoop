@@ -197,6 +197,76 @@ static int utf8_file_exists(const char *path) {
 #endif
 }
 
+/* 文件字节长度；不存在或取不到一律 0（调用方把 0 读成"盘不支持任何偏移"）。 */
+static int64_t utf8_file_size(const char *path) {
+#ifdef _WIN32
+    wchar_t wpath[1024];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!utf8_to_wpath(path, wpath, 1024)) return 0;
+    if (!GetFileAttributesExW(wpath, GetFileExInfoStandard, &fa)) return 0;
+    if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return 0;
+    return ((int64_t)fa.nFileSizeHigh << 32) | (int64_t)fa.nFileSizeLow;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+    return (int64_t)st.st_size;
+#endif
+}
+
+/* ── P0（MC-3）：把"进度声称"与盘上字节对账，两个调用点共用这一份 ──
+ * 调用点①=dlmgr_load_state（重启后，界面/report 立刻要说真话）；
+ * 调用点②=dlmgr_start 的续传入口（同进程暂停→续传时，被信的 done=1 活在内存里，
+ * 根本不经过 load_state —— 实测过：只加①的话 [32]B/C 两面照红）。
+ * 判据挂在 **done** 上：tasks.json 里 downloaded 恒为 0（#17），被信的是 done；
+ * 只夹 downloaded 等于没夹。backing 取 .idmtmp 与成品两条路径里更长的那条：
+ * 成品已 rename 到位、.idmtmp 已消失是正常终态（桶 A），不是数据丢失。
+ * `avail >= asserted` 一律保持不动 —— 盘比 state 多是常态，不许因此重拉。
+ * 需在 g_lock 内调用。 */
+static void verify_progress_against_disk(DownloadTask *t) {
+    char final_path[1024];
+    const char *sdir = t->save_dir[0] ? t->save_dir : g_cfg.default_save_dir;
+    int64_t backing, refetch = 0, dl_fix = 0, span, asserted, avail;
+    int n = 0, ci;
+
+    snprintf(final_path, sizeof(final_path), "%s\\%s", sdir, t->filename);
+    backing = utf8_file_size(t->tmp_path);
+    {
+        int64_t sf = utf8_file_size(final_path);
+        if (sf > backing) backing = sf;
+    }
+
+    for (ci = 0; ci < t->chunk_count; ci++) {
+        DownloadChunk *c = &t->chunks[ci];
+        span = (c->end >= c->start) ? (c->end - c->start + 1) : 0;
+        asserted = c->done ? span : 0;
+        if (c->downloaded > asserted) asserted = c->downloaded;
+        if (asserted <= 0) continue;
+        avail = backing - c->start;
+        if (avail < 0) avail = 0;
+        if (avail > span) avail = span;
+        if (avail >= asserted) continue;
+        refetch += asserted - avail;
+        dl_fix += c->downloaded > avail ? c->downloaded - avail : 0;
+        c->done = 0;      /* pool_worker 读它跳过整片 —— 关掉跳过才是重取 */
+        if (c->downloaded > avail) c->downloaded = avail;
+        n++;
+    }
+    if (t->chunk_count == 0 && t->downloaded > backing) {
+        refetch = t->downloaded - backing;
+        dl_fix = refetch;
+        n = 1;                       /* 不分片的单流任务：整条进度算一片 */
+    }
+    if (refetch > 0) {
+        t->downloaded -= dl_fix;
+        if (t->downloaded < 0) t->downloaded = 0;
+        /* 已报完成的任务被盘否证 ⇒ 退回暂停，让续传把否证掉的位重取，
+         * 而不是把坏成品留在盘上。能自愈，所以不是 FAILED。 */
+        if (t->status == TASK_COMPLETED) t->status = TASK_PAUSED;
+        snprintf(t->error_msg, sizeof(t->error_msg),
+                 "[STATE-CLAMP] 发现 %d 片进度被盘否证，重取 %lld 字节", n, (long long)refetch);
+    }
+}
+
 /* 目标名已存在时挑一个空闲名：`base (1).ext`、`base (2).ext` …最多试 999 次，
  * 全被占则退到 `base (YYYYMMDD-HHMMSS).ext`。原地改写 filename，并输出完整路径。
  * 返回 1 = 用了新名字，0 = 原名即可（或写入失败）。 */
@@ -1445,6 +1515,7 @@ int dlmgr_start(int task_id) {
      * 这里只做一件事：把状态从「暂停」改回来，旧线程在下一个块边界自己接着下；
      * 万一它们已经因为上次暂停提前收工，resume_pending 会让旧组的监督线程退出时
      * 补起新一代（见 start_task_threads 尾部的 resume_later）。 */
+    verify_progress_against_disk(t);   /* 调用点②：续传入口 —— 内存里那份 done=1 也得上盘核对 */
     if (t->worker_alive > 0) {
         t->status            = TASK_RUNNING;
         t->resume_pending    = 1;
@@ -2042,6 +2113,7 @@ int dlmgr_load_state(const char *json_path) {
         snprintf(t->tmp_path, sizeof(t->tmp_path), "%s\\%s.idmtmp",
                  t->save_dir[0] ? t->save_dir : g_cfg.default_save_dir,
                  t->filename);
+        verify_progress_against_disk(t);   /* 调用点①：state 的声称先跟盘对账 */
         t->progress_cb  = NULL;
         t->progress_ud  = NULL;
         t->complete_cb  = NULL;
