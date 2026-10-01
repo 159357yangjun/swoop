@@ -2463,6 +2463,7 @@ int main(int argc, char **argv)
              * ③有增长 ⇒ 那是"慢"，不是本案。分不开就把"分不开"当定案理由。**只印，不进判据。** */
             int smp = 0, smp_absent = 0, smp_zero = 0, smp_grew = 0;
             int net_smp = 0, conn_max = -1;
+            int first_get_at = -1, first_tmp_at = -1, dl_nonzero_at = -1;
             long long tmp_max = -2, tmp_last = -2;
             int st_min = 99, st_max = -1, def_max = -1, big_max = -1;
             long long fin_max = -2;
@@ -2482,6 +2483,9 @@ int main(int argc, char **argv)
                     if (cn > conn_max) conn_max = cn;
                     smp++;
                     if (bg >= 0) net_smp++;
+                    if (bg > 0 && first_get_at < 0) first_get_at = i;
+                    if (sz > 0 && first_tmp_at < 0) first_tmp_at = i;
+                    if (mid.downloaded > 0 && dl_nonzero_at < 0) dl_nonzero_at = i;
                     /* 同时采「成品路径」与引擎自己填的 filename：
                      * 桶1b 还剩两个候选——它写到别处(i)，还是写入与计数器解耦(ii)。
                      * 前者会让成品路径在窗口内就长起来，后者会让 filename 早已是正常值而两路都空。 */
@@ -2533,11 +2537,15 @@ int main(int argc, char **argv)
                     else
                         bucket = "分不开：采样存在但形状不干净";
                     printf("    [分桶] %s｜采样=%d 次(每100ms,分母) 从未创建=%d 全程0字节=%d 有增长=%d "
-                           "tmp最大=%lld status区间=[%d,%d](0排队/1下载中/2暂停) deferred最大=%d "
-                           "big.bin GET最大=%d conns最大=%d 网络采样数=%d 成品路径最大=%lld 引擎报的filename=「%s」 ⇒ %s\n",
-                           F32[f].tag, smp, smp_absent, smp_zero, smp_grew, tmp_max,
-                           smp ? st_min : -1, smp ? st_max : -1, def_max, big_max, conn_max, net_smp,
-                           fin_max, fn_seen[0] ? fn_seen : "(没填过)", bucket);
+                           "tmp最大=%lld 成品路径最大=%lld status区间=[%d,%d](0排队/1下载中/2暂停) "
+                           "deferred最大=%d GET首次非零=i=%d tmp首次>0=i=%d 计数器首次>0=i=%d "
+                           "GET最大=%d 网络采样数=%d conns最大=%d(探针自占约%d) filename=「%s」 ⇒ %s\n",
+                           F32[f].tag, smp, smp_absent, smp_zero, smp_grew,
+                           tmp_max, fin_max,
+                           smp ? st_min : -1, smp ? st_max : -1,
+                           def_max, first_get_at, first_tmp_at, dl_nonzero_at,
+                           big_max, net_smp, conn_max, 2 * net_smp,
+                           fn_seen[0] ? fn_seen : "(没填过)", bucket);
                 }
             }
             /* 等暂停真的收干净：状态到 2（已暂停）且 downloaded 连续两次采样不变。
