@@ -41,23 +41,36 @@
 
 ### 1.2 边界违规（文件摆错层）
 
-| 文件 | 现在位置 | 应是 | 性质 |
+| 原文件（阶段 1 之前） | 原违规 | 现在位置（2026-10-01 实测） | 状态 |
 |---|---|---|---|
-| `gui/web_server.{h,cpp}` | `src/gui/` | `src/web/` | Web 服务是**基础设施**，不是视图 |
-| `gui/task_list_model.{h,cpp}` | `src/gui/` | `src/model/` | 数据模型层 |
-| `gui/category_filter_proxy.{h,cpp}` | `src/gui/` | `src/model/` | 代理模型，数据层 |
-| `gui/task_group_proxy.{h,cpp}` | `src/gui/` | `src/model/` | 代理模型，数据层 |
-| `core/network.c` | `src/core/` | `src/core/legacy/` | WinHTTP 参考实现，未编译 |
-| `gui/glass_effect.{h,cpp}` | `src/gui/` | `src/gui/legacy/`（移出编译） | 停用功能留档 |
+| `gui/web_server.{h,cpp}` | Web 服务是**基础设施**，不是视图 | `src/web/web_server.{h,cpp}`；控制器在 `src/app/web_server_controller.{h,cpp}` | 已归位 |
+| `gui/task_list_model.{h,cpp}` | 数据模型层 | `src/model/task_list_model.{h,cpp}` | 已归位 |
+| `gui/category_filter_proxy.{h,cpp}` | 代理模型，数据层 | `src/model/category_filter_proxy.{h,cpp}` | 已归位 |
+| `gui/task_group_proxy.{h,cpp}` | 代理模型，数据层 | `src/model/task_group_proxy.{h,cpp}` | 已归位 |
+| `core/network.c`（WinHTTP 参考实现） | 未编译却躺在 `core/` 顶层，读起来像活的 | `src/core/legacy/network_winhttp.c` | 已归位（未编译，见 §1.3） |
+| `gui/glass_effect.{h,cpp}` | 停用功能留档 | `src/gui/legacy/glass_effect.{h,cpp}` | **半归位**：文件已移出编译，但 `src/gui/main_window.h:10` 仍 `#include "legacy/glass_effect.h"` |
 
-> ⚠️ 上面这张表是**阶段 1 之前的"现在位置"**，其中 6 行已经搬完，按字面读会走错目录。复算命令与结果
-> （2026-09-30 实测，全部 GONE ⇒ 6 行都已落地）：
-> ```bash
-> for p in src/gui/web_server.cpp src/gui/task_list_model.cpp src/gui/category_filter_proxy.cpp \
->          src/gui/task_group_proxy.cpp src/core/network.c src/gui/glass_effect.cpp; do
->     [ -f "$p" ] && echo "EXISTS $p" || echo "GONE   $p"; done
-> ```
-> 归位后的活路径见 §1.3。
+复算命令**两个方向都要成立**（新路径存在 **且** 旧路径不存在）：
+
+```bash
+for p in src/web/web_server.cpp src/model/task_list_model.cpp src/model/category_filter_proxy.cpp \
+         src/model/task_group_proxy.cpp src/core/legacy/network_winhttp.c src/gui/legacy/glass_effect.cpp; do
+    [ -f "$p" ] && echo "LIVE $p" || echo "★MISSING $p"; done
+for p in src/gui/web_server.cpp src/gui/task_list_model.cpp src/gui/task_list_model.h \
+         src/gui/category_filter_proxy.cpp src/gui/task_group_proxy.cpp src/core/network.c src/gui/glass_effect.cpp; do
+    [ -f "$p" ] && echo "★STILL-AT-OLD $p" || echo "GONE $p"; done
+grep -rn "legacy/glass_effect.h" src/ | grep -v "^src/gui/legacy/"
+```
+
+本轮实测：前一个循环六行全 `LIVE`，第二个循环七行全 `GONE`，最后一条 `grep` 命中 **1 行**
+（`main_window.h:10`）。那一条是这张表里唯一还开着的项，措辞要准：**不是"归位没做完"，是"include 没清"**——
+`main_window.cpp` 里 glass 符号命中 0，所以它是只声明未使用的残留；判"已移出编译"要看 `CMakeLists.txt`
+与当前 `build.ninja`，**不要看旧 `.obj`**（搬迁前的 `build/CMakeFiles/idm-next.dir/src/gui/glass_effect.cpp.obj`
+是遗留物，拿它当"仍在编译"的证据会得出反的结论）。
+
+> 这张表**是文档，不是门**：上面三条命令要人跑。`tools/live_roster.py` 只核 §1.3 那份"哪份是活的"名单
+> （它的解析锚点是列名与「类别」四个取值），**不核这张表的归位状态**。所以不许把 `live_roster OK`
+> 读成"1.2 的六行也验过了"。要升成门的形状与 §1.3 相同：判据从表里读、两个方向都断言、漂移即红。
 
 ### 1.3 哪一份是活的（名单 + 复算命令，漂移即红）
 
