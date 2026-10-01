@@ -256,6 +256,9 @@ static void verify_progress_against_disk(DownloadTask *t) {
         dl_fix = refetch;
         n = 1;                       /* 不分片的单流任务：整条进度算一片 */
     }
+    /* 每次核对都覆写（包括"一致"⇒ 归零），所以下一次续传不会留着上一次的读数冒充。 */
+    t->clamp_chunks = n;
+    t->clamp_refetch_bytes = refetch;
     if (refetch > 0) {
         t->downloaded -= dl_fix;
         if (t->downloaded < 0) t->downloaded = 0;
@@ -1694,6 +1697,8 @@ int dlmgr_get_task_info(int task_id, TaskInfo *info) {
         info->chunks_done = done;
         strncpy(info->error_msg, t->error_msg, sizeof(info->error_msg) - 1);
         info->error_msg[sizeof(info->error_msg) - 1] = '\0';
+        info->clamp_refetch_bytes = t->clamp_refetch_bytes;
+        info->clamp_chunks = t->clamp_chunks;
         /* 限流倒计时在这里读侧换算（写侧只记一次截止时刻）；向上取整，
          * 这样 Retry-After: 3 的第一格显示 3 而不是一上来就 2。 */
         info->throttle_http = t->throttle_http;
@@ -1743,6 +1748,8 @@ int dlmgr_get_task_infos(TaskInfo *out, int max_count) {
         out[i].chunks_done = done;
         strncpy(out[i].error_msg, t->error_msg, sizeof(out[i].error_msg) - 1);
         out[i].error_msg[sizeof(out[i].error_msg) - 1] = '\0';
+        out[i].clamp_refetch_bytes = t->clamp_refetch_bytes;
+        out[i].clamp_chunks = t->clamp_chunks;
         /* 必须与 dlmgr_get_task_info 同步填充：GUI 的 TaskInfo infos[128] 是栈数组，
          * 漏一个字段就是读未初始化内存。 */
         out[i].throttle_http = t->throttle_http;

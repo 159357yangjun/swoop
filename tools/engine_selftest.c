@@ -2663,11 +2663,30 @@ int main(int argc, char **argv)
              * 某个 chunk 边界 = 那里有个洞（兜底新建的空文件被 seek 写过去了）。 */
             printf("    [读数] %s｜%s｜status=%d 成品=%lld/%lld 内容=%d（1对 0错位 -1长度错 -2无文件）"
                    " 首个错位偏移=%lld 错位字节=%lld error_msg=%s Range=%d 最大写偏移=%lld"
+                   " 引擎自愈读数 clamp_refetch=%lldB clamp_chunks=%d"
                    "｜兜底=%s\n",
                    F32[f].tag, F32[f].what, st, fsz, FULL32, mc, bad0, bad_cnt,
                    has_err ? fin.error_msg : "(空)", ranges, maxoff,
+                   (long long)fin.clamp_refetch_bytes, fin.clamp_chunks,
                    f == 1 ? "未触发（文件存在，r+b 成功）" :
                    f == 2 ? "已触发（文件不存在 ⇒ w+b 新建）" : "不涉及（盘未动）");
+
+            /* 自我报告的断言必须长在**引擎自己写出的字段**上（主控批准的候选①：不被 attempt 清掉的计数），
+             * 不是测具的内容比对。三面各钉一次：盘没动 ⇒ 恒 0（不误报）；盘被截/被删 ⇒ 必须非零。
+             * 面 A 就是"A 桶"的语义（成品完整 ⇒ 盘支持 state 的全部声称）；
+             * 面 B 是"A' 桶"（只有前段被支持 ⇒ 计数非零且等于缺口）；面 C 是"B 桶"（整份都不在）。 */
+            if (f == 0) {
+                snprintf(d, sizeof(d), "clamp_refetch=%lld clamp_chunks=%d（盘没被动过 ⇒ 必须不误报）",
+                         (long long)fin.clamp_refetch_bytes, fin.clamp_chunks);
+                check("面 A：引擎不误报自愈（两个计数恒 0）",
+                      fin.clamp_refetch_bytes == 0 && fin.clamp_chunks == 0, d);
+            } else {
+                snprintf(d, sizeof(d), "clamp_refetch=%lld clamp_chunks=%d（盘被动过 ⇒ 必须报出非零）",
+                         (long long)fin.clamp_refetch_bytes, fin.clamp_chunks);
+                check(f == 1 ? "面 B：引擎自己发现 state 被盘否证（计数非零）"
+                             : "面 C：引擎自己发现 state 被盘否证（计数非零）",
+                      fin.clamp_refetch_bytes > 0 && fin.clamp_chunks > 0, d);
+            }
 
             if (f == 0) {
                 snprintf(d, sizeof(d), "status=%d 成品=%lld 内容=%d Range=%d", st, fsz, mc, ranges);

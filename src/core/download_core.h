@@ -121,6 +121,11 @@ typedef struct {
     int         throttle_http;   /* 触发等待的状态码（429/503…），0 = 无 */
 
     char        error_msg[256];
+    /* 自我报告：上一次 load/续传时，state 声称的进度有多少被盘否证（见 verify_progress_against_disk）。
+     * 不放在 error_msg 里，因为 error_msg 每次 attempt 开头会被清成空串（那是合理的局部修复，
+     * 不该为它破坏"自愈也要留下读数"）。自愈是**计数**，不是错误串。 */
+    int64_t     clamp_refetch_bytes;   /* 被盘否证、需重取的字节数；0 = 盘与 state 一致 */
+    int         clamp_chunks;          /* 被否证的片数；0 = 没有 */
 
     char        http_version[16]; /* 实际协商到的协议版本："HTTP/1.1" / "HTTP/2"（仅 HTTPS 可能 HTTP/2） */
 
@@ -246,6 +251,11 @@ typedef struct {
     /* 最近一次失败原因（引擎写入的中文描述，如「HTTP 404」「无法解析 URL」）。
      * 为空表示无错误记录。GUI 据此给出具体原因，而不是笼统的「请检查网络」。 */
     char    error_msg[256];
+    /* 自愈读数（引擎自己发现的证据，不是测具的外部比对）：
+     * 上一次 load/续传时 state 声称的进度有多少被盘上的字节否证、因此要重取。
+     * 面 A（盘没被动过）两值恒 0 —— 这条"不误报"与"报得出"同等重要。 */
+    int64_t clamp_refetch_bytes;
+    int     clamp_chunks;
     /* 服务器限流等待：还剩几秒会重试（0 = 没在等）。
      * 引擎里存的是绝对截止时刻，读的时候按引擎单调时钟换算成剩余秒数，
      * 于是 GUI 4Hz 每读一次就自动倒计时，不需要引擎持续推事件。
