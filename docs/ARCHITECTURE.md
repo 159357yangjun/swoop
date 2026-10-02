@@ -2172,3 +2172,46 @@ python tools/freshness_gate.py ; echo "rc=$?"                            # 本�
 **单实例门闩必须还给用户**，否则他自己打开 IDM Next 会交接到我这个用临时数据目录的实例上。
 取证件留在 `%TEMP%\idm-gui-215114\`。本轮重编：`idm-next.exe` `91de8e79e7ac`、`ui_snapshot.exe` `379411249120`；
 `engine_selftest.exe` 未动（`8af9e43168de`，它的输入集合不含本轮改的这些文件，门也据此判它 FRESH）。
+
+
+### 2026-10-01 22:4x（第 23 条）— 「大小」列的 "-" 查出**两个**缺陷：修了一个，另一个只登记不修
+第 22 条里我记了"已完成任务的大小列显示 `-`"。真去修的时候发现它是**两个独立缺陷叠在一起**，
+而且**我修的那个不是用户看到的那个**——这件事必须原样写下来。
+
+**D1（已修 + 已被探针钉住）：模型没有任何接口能回填文件大小**
+- `TaskListModel` 只有 `updateProgress(id, downloaded, speedBps)` 与 `setProgressPct`，**没有一处能改 `row.fileSize`**；
+- 更糟的是 `updateProgress` 的 `dataChanged` 只覆盖**第 2..5 列**（`task_list_model.cpp:219`）⇒ 第 1 列连重绘机会都没有。
+- 修：新增 `TaskListModel::setFileSize(id, bytes)`（值未变直接 return ⇒ 4Hz 不造成重绘风暴；
+  发了就覆盖**第 1..3 列**：大小 / 状态里的百分比 / 剩余时间），
+  `main_window.cpp` 的 `refreshFromEngine()` 里每 tick 在 `info.file_size > 0` 时回填一次。
+- 钉它的是新探针模式 **`IDM_SIZECOL_PROBE`**（5 条断言，实测全绿）：
+```
+[PASS] 建行时大小未知(-1)，第 1 列显示占位符（实测「-」）
+[PASS] setFileSize 之后第 1 列变成「1.0 MB」（实测「1.0 MB」）
+[PASS] 回填确实发了 dataChanged 且覆盖第 1 列（判定时刻次数=1 列 1..3）
+[PASS] 同值再回填不发重绘（4Hz 循环里不造成重绘风暴）
+[PASS] 状态列百分比跟着回填出现（前「下载中」后「下载中 (50%)」）
+```
+  **牙演示**：把 `setFileSize` 改成空操作（`if (true) return;`）⇒ 后 4 条 `[FAIL]`、模式退码 1；
+  还原后 `git hash-object src/model/task_list_model.cpp = af66f8a15a39108e35f0944f98b664d669137d0b` 与改前逐字相等。
+  第 5 条特意把 `progressPct` 设成 -1：模型优先用后端上报的百分比，不设就会把这条测成**假绿**。
+  新探针同时加进了 `ci.yml` 的 `PROBES` 名单（本机 `ui_probe_run.sh` 是从二进制里 `strings` 枚举的，自动就带上它）。
+
+**D2（查到、登记、本轮不修）：引擎在完成时根本不知道大小，于是把 -1 一路写进历史**
+真机复验（新二进制 `idm-next.exe 4a1503599f0a`，跑 `small.bin` 1MiB）：
+- 界面上「大小」列**仍然是 `-`**（截图核对），文件确实 1,048,576 字节；
+- 应用自己的 `history.db`：`('small.bin', -1, 'completed')` ⇒ **不是 GUI 丢的，是引擎给的 `file_size` 就是 -1**，
+  而且这个 -1 被持久化进了历史记录。
+⇒ 所以 D1 的修在真实链路上**暂时是惰性的**（它只在引擎报正数时起作用）。我不拿"D1 探针全绿"冒充"用户的问题修好了"。
+D2 的候选形状（写清楚，等下一轮按 TDD 做）：完成路径（`download_core.c:1333` 置 `TASK_COMPLETED` 处）
+在 `t->file_size <= 0` 时用**已经存在的** `utf8_file_size(final_path)` 回填，再写历史；
+但这条改的是**数据落盘路径的记账**，必须先有引擎自测的失败断言（例如"完成任务的 `TaskInfo.file_size`
+必须等于盘上文件长度，即使探测阶段没拿到 Content-Length"），看着它红，再改，再复跑 177 那条门。
+本轮剩余余量不足以安全走完"红→改→重编→全量复跑→归档"，**所以停在这里，不半途改 `src/core`**。
+
+**顺带两条实测教训（都是操作层面的）**
+1. 用 `Start-Process` 起 GUI 时**必须把 stdout 和 stderr 都重定向到文件**：只重定向 stderr 的那版启动脚本，
+   子进程继承了控制台工具的 stdout 管道 ⇒ 调用方一直等不到 EOF，命令被挪到后台（本轮撞到两次）。
+2. 用 URL 参数启动会走**默认保存目录**（`C:/Users/yyyy/Downloads`），`IDM_DATA_DIR` 只隔离数据/配置不隔离落盘位置
+   ⇒ 我造的两个测试文件（`big.bin` 12,582,912B、`small.bin` 1,048,576B，mtime 22:33/22:44 都核对过是自己的）
+   已删除；实例已 `taskkill`，服务器 `/_shutdown` 后端口监听数回 0。

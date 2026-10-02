@@ -944,6 +944,59 @@ int main(int argc, char** argv) {
                 && everyTypeHasIcon && typesDistinct && allNeverProduced && appIconOk) ? 0 : 1;
     }
 
+    /* ── 诊断模式：IDM_SIZECOL_PROBE=1 ──
+     * 「大小」列能不能被回填。由来：2026-10-01 真实 GUI 里一条**已成功下完 1MiB** 的任务，
+     * 大小列显示 "-"。追下去是两件事叠在一起：
+     *   ① 建行那一刻探测常常还没回 Content-Length（引擎给 -1），而模型**没有任何接口**能改 row.fileSize；
+     *   ② 就算改了，`updateProgress` 的 dataChanged 只覆盖第 2..5 列 ⇒ 第 1 列连重绘机会都没有。
+     * 五条断言各挡一种坏法：占位符没出现 / 回填不生效 / 生效但不发重绘 / 差量没做(4Hz 风暴) / 百分比不跟。
+     * progressPct 显式设 -1：模型优先用后端上报的百分比，只有它 <0 才按字节算——不设就会把第 5 条测成假绿。 */
+    if (qEnvironmentVariableIsSet("IDM_SIZECOL_PROBE")) {
+        TaskListModel m;
+        TaskRow r{};
+        r.id = 91; r.fileName = QStringLiteral("small.bin");
+        r.fileSize = -1; r.downloaded = 0; r.progressPct = -1;
+        r.state = 1; r.statusText = TaskListModel::stateText(1); r.speedBps = 0;
+        m.addTask(r);
+        const QString before = m.index(0, 1).data(Qt::DisplayRole).toString();
+
+        int paints = 0, firstCol = -1, lastCol = -1;
+        QObject::connect(&m, &QAbstractItemModel::dataChanged,
+                         [&](const QModelIndex& a, const QModelIndex& b, const QVector<int>&) {
+                             ++paints; firstCol = a.column(); lastCol = b.column();
+                         });
+        m.setFileSize(91, 1048576);
+        const QString after = m.index(0, 1).data(Qt::DisplayRole).toString();
+        const int paintsJudged = paints;      // 判据用的就是这一刻的计数，打印必须印它
+        const bool painted = (paintsJudged == 1) && firstCol <= 1 && lastCol >= 1;
+
+        m.setFileSize(91, 1048576);              // 同值再来一次：不该再发重绘
+        const bool quietOnSame = (paints == 1);
+
+        TaskRow r2{};
+        r2.id = 92; r2.fileName = QStringLiteral("half.bin");
+        r2.fileSize = -1; r2.downloaded = 524288; r2.progressPct = -1;
+        r2.state = 1; r2.statusText = TaskListModel::stateText(1); r2.speedBps = 0;
+        m.addTask(r2);
+        const QString stBefore = m.index(1, 2).data(Qt::DisplayRole).toString();
+        m.setFileSize(92, 1048576);
+        const QString stAfter = m.index(1, 2).data(Qt::DisplayRole).toString();
+        const bool pctFollows = !stBefore.contains(QLatin1Char('%')) && stAfter.contains(QStringLiteral("50%"));
+
+        printf("%s 建行时大小未知(-1)，第 1 列显示占位符（实测「%s」）\n",
+               before == QStringLiteral("-") ? "[PASS]" : "[FAIL]", before.toUtf8().constData());
+        printf("%s setFileSize 之后第 1 列变成「1.0 MB」（实测「%s」）\n",
+               after == QStringLiteral("1.0 MB") ? "[PASS]" : "[FAIL]", after.toUtf8().constData());
+        printf("%s 回填确实发了 dataChanged 且覆盖第 1 列（判定时刻次数=%d 列 %d..%d）\n",
+               painted ? "[PASS]" : "[FAIL]", paintsJudged, firstCol, lastCol);
+        printf("%s 同值再回填不发重绘（4Hz 循环里不造成重绘风暴）\n",
+               quietOnSame ? "[PASS]" : "[FAIL]");
+        printf("%s 状态列百分比跟着回填出现（前「%s」后「%s」）\n",
+               pctFollows ? "[PASS]" : "[FAIL]", stBefore.toUtf8().constData(), stAfter.toUtf8().constData());
+        return (before == QStringLiteral("-") && after == QStringLiteral("1.0 MB")
+                && painted && quietOnSame && pctFollows) ? 0 : 1;
+    }
+
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──
      * 单实例交接的时序契约：命名管道只能在「事件循环已经能服务它」的那一刻才出现。
      * 以前 IpcServer::start() 在 MainWindow 构造里同步跑，于是「构造完成 ~ app.exec()」

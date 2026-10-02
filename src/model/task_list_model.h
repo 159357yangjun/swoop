@@ -38,6 +38,11 @@ public:
     // 数据操作
     void addTask(const TaskRow& row);
     void updateProgress(int taskId, qint64 downloaded, int speedBps);
+    /* 回填文件大小。存在的理由：建行时探测常常还没拿到 Content-Length（引擎给 -1），
+     * 而此前**没有任何接口**能改 row.fileSize ⇒ 探测成功后大小永远是 -1，
+     * 「大小」列就一直显示 "-"，哪怕任务已经成功下完 1MiB（2026-10-01 真实 GUI 里看到）。
+     * 值未变时不发 dataChanged（这条在 4Hz 循环里每 tick 都会被调）。 */
+    void setFileSize(int taskId, qint64 bytes);
     void setProgressPct(int taskId, int pct);  // 未知大小时由后端直接上报进度
     void updateStatus(int taskId, int state);
     // 差量判断：该任务当前的 状态/进度/速度/协议 是否与传入值不同（供 4Hz 刷新循环跳过未变任务）

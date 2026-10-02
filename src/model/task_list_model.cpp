@@ -221,6 +221,18 @@ void TaskListModel::updateProgress(int taskId, qint64 downloaded, int speedBps)
     }
 }
 
+void TaskListModel::setFileSize(int taskId, qint64 bytes)
+{
+    auto it = m_rowOf.find(taskId);
+    if (it == m_rowOf.end()) return;
+    int i = it.value();
+    if (m_tasks[i].fileSize == bytes) return;   // 4Hz 循环每 tick 都会调，未变必须不发重绘
+    m_tasks[i].fileSize = bytes;
+    // 受影响的是 大小(1)、状态里的百分比(2)、剩余时间(3)——updateProgress 只发 2..5，
+    // 所以「大小」列此前**没有任何路径**能让它重绘，这正是它一直显示 "-" 的第二半原因。
+    emit dataChanged(index(i, 1), index(i, 3));
+}
+
 bool TaskListModel::isStale(int taskId, qint64 downloaded, int speedBps, int state, const QString& proto) const
 {
     auto it = m_rowOf.find(taskId);
