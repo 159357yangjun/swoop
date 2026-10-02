@@ -2285,3 +2285,59 @@ D2 是计划里的那条，D3 是给 D2 配的判别式自己炸出来的——�
 - `[36②]` 对"无条件覆盖"这个变异不占功（上面写死），所以"声明值不会被盘上数字换掉"这句话
   **没有被任何断言证明过**，只是代码里写着 `<= 0`。
 - `idleBehindReplyMs` 仍不进判据（n=19，幅度 8ms）；3263ms 那个事件仍未复现，`[attr]` 开/关/开三面从没同时拿到过。
+
+### 2026-10-01 23:27→23:3x（第 25 条）— 产品 GUI 拍回来了：**D2 修完，用户看到的「大小」列仍然是 `-`**
+第 24 条末尾我把"产品 GUI 没再拍过"列进未验证清单。这一条就是去拍的，结果是**它仍然是坏的**。
+
+**读数（一手，逐字进仓：`docs/d4-product-gui-2026-10-01-233500.txt`）**
+被测 `build/idm-next.exe`（sha256-12=`1aa399a39b41`，mtime 23:18:28，含 D2+D3），URL 用自测服务端的
+`/cut.bin`（HEAD 刻意不回 Content-Length ⇒ 正是 D2 那条路）：
+- 盘上成品 `dl\cut.bin = 200000` 字节，服务端 `auth_ok=3 cut_range=1` ⇒ 下载真的走完了；
+- 引擎侧同一个夹具在自测里给的是 `file_size=200000`（`[36①]` 读数行）⇒ **D2 本身是生效的**；
+- UIA 树里那一行：`19 cut.bin / 20 "-" / 21 已完成 / 23 192.2 KB/s`（标头 10..18 依次是
+  文件名·大小·状态·…⇒ 节点 20 就是「大小」列）——**列上还是 `-`**；
+- 应用自己的 `history.db`：`(1, 'cut.bin', -1, 'completed')`。
+⇒ 「引擎知道长度」与「界面显示长度」之间断了一环，第 24 条说"D2 修完"没有覆盖到用户看见的那一层。
+
+**断在哪（实读三处，不是推测）**
+1. `MainWindow::refreshFromEngine()` **没有挂在任何定时器上**：全仓只有 3 个调用点——启动时
+   `loadState` 之后（`main_window.cpp:414`）、`onStartAll`（`:1485`）、`onPauseAll`（`:1492`）。
+   250ms 的 `m_statusTimer` 只连到 `updateStatusBar()`（`:380-382`），而 `updateStatusBar` 的函数体
+   里不碰引擎快照（`:1539-1564`）。
+2. 实时进度回调 `MainWindow::onTaskProgress(taskId, downloaded, total, speedBps)`（`:1286`）**收到了
+   `total` 却把它丢掉**：函数体只调 `updateProgress(taskId, downloaded, speedBps)`（`:1298`），
+   没有任何一条路径把 `total` 交给模型。
+3. ⇒ 第 23 条里我写的"这里每 tick 回填一次"（`refreshFromEngine` 内 `setFileSize` 上方的注释）
+   **是错的**：那行代码只有在载入/全部开始/全部暂停时才跑。D1 加的 setter 是真的，
+   但它等的"每 tick"根本不存在。这条注释要跟着改，否则下一个读它的人会继续以为有证人。
+
+**D4 的候选修法（本轮登记不修，按 TDD 走）**
+- ① `onTaskProgress` 里把已经收到的 `total` 用掉：`if (total > 0) m_taskModel->setFileSize(taskId, total);`
+  ——零新数据源，用的就是引擎已经在推的那个数。
+- ② 但①对"长度未知"的任务仍然无效（下载途中 `total` 恒为 -1），所以完成时还要**读一次终态快照**：
+  `onTaskCompleted` 在 `recordFinished(url, name, size, success)` 之前 `dlmgr_get_task_info(taskId, &ti)`，
+  用 `ti.file_size` 回填模型再取 `size`——否则历史库继续收 -1（今天就是这样）。
+- 夹具形状：`onTaskProgress`/`onTaskCompleted` 是私有槽，仓里已有先例用
+  `QMetaObject::invokeMethod(obj, "槽名", Qt::DirectConnection)` 走真实代码路径（`ui_snapshot.cpp:392`），
+  不必为测试开后门；先红断言 = "给一个 total>0 的进度回调，第 1 列必须变成字节数"。
+
+**一条未归因观测（明确不算产品缺陷）**
+第二发 `/small.bin` 的任务名变成 `small.bin分任务执行（推荐）` 并失败。已查：字符串 `分任务执行`
+在本仓源码 `grep -rn` 0 命中、在 `build/idm-next.exe` 里 0 命中 ⇒ **不是产品自己的文案**。
+我的 `set_value` 每次都回报 `verification:"matched"`，但同一份回执里 `runtimeIdValidated:false`
+⇒ 它是按**索引**而非运行时 id 解析的，而我后两次调用都带着**陈旧 snapshotRevision**。
+首要嫌疑是操作侧索引错配，不是产品；下一步该做的干净复现是**用键盘输入代替 SetValue** 再跑一次。
+在这之前这条不写进缺陷表。
+
+**收摊核对**：`Stop-Process` 掉我自己那个实例（`idm_next_procs=0`）、`/_shutdown` 后
+`18080` 上监听数回 0、临时运行目录（含 `dl\cut.bin` 与那个 0 字节 `.idmtmp`）已删、
+`~/Downloads` 里没有被造出文件（保存目录全程指在临时目录）。
+
+**仍然没验证的东西**
+- D4 没修：产品界面上「大小」列与历史库的 size 在实时链路上仍是 -1（这条**推翻**了第 24 条
+  提交信息里"D2 修完用户可见的 -"这个说法——那个说法超出了证据）。
+- 「重启后大小列会不会出现数字」没测：这个实例被 `Stop-Process` 强杀，`tasks.json` 没落盘
+  （`data/` 里只有 `aria2/` 与 `history.db`），所以载入面（`refreshFromEngine` 的那 1 个真调用点）
+  本轮没有证人。
+- 第二发任务的失败原因没查（只到"名字不对 ⇒ 可能 404/写盘失败"这一层，未取证）。
+- CI 从未执行（88 笔未推）。

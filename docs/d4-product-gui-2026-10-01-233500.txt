@@ -1,0 +1,40 @@
+# D4 一手证据：D2 修完之后的产品 GUI 实跑（build/idm-next.exe，sha1sum-12=7aeb3de9da4e / sha256-12=1aa399a39b41，mtime 23:18:28）
+# 被测：新建任务 http://idmuser:idmpass@127.0.0.1:18080/cut.bin（服务器 HEAD 不回 Content-Length）
+# 盘上成品：dl\cut.bin = 200000 字节；服务端 _stats: auth_ok=3 cut_range=1
+# 结论：引擎已把长度回填（自测 [36①] 同一夹具 file_size=200000），但界面「大小」列仍是「-」，历史库仍是 -1
+#
+# ── 1. UIA 树读数（get_window_state 的 accessibility tree，逐字；表格单元在节点 19..27）──
+#   19 项 (selectable) cut.bin
+#   20 项 (selectable) -   <= 第 1 列「大小」
+#   21 项 (selectable) 已完成
+#   22 项 (selectable) 0:00:00
+#   23 项 (selectable) 192.2 KB/s
+#   24 项 (selectable) 10-01 23:32
+#   25 项 (selectable) 127.0.0.1
+#   26 项 (selectable) -
+#   27 项 (selectable) 自动
+#   （标头节点 10..18 依次是 文件名/大小/状态/剩余时间/传输速度/最后连接/描述/协议/限速 ⇒ 节点 20 就是「大小」列）
+#
+# ── 2. 应用自己的历史库（sqlite3 select id,filename,size,status from downloads）──
+#   [(1, 'cut.bin', -1, 'completed'), (2, 'small.bin分任务执行（推荐）', -1, 'failed'), (3, 'small.bin分任务执行（推荐）', -1, 'failed')]
+#
+# ── 3. 应用 stderr 日志（原文件是 GBK 编码，这里已转成 UTF-8；GBK 控制台下直接 grep 中文等于没诊断）──
+#   [INFO] "IDM Next 启动（GUI 模式）"
+#   [INFO] "已加载主题: light"
+#   [INFO] "主窗口初始化完成"
+#   [INFO] "HistoryStore 已打开: C:\\Users\\yyyy\\AppData\\Local\\Temp\\idm-gui-d2-232704\\data/history.db"
+#   [INFO] "IPC server 已启动，监听 idm-next-ipc"
+#   [INFO] "BT/磁力组件 aria2c 已就绪（开箱即用）"
+#   QIODevice::read (QSslSocket): device not open
+#   QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
+#   [INFO] "添加任务 #1 (队列:无): http://idmuser:idmpass@127.0.0.1:18080/cut.bin"
+#   [INFO] "任务 1 完成"
+#   [INFO] "添加任务 #2 (队列:无): http://idmuser:idmpass@127.0.0.1:18080/small.bin分任务执行（推荐）"
+#   [INFO] "任务 2 失败"
+#   [INFO] "任务 2 失败"
+#
+# ── 4. 第 2 条任务（/small.bin）：文件名被掺进「分任务执行（推荐）」并失败 ──
+#   已查：字符串 "分任务执行" 在本仓源码里 0 命中（grep -rn 全仓），在 build/idm-next.exe 里也 0 命中
+#   ⇒ 不是产品自己的文案；注入方未归因（我的 set_value 每次都回报 verification=matched，
+#      但 runtimeIdValidated=false，即按索引而非运行时 id 解析 ⇒ 陈旧快照下的索引错配是首要嫌疑）。
+#      这条**不记为产品缺陷**，只记为未归因观测 + 下一步该做的干净复现（用键盘输入而不是 SetValue）。

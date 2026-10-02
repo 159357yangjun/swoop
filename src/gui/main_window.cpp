@@ -1423,10 +1423,12 @@ void MainWindow::refreshFromEngine()
             // 差量跳过未变任务，避免对「已完成/暂停/空闲」占多数的列表每 tick 空转。
             QString proto = QString::fromUtf8(info.http_version);
             const int prevState = m_states.value(ids[i], -1);
-            // 大小是"晚到"的信息：建行那一刻探测常常还没回 Content-Length（引擎给 -1），
-            // 而模型此前没有任何接口能回填 ⇒ 已经成功下完 1MiB 的任务，界面上「大小」列
-            // 永远显示 "-"（2026-10-01 真实 GUI 操作时看到）。这里每 tick 回填一次，
-            // 值未变时 setFileSize 自己 return，不会造成重绘风暴。
+            // ⚠️ 这行**不是**每 tick 跑的：refreshFromEngine() 全仓只有 3 个调用点（启动 loadState 之后、
+            // onStartAll、onPauseAll），250ms 的 m_statusTimer 只连 updateStatusBar()。
+            // 所以实时下载的「大小」列至今没被这里回填过——2026-10-01 产品 GUI 实测：
+            // 引擎已给 file_size=200000（自测 [36①]），界面上仍是 "-"、history.db 里仍是 -1。
+            // 真正缺的是把 onTaskProgress 已经收到的 total 用掉，以及完成时读一次终态快照，
+            // 见 docs/ARCHITECTURE.md §7 第 25 条（D4）。在此之前不许把这行读成"已经修好了"。
             if (info.file_size > 0)
                 m_taskModel->setFileSize(ids[i], info.file_size);
             if (m_taskModel->isStale(ids[i], info.downloaded, (int)info.speed_bps, info.status, proto)) {
