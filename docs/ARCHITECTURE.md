@@ -1704,6 +1704,7 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 | IDM_SIZEWIRING_PROBE | 断言型 | 是 | 4 |
 | IDM_TEXT_PROBE | 断言型 | 是 | 1 |
 | IDM_TOOLPROBE_PROBE | 断言型 | 是 | 4 |
+| IDM_SIZELIVE_PROBE | 断言型 | 是 | 3 |
 | IDM_ZOOM_PROBE | 断言型 | 是 | 4 |
 <!-- PROBE-ROSTER-END -->
 上表的三个集合恒等式（模式名 / 类型 / 是否在 CI 名单）由 `python tools/probe_roster.py` 现算比对，
@@ -2496,3 +2497,55 @@ D2 是计划里的那条，D3 是给 D2 配的判别式自己炸出来的——�
 
 **仍然没验证的东西**：D4 的像素级证人（两轮均未拿到，原因如上）；完成面那一发的牙；
 `Ctrl+N` 不触发与「Tab 到保存目录弹选择器」两条都只是登记，没有断言；CI 从未执行（93 笔未推）。
+
+### 2026-10-02 09:0x→09:3x（第 29 条）— 完成面那颗牙**补上了**：新探针 IDM_SIZELIVE_PROBE 走真服务器 + 真下载
+第 26 条末表第二行记的是"摘掉完成面那一发 ⇒ 退码 0，不红 ⇒ 该发未被证明"。这一条把它变成有牙的。
+
+**为什么 offscreen 那面给不了牙**：它先调进度面把 200000 写进模型，完成面的 `setFileSize`
+撞上自己的"同值不发重绘"守卫直接 return ⇒ 摘与不摘观测不可区分。**证人时刻只有一个**：
+一条**全程 total 恒 -1** 的真下载——那时模型里的长度只能来自完成时的现读。这就是本面的形状：
+自测服务端 `/cut.bin`（HEAD 不回 Content-Length、GET 只发 8000 字节再断流 ⇒ 必须 Range 续传补齐），
+QProcess 起服务、Qt 自己试绑端口判空闲、`QTcpSocket` 打 `/_stats` 判就绪，然后建真 `MainWindow`、
+`dlmgr_add`+`dlmgr_start` 跑完，再断言第 1 列。
+
+**三条断言（本轮实测）**
+```
+[PASS] 真链路：任务确实下完（status=3；成品=200000 字节 引擎 file_size=200000）
+[PASS] 长度未知的下载完成后，第 1 列显示真实大小（实测「195.3 KB」）
+[PASS] 该回填发了覆盖第 1 列的 dataChanged（发数=1 列 1..3）——它的唯一来源是完成时现读
+```
+**变异（这次是真有牙）**：把完成面的 `if (dlmgr_get_task_info(...) && finTi.file_size > 0)` 改成 `false && …`
+⇒ `[FAIL] 第 1 列显示真实大小（实测「-」）` + `[FAIL] …dataChanged（发数=0）`，退码 1；
+还原后 rc=0，且 `src/gui/main_window.cpp` 与备份 sha1sum 同为 `eeda389850ce…`、`git diff --numstat` 只剩本轮新增。
+
+**写这面时踩到的四个坑（都是测具的错，逐个当场量出来）**
+1. **`bash -lc` 在这台机器上不是 bash**：命令不存在时它回一段 UTF-16/GBK 混排中文报错、退码 1 ⇒
+   读数成乱码而不是零。端口占用改用 `QTcpServer::listen` 自己试绑，服务用 `QProcess` 直接起 python。
+2. **就绪判据只读一次会恒假**：这个服务把响应分成 145 字节（状态行+头）与 291 字节（body）两个包
+   （实测 `chunk_sizes=[145,291]`）⇒ `contains("auth_ok")` 永远拿不到。改成读到连接关闭。
+3. **窗口必须先构造再加任务**：`MainWindow` 构造里 `loadState(...)`，而 `dlmgr_load_state` 开头
+   `reset_all_tasks()` ⇒ 先 add 再建窗口，任务被自己的载入抹掉（成品字节=-1、模型行数=0）。
+4. **"最后一发 dataChanged"不能当判据**：下载途中 `updateProgress` 合法地发 2..5，第一版就是这么红的。
+   正确做法是把模型显式打回未知（`setFileSize(tid,-1)`）后再单独调那个私有槽，数这一次调用内的发数。
+
+**顺带一个可复算的事实（推翻我上一节的猜测）**：中途那一格在第 1 帧进度回调后是 **「0 B」而不是 "-"**——
+引擎在探测之前 `file_size` 是结构体初始值 0，`formatBytes(0)` 就印 "0 B"。这条既解释了为什么
+`onTaskProgress` 里 `total > 0` 那道守卫不能省，也说明"中途显示 `-`"这个说法本来就不成立。
+
+**像素级核对仍然没有证人，而且现在知道为什么不用再做**：offscreen 平台的 Qt 窗口**根本没有 HWND**
+（子进程 pid 连 60×0.25s 枚举全空，换 windows 平台跑同一枚 exe 也是 0 个可见窗口）。
+所以"拍到那一列"这件事**不可能**由任何探针给出，只能靠人在真窗口里看一次。已登记为需求而非缺陷。
+
+**闸门环境里解释器不是 `python`（这条差点变成假绿）**：`ui_probe_run.sh` 环境下三个候选名的实测结果是
+`试过的解释器=python=fail0,python3=fail0,py=ok` —— 前两个 `error()=Unknown(0)` 是"没试过"的初值，
+不能当证据，所以读数必须印**哪个名字成功**。CI 侧 `Setup toolchain` 只往 GITHUB_PATH 前面加 mingw64/cmake，
+那里没有 python ⇒ runner 上的 `python` 是 windows-latest 镜像自带的。**不许回退成本机绝对路径**
+（那等于把 CI 判据改成我这台机器的形状）；三个都起不来就三条全红 + 读数行说明试过谁。
+
+**通过闸门这道门的变异（不是单独手跑）**：摘掉完成面那一发 ⇒ 套件报
+`PASS=73 FAIL=2 问题模式: IDM_SIZELIVE_PROBE(F=2,rc=1)`；还原后 `PASS=75 FAIL=0 零断言=0 问题模式: 无`，
+且 `src/gui/main_window.cpp` sha1sum 与备份同为 `eeda389850ce…`。
+
+**收摊**：每次运行留下的 `%TEMP%\idm-sizelive-probe-<ms>`（各含一个被单例句柄占住的 history.db）
+本轮清过两批共 14+ 个；**判据不含清理**（竞态敏感，见 §7 第 26 条末），但读数行印出路径。
+名单门 `probe_roster` 同步收录新模式（代码声明=20 / CI=18 / 文档表=20，违规=0）。

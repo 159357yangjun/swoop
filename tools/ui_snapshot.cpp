@@ -17,6 +17,9 @@
 #include <QJsonDocument>
 #include <QPixmap>
 #include <QFile>
+#include <QProcess>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QSettings>
 #include <QMessageBox>
 #include <QWidget>
@@ -1187,6 +1190,189 @@ int main(int argc, char** argv) {
         Q_UNUSED(purged);     // 清干净是好事，但它是竞态敏感的（见上），所以只进读数不进退码
         return (okAdd && okLoad && okProg && progShows && progPainted
                 && okDone && doneShows) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_SIZELIVE_PROBE=1 ──
+     * 给 IDM_SIZEWIRING_PROBE 的**完成面**补牙。那一面在 offscreen 里没有牙（§7 第 26 条末表第二行）：
+     * 它先调进度面把 200000 写进模型，完成面的 setFileSize 撞上"同值不发重绘"守卫直接 return，
+     * 于是"完成时现读引擎"这一发摘掉也不红 ⇒ 只有代码为凭。
+     * 这一面换形状：**真下载一条服务器不声明长度的资源**（自测服务端 /cut.bin：HEAD 不给
+     * Content-Length、GET 只发前 8000 字节再断流 ⇒ 引擎必须带 Range 续传补齐）。
+     * 关键在于整条路上 `onTaskProgress` 收到的 total 恒为 -1 ⇒ 进度面**永远不会**写 fileSize，
+     * 模型里那个数只能来自完成时的现读 ⇒ 摘掉完成面那一发就必然红。这才是那颗牙的证人时刻。
+     * ⚠ 前置三条都是硬判定，缺任何一条判失败而不是跳过：python 找得到、端口起前后监听 0/1、
+     *   任务真的走到 status=3。否则这条会退化成"绿是因为什么都没跑"。 */
+    if (qEnvironmentVariableIsSet("IDM_SIZELIVE_PROBE")) {
+        const int port = 18091;                       // 与自测门的 18080 分开，避免互相抢 _stats
+        QString dir = QDir::tempPath() + QStringLiteral("/idm-sizelive-probe-")
+                      + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(dir);
+        qputenv("IDM_DATA_DIR", dir.toUtf8());
+
+        /* ⚠️ 不要走 `bash -lc`：这台机器上那个名字解析到的是 Windows 的 shell 包装，
+         *    命令不存在时它回一段 GBK 中文报错、退码 1 ⇒ 读数变成乱码而不是零。
+         *    端口占用改用 QTcpServer::listen 自己试绑（成功=端口空），服务用 QProcess 直接起 python。 */
+        bool portFree = false;
+        {
+            QTcpServer probeSrv;
+            portFree = probeSrv.listen(QHostAddress::LocalHost, port);
+        }
+        bool okPre = false, okServer = false;
+        QProcess srv;
+        const QString repo = QCoreApplication::applicationDirPath() + "/..";
+        const QString script = repo + "/tools/engine_selftest_server.py";
+        /* 解释器怎么找：CI 的 `Setup toolchain` 只往 GITHUB_PATH 前面加 mingw64\bin 与 cmake\bin，
+         * 那里没有 python ⇒ runner 上的 `python` 就是 windows-latest 镜像自带的那个。
+         * ⚠️ 不许回退到硬编码的本机绝对路径（那等于把 CI 判据改成"我这台机器的形状"）；
+         *    全都起不来就三条断言全红，并把试过哪些名字印出来 —— 红得能看出原因。 */
+        QStringList tried;
+        if (portFree && QFileInfo::exists(script)) {
+            for (const QString& name : {QStringLiteral("python"), QStringLiteral("python3"),
+                                        QStringLiteral("py")}) {
+                srv.setProgram(name);
+                srv.setArguments({script, QString::number(port), "idmuser", "idmpass"});
+                srv.setWorkingDirectory(repo);
+                srv.start();
+                if (srv.waitForStarted(8000)) { okServer = true; tried << (name + "=ok"); break; }
+                tried << (name + "=fail" + QString::number(int(srv.error())));
+                srv.close();
+            }
+        }
+        printf("    [LIVE 前置] 端口空闲=%d 脚本存在=%d 服务进程已启动=%d 试过的解释器=%s\n",
+               portFree ? 1 : 0, QFileInfo::exists(script) ? 1 : 0, okServer ? 1 : 0,
+               (tried.isEmpty() ? QStringLiteral("(未尝试:端口不空或脚本缺失)")
+                                : tried.join(QStringLiteral(","))).toUtf8().constData());
+
+        bool okDone = false, okSize = false, okPaintNoSource = false;
+        QString colEnd;
+        int statusSeen = -1, paintsAtEnd = 0, firstColAtEnd = -1, lastColAtEnd = -1;
+        long long diskBytes = -1, engSize = -1;
+        /* ⚠️ MainWindow 必须**先构造、再 add/start**：它的构造函数会 loadState(数据目录/tasks.json)，
+         *    而 dlmgr_load_state 开头就 reset_all_tasks() ⇒ 先加任务再建窗口，那条任务会被自己的
+         *    载入流程抹掉（实测成品字节=-1、模型行数=0）。正常 app 的顺序本来就是"建窗口→用户再加任务"。 */
+        MainWindow* wPtr = new MainWindow();      // 不 delete：析构路径的竞态见 §7 第 26/28 条
+        MainWindow& w = *wPtr;
+        auto modelOf = [&w]() { return w.findChild<TaskListModel*>(); };
+        if (okServer) {
+            // 就绪判据必须真打到这个端口：没这一步，「连不上」会变成一条与产品无关的假失败
+            for (int i = 0; i < 40 && !okPre; i++) {
+                QTcpSocket s;
+                s.connectToHost(QHostAddress::LocalHost, port);
+                if (s.waitForConnected(500)) {
+                    QByteArray got;
+                    s.write("GET /_stats HTTP/1.0\r\n\r\n");
+                    /* ⚠️ 必须**读到连接关闭**，不能只等一次 readyRead：这个服务把响应分成
+                     *    145 字节（状态行+头）与 291 字节（body）两个包发（实测 chunk_sizes=[145,291]），
+                     *    单次读只拿得到头部那一段，`contains("auth_ok")` 就恒为假 ⇒
+                     *    判据会把自己要验的那条就绪路径判成"服务没起来"，三条断言全红得没有意义。 */
+                    while (s.waitForReadyRead(1500)) got += s.readAll();
+                    got += s.readAll();
+                    okPre = got.contains("auth_ok");
+                    if (!okPre) printf("    [LIVE 前置] 第%d次应答字节=%d 含 auth_ok=0\n", i + 1, got.size());
+                }
+                s.abort();
+                if (!okPre) QThread::msleep(250);
+            }
+            printf("    [LIVE 前置] 服务应答 /_stats=%d\n", okPre ? 1 : 0);
+        }
+        if (okPre) {
+            const QString url = QString("http://idmuser:idmpass@127.0.0.1:%1/cut.bin").arg(port);
+            DownloadConfig cfg = dlmgr_get_config();
+            memset(cfg.site_logins, 0, sizeof(cfg.site_logins));
+            cfg.site_login_count = 1;
+            strncpy(cfg.site_logins[0].match, "127.0.0.1", sizeof(cfg.site_logins[0].match) - 1);
+            strncpy(cfg.site_logins[0].user, "idmuser", sizeof(cfg.site_logins[0].user) - 1);
+            strncpy(cfg.site_logins[0].pass, "idmpass", sizeof(cfg.site_logins[0].pass) - 1);
+            dlmgr_set_config(&cfg);
+
+            int tid = dlmgr_add(url.toUtf8().constData(), dir.toUtf8().constData(),
+                                "live_cut.bin", 1, nullptr, nullptr, nullptr, nullptr);
+            w.refreshFromEngine();                 // 建行（窗口已构造完，队列里就是这条）
+            TaskListModel* lm = modelOf();
+            if (tid < 0 || !lm) {
+                printf("    [LIVE 前置] 建任务/取模型失败 tid=%d 有模型=%d\n", tid, lm ? 1 : 0);
+            } else {
+                const int row = lm->rowCount() - 1;   // 新加的那一行在最后
+                int paints = 0, fc = -1, lc = -1;
+                QObject::connect(lm, &QAbstractItemModel::dataChanged,
+                                 [&](const QModelIndex& a, const QModelIndex& b, const QVector<int>&) {
+                                     ++paints; fc = a.column(); lc = b.column();
+                                 });
+                auto snapPaint = [&]() { paints = 0; fc = -1; lc = -1; };
+                /* 中途证人必须在 start **之前**就取好：引擎完成时写 `downloaded = file_size > 0 ? …
+                 * : downloaded`，而建行那一刻 file_size 还是初始的 0 ⇒ 第一帧进度回调就会把
+                 * 第 1 列印成 "0 B"（实测「中途第1列=0 B」）。晚一步采样必然错过这个窗口。 */
+                QString colMid = lm->index(row, 1).data(Qt::DisplayRole).toString();
+                bool midCaptured = true;
+                bool engSizeNeverPositive = true;   // 全程观察：引擎有没有哪一刻报过正长度
+                dlmgr_start(tid);
+                for (int i = 0; i < 200; i++) {              // 最多 20 秒
+                    QCoreApplication::processEvents();
+                    TaskInfo ti;
+                    if (dlmgr_get_task_info(tid, &ti) == 0) {
+                        statusSeen = ti.status;
+                        engSize = ti.file_size;
+                        if (ti.status != 3 && ti.file_size > 0) engSizeNeverPositive = false;
+                        if (ti.status == 3 || ti.status == 4) break;
+                    }
+                    QThread::msleep(100);
+                }
+                /* 完成面的独立证人时刻：先把模型打回未知（模拟"没有这次现读"会是什么样子），
+                 * 再直接调那个私有槽 ⇒ 这一发 dataChanged 与列值只能由 onTaskCompleted 产生。
+                 * ⚠️ 不能只数全程最后一发 dataChanged：下载途中 updateProgress 合法地发 2..5，
+                 *    拿全程计数会把别人的重绘算成自己的功劳（第一版就是这么红的）。 */
+                snapPaint();
+                lm->setFileSize(tid, -1);
+                const int paintsAfterReset = paints, fcAfterReset = fc, lcAfterReset = lc;
+                QCoreApplication::processEvents();
+                snapPaint();
+                const bool okInvoke = QMetaObject::invokeMethod(
+                    &w, "onTaskCompleted", Qt::DirectConnection,
+                    Q_ARG(int, tid), Q_ARG(bool, true), Q_ARG(QString, QString()));
+                const bool endPainted = (paints >= 1) && (fc <= 1) && (lc >= 1);
+                colEnd = lm->index(row, 1).data(Qt::DisplayRole).toString();
+                paintsAtEnd = paints; firstColAtEnd = fc; lastColAtEnd = lc;
+                QFile f(dir + QStringLiteral("/live_cut.bin"));
+                diskBytes = f.exists() ? static_cast<long long>(f.size()) : -1;
+                okDone = (statusSeen == 3);
+                okSize = (colEnd == QStringLiteral("195.3 KB"));
+                /* 这颗牙的判别式：整条路上进度面的 total 恒 -1（中途读数就是证人）⇒
+                 * 模型里这个 200000 不可能由 onTaskProgress 产生。摘掉完成面的现读，列就停在 "-"。 */
+                /* 判据不要求中途那一格是 "-"：引擎在探测之前 file_size 是初始的 0，
+                 * 第一帧进度回调会把列印成 "0 B"（那是另一个已知形状，见 §7 第 29 条）。
+                 * 这条牙真正的证人有两件：**全程引擎 file_size 从没 >0**（所以进度面那条
+                 * `if (total > 0)` 一次都没成立）+ **把模型打回未知后，只有完成时现读能让它变对**。 */
+                okPaintNoSource = okInvoke && endPainted && midCaptured
+                                  && engSizeNeverPositive;
+                printf("    [LIVE 读数] 中途第1列=「%s」重置后发数=%d 列 %d..%d → 调用完成后发数=%d 列 %d..%d\n",
+                       colMid.toUtf8().constData(), paintsAfterReset, fcAfterReset, lcAfterReset,
+                       paints, fc, lc);
+            }
+        }
+        printf("%s 真链路：任务确实下完（status=3；成品=%lld 字节 引擎 file_size=%lld）\n",
+               okDone ? "[PASS]" : "[FAIL]", diskBytes, engSize);
+        printf("%s 长度未知的下载完成后，第 1 列显示真实大小（实测「%s」）\n",
+               (okDone && okSize) ? "[PASS]" : "[FAIL]", colEnd.toUtf8().constData());
+        printf("%s 该回填发了覆盖第 1 列的 dataChanged（发数=%d 列 %d..%d）——它的唯一来源是完成时现读\n",
+               (okDone && okPaintNoSource) ? "[PASS]" : "[FAIL]", paintsAtEnd, firstColAtEnd, lastColAtEnd);
+
+        if (srv.state() != QProcess::NotRunning) {
+            QTcpSocket s;
+            s.connectToHost(QHostAddress::LocalHost, port);
+            if (s.waitForConnected(500)) {
+                s.write("GET /_shutdown HTTP/1.0\r\n\r\n");
+                s.waitForReadyRead(1500);
+            }
+            s.abort();
+            if (!srv.waitForFinished(8000)) { srv.kill(); srv.waitForFinished(3000); }
+        }
+        bool stillListening = false;
+        { QTcpServer probeSrv; stillListening = !probeSrv.listen(QHostAddress::LocalHost, port); }
+        QDir(dir).removeRecursively();
+        printf("    [LIVE 收摊] 端口仍在监听=%d 数据目录还在=%d\n",
+               stillListening ? 1 : 0, QDir(dir).exists() ? 1 : 0);
+        dlmgr_destroy();
+        return (okPre && okDone && okSize && okPaintNoSource) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──
