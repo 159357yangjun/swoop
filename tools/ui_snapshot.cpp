@@ -37,6 +37,7 @@
 #include "schedule_dialog.h"
 #include "task_detail_dialog.h"
 #include "download_core.h"
+#include <QSqlDatabase>
 #include "task_list_model.h"   // 限流倒计时探针：TaskRow / stateText / throttleNoticeText
 #include "settings.h"
 #include "button_translator.h"
@@ -1038,7 +1039,11 @@ int main(int argc, char** argv) {
         int lc = (sv == 0) ? dlmgr_load_state(st.toUtf8().constData()) : -1;
         int engN2 = 0; { int eids[16]; engN2 = dlmgr_list(eids, 16); }   // load 之后引擎里有几条
 
-        MainWindow w;
+        /* new 出来而不是栈对象：收尾必须"先析构窗口、再删数据目录"，
+         * 而栈对象的析构点在作用域末尾——那时删除已经发生了（实测留下 history.db 等 3 个文件）。 */
+        /* 故意 new 出来且不 delete：析构路径上有上面写到的段错误竞态，进程退出会统一回收。 */
+        MainWindow* wPtr = new MainWindow();
+        MainWindow& w = *wPtr;
         /* 引擎队列此刻就是夹具那一条（load_state 会先清空再灌）。构造里那次 singleShot(0)
          * 的 loadState 排在事件循环第一轮，本块同步跑完之前它不会插进来。 */
         auto modelOf = [&w]() { return w.findChild<TaskListModel*>(); };
@@ -1145,10 +1150,41 @@ int main(int argc, char** argv) {
                engRc, engTi.status, (long long)engTi.file_size, (long long)engTi.downloaded,
                engTi.error_msg);
 
-        QFile::remove(st);
+        /* 收尾：**只摘任务，不删窗口、不删目录**。三条都是实测换来的：
+         *   · dlmgr_remove 负责删自己的 .idmtmp；再转一圈事件循环给监督线程收摊的机会
+         *     （上一版没等，5 轮里 1 轮把 .idmtmp 留在盘上）。
+         *   · delete &w 会触发 MainWindow 析构里的 saveState + HistoryStore 那条已被 removeDatabase
+         *     摘掉的命名连接 ⇒ 实测 5 轮 1 轮直接段错误 rc=139。探针跑完就退进程，不必自己拆。
+         *   · 因此数据目录**故意留在盘上**，路径与内容印出来：静默吞掉残留比不清理更坏，
+         *     但把它做成判据又会被上面那个竞态闪红——所以进读数行、不进退码。 */
         dlmgr_remove(tid);
-        QFile::remove(dir + QStringLiteral("/size_wiring.bin"));
-        QFile::remove(dir + QStringLiteral("/size_wiring.bin.idmtmp"));
+        for (int i = 0; i < 20; i++) {                     // 最多 2 秒：等 .idmtmp 真的从盘上消失
+            QCoreApplication::processEvents();
+            if (!QFile::exists(dir + QStringLiteral("/size_wiring.bin.idmtmp"))) break;
+            QThread::msleep(100);
+        }
+        const QStringList left = QDir(dir).entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+        /* 逐条目删而不是 removeRecursively：后者遇到一个删不掉的条目就整棵放弃（实测剩 7 个文件）。
+         * history.db 要等它的命名连接被摘掉才删得动（HistoryStore 没有 close()，句柄在单例里）。 */
+        auto purgeDir = [](const QString& d) {
+            QDir dq(d);
+            if (!dq.exists()) return true;
+            const QFileInfoList entries = dq.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
+            for (const QFileInfo& fi : entries) {
+                if (fi.isDir()) { QDir(fi.absoluteFilePath()).removeRecursively(); }
+                else if (!QFile::remove(fi.absoluteFilePath())) { QFile::remove(fi.absoluteFilePath()); }
+            }
+            return dq.removeRecursively() || !dq.exists();
+        };
+        {
+            const QString hname = QStringLiteral("idm_next_history");   // 实读 history_store.cpp:19
+            if (QSqlDatabase::contains(hname)) QSqlDatabase::removeDatabase(hname);
+        }
+        const bool purged = purgeDir(dir);
+        printf("    [D4 清理读数] 删前=%s 逐条目删除后目录还在=%d\n",
+               left.isEmpty() ? QStringLiteral("(空)") : left.join(QLatin1Char(',')).toUtf8().constData(),
+               QDir(dir).exists() ? 1 : 0);
+        Q_UNUSED(purged);     // 清干净是好事，但它是竞态敏感的（见上），所以只进读数不进退码
         return (okAdd && okLoad && okProg && progShows && progPainted
                 && okDone && doneShows) ? 0 : 1;
     }

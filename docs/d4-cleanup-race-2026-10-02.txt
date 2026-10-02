@@ -1,0 +1,20 @@
+# D4 探针收尾竞态：读数与结论（2026-10-02 00:33→00:45）
+
+## 现象（修之前）
+- 第一版只删夹具自己造的文件 ⇒ %TEMP% 下 33 轮攒出 157 MB（aria2/ffmpeg/yt-dlp 缓存 + history.db + tasks.json）。
+- 加 removeRecursively 之后仍每轮剩 history.db ⇒ HistoryStore 没有 close()，命名连接 idm_next_history 的句柄在单例里。
+- 摘掉连接后改剩 size_wiring.bin.idmtmp ⇒ 完成面那一发 dlmgr_start 起的监督线程还在收尾，dlmgr_remove 不等它。
+- 期间还测到一次 **段错误 rc=139**（5 轮 1 轮）：delete &w 让 MainWindow 析构去 saveState，而 SQLite 连接刚被 removeDatabase 摘掉。⇒ 探针不再自己拆窗口。
+
+## 修法（三条都是量出来的，写在代码注释里）
+1. dlmgr_remove(tid) 之后**轮询等 .idmtmp 真消失**（≤2s），而不是转一圈事件循环就算收工；
+2. 逐条目删除而不是 removeRecursively（后者一个条目失败就整棵放弃）；
+3. 不 delete 窗口、不摘连接后再动文件——进程退出统一回收。
+
+## 修后实测
+连跑 4 轮：rc=0 pass=4 全部一致，leftover_dirs=0
+整套 19 模式复跑：PASS=72 FAIL=0 零断言=0，leftover_dirs_after_suite=0
+
+## 为什么清理不进退码
+#   它是竞态敏感的（上面那条 1/5 就是证据）。做成判据会闪红；
+#   但静默吞掉残留更坏（157 MB 那轮就是这么攒出来的）⇒ 保留 [D4 清理读数] 行，路径与清单都印出来。
