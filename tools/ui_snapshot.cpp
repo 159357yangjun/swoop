@@ -1372,6 +1372,22 @@ int main(int argc, char** argv) {
             dlg.reject();
         }
 
+        /* 收尾：本探针不建任务、对话框也没提交过，数据目录里只可能有 MainWindow 析构前
+         * saveState/loadState 留下的东西。实测不清时每轮攒一个 `%TEMP%\idm-keynav-probe-<ms>`
+         * （连跑后盘上堆到 37 个）⇒ 摘掉命名连接后逐条目删；删不动就印出来，别静默吞残留。
+         * ⚠ 沿用 IDM_SIZEWIRING_PROBE 的实测结论：**不 delete MainWindow**（析构路径上有
+         *    SQLite 命名连接的段错误竞态），进程退出统一回收。 */
+        {
+            const QString hname = QStringLiteral("idm_next_history");
+            if (QSqlDatabase::contains(hname)) QSqlDatabase::removeDatabase(hname);
+            QDir dq(dir);
+            const QFileInfoList entries = dq.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
+            for (const QFileInfo& fi : entries) QFile::remove(fi.absoluteFilePath());
+            const bool gone = dq.removeRecursively() || !dq.exists();
+            printf("    [清理读数] 目录=%s 删前条目=%d 已删净=%d\n",
+                   dir.toUtf8().constData(), entries.size(), gone ? 1 : 0);
+        }
+
         return (k1ok && k2ok) ? 0 : 1;
     }
 
