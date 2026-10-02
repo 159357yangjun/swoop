@@ -1,0 +1,28 @@
+# D3（重启后把长度未知的完整成品判成要重下）先红原文 2026-10-01 23:14:39→23:15:41
+# 发现方式：[36③] 这条断言是给 D2 的回填配的判别式，它红的原因与 D2 无关——
+#   verify_progress_against_disk 的 span=(end>=start)?end-start+1:0，长度未知时 end=-1 ⇒ span=0
+#   ⇒ avail 被夹成 0 ⇒ 只要 c->downloaded>0 就恒判「被盘否证」。该表达式里没有 file_size，
+#   所以这是**先于 D2 存在**的缺陷，本轮只是第一次有人量到它（不是我的回填造成的）。
+# 本轮同时暴露测具自己的错期望：dlmgr_load_state 成功返回 0（download_core.c:2225），不是条数；
+#   判红不靠 lc36 —— 产品读数是 status=2 / clamp_chunks=1 / clamp_refetch=200000 三个。
+
+T3_start=2026-10-01 23:14:39 -0400
+SELFTEST_RC=1
+server_still_alive=no
+T3_end=2026-10-01 23:15:41 -0400
+exe_mtime=2026-10-01 23:14:29.886247700 -0400  exe_sha12=8237381a31cc
+SLOG=/tmp/idm-probes/p0-runs/selftest-1001-231434.log
+== 结果：179 通过，1 失败 ==
+FAIL_rows=1
+  [FAIL] [36③] 长度未知的成品重启后不被自己否证（仍已完成、不误报、不重下）  -> ③重启面｜输入: save=0 load=0 队列=2 找回id=7344 state里file_size=200000｜读到的: status=2 取回=0 clamp_chunks=1 clamp_refetch=200000 file_size=200000
+--- error_msg 读数（无条件）---
+    [读数] 面A｜正常恢复（盘没被动过）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=(空) Range=12 最大写偏移=8388608 引擎自愈读数 clamp_refetch=0B clamp_chunks=0｜兜底=不涉及（盘未动）
+clamp_rows=6 clamp_nonzero_rows=4
+--- 产物新鲜度（tools/freshness_gate.py，只复述不改本脚本退码）---
+[DIRTY_INPUT] build/engine_selftest.exe sha12=8237381a31cc mtime=2026-10-01 23:14:29 -0400 ｜输入最新提交=7777bce 2026-10-01 08:14:34 -0400 fix(core): 跨任务污染根因修复(延后压缩)——删空闲任务不 差=53995s 构建证人=no work to do ⇒ 有 2 个未提交的输入
+         复算: stat -c '%y %s' build/engine_selftest.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- tools/engine_selftest.c src/core src/utils src/protocols CMakeLists.txt ; ninja -C build -n engine_selftest ; git status --porcelain -- tools/engine_selftest.c src/core src/utils src/protocols CMakeLists.txt
+[DIRTY_INPUT] build/ui_snapshot.exe sha12=09763b5420e3 mtime=2026-10-01 22:32:49 -0400 ｜输入最新提交=b04a18c 2026-10-01 22:52:32 -0400 fix(model): 「大小」列回填有接口了（D1）+ 新探针 I 差=-1183s 构建证人=说要重编 5 步(rc=0) ⇒ 有 1 个未提交的输入
+         复算: stat -c '%y %s' build/ui_snapshot.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- tools/ui_snapshot.cpp src resources CMakeLists.txt ; ninja -C build -n ui_snapshot ; git status --porcelain -- tools/ui_snapshot.cpp src resources CMakeLists.txt
+[FRESHNESS_GATE] rev=HEAD 目标=4 不合格=3 tool=97a3e7da1334/168行
+注：STALE 不是回归，是发现——它说「这枚二进制不含那次改动」。要能把『产品 exe == 当前源码』这句话讲出口，必须重编产品目标（本轮边界禁止）。两道证人都不读文档、都进退码。
+freshness_rc=1（这道门自己的退码；0=都新鲜 1=有 STALE/MISSING/DIRTY 2=门没跑到）

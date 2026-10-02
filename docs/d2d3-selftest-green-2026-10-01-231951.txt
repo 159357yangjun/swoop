@@ -1,0 +1,32 @@
+# D2+D3 落地后引擎门原文（tools/p0_rerun.sh，同二进制 exe_sha12=07e1e7bc3f83(mtime 23:17:09) 独立复跑两次都是 180/0）
+# 与 docs/d2-selftest-red-…txt（178/1，红的是新增 [36①]）、docs/d3-restart-clamp-red-…txt（179/1，红的是新增 [36③]）三份合起来是这轮的先红→后绿
+
+preflight_listening=0
+server_msys_pid=50906
+ready=1
+after_start_listening=1 windows_pid=25368
+stats_before={"auth_fail": 0, "auth_ok": 0, "ranges": 0, "cur": 0, "max_cur": 0, "norange_get": 0, "norange_range": 0, "retryafter_gets": 0, "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0, "stall_hits": 0, "conns": 2, "big_reqs": 0}
+T3_start=2026-10-01 23:19:54 -0400
+SELFTEST_RC=0
+server_still_alive=no
+T3_end=2026-10-01 23:20:55 -0400
+exe_mtime=2026-10-01 23:17:09.745470600 -0400  exe_sha12=07e1e7bc3f83
+SLOG=/tmp/idm-probes/p0-runs/selftest-1001-231951.log
+== 结果：180 通过，0 失败 ==
+FAIL_rows=0
+--- error_msg 读数（无条件）---
+    [读数] 面A｜正常恢复（盘没被动过）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=(空) Range=12 最大写偏移=8388608 引擎自愈读数 clamp_refetch=0B clamp_chunks=0｜兜底=不涉及（盘未动）
+    [读数] 面B｜截短 .idmtmp（r+b 会成功 ⇒ 未触发兜底）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=[STATE-CLAMP] 发现 2 片进度被盘否证，重取 8384512 字节 Range=20 最大写偏移=8388608 引擎自愈读数 clamp_refetch=8384512B clamp_chunks=2｜兜底=未触发（文件存在，r+b 成功）
+    [读数] 面C｜删掉 .idmtmp（r+b 必失败 ⇒ 真走 w+b 兜底）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=[STATE-CLAMP] 发现 3 片进度被盘否证，重取 9437184 字节 Range=21 最大写偏移=9437184 引擎自愈读数 clamp_refetch=9437184B clamp_chunks=3｜兜底=已触发（文件不存在 ⇒ w+b 新建）
+[子进程] 结局：wait=0 status=3 成品=12582912/12582912 内容比对=1（1对 0错位 -1长度错 -2无文件） 首个错位=-1 错位字节=0 error_msg=(空)
+[子进程] 结局：wait=0 status=3 成品=12582912/12582912 内容比对=1（1对 0错位 -1长度错 -2无文件） 首个错位=-1 错位字节=0 error_msg=(空)
+error_msg_rows=5
+clamp_rows=5 clamp_nonzero_rows=3
+--- 产物新鲜度（tools/freshness_gate.py，只复述不改本脚本退码）---
+[DIRTY_INPUT] build/engine_selftest.exe sha12=07e1e7bc3f83 mtime=2026-10-01 23:17:09 -0400 ｜输入最新提交=7777bce 2026-10-01 08:14:34 -0400 fix(core): 跨任务污染根因修复(延后压缩)——删空闲任务不 差=54155s 构建证人=no work to do ⇒ 有 2 个未提交的输入
+         复算: stat -c '%y %s' build/engine_selftest.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- tools/engine_selftest.c src/core src/utils src/protocols CMakeLists.txt ; ninja -C build -n engine_selftest ; git status --porcelain -- tools/engine_selftest.c src/core src/utils src/protocols CMakeLists.txt
+[DIRTY_INPUT] build/ui_snapshot.exe sha12=2e7c06366e2d mtime=2026-10-01 23:18:28 -0400 ｜输入最新提交=b04a18c 2026-10-01 22:52:32 -0400 fix(model): 「大小」列回填有接口了（D1）+ 新探针 I 差=1556s 构建证人=no work to do ⇒ 有 1 个未提交的输入
+         复算: stat -c '%y %s' build/ui_snapshot.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- tools/ui_snapshot.cpp src resources CMakeLists.txt ; ninja -C build -n ui_snapshot ; git status --porcelain -- tools/ui_snapshot.cpp src resources CMakeLists.txt
+[FRESHNESS_GATE] rev=HEAD 目标=4 不合格=3 tool=97a3e7da1334/168行
+注：STALE 不是回归，是发现——它说「这枚二进制不含那次改动」。要能把『产品 exe == 当前源码』这句话讲出口，必须重编产品目标（本轮边界禁止）。两道证人都不读文档、都进退码。
+freshness_rc=1（这道门自己的退码；0=都新鲜 1=有 STALE/MISSING/DIRTY 2=门没跑到）

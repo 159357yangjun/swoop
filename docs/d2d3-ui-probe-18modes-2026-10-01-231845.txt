@@ -1,0 +1,27 @@
+# 新 ui_snapshot.exe（sha256-12=2e7c06366e2d；同一文件 sha1sum-12=fe6a2eed8af1——两种哈希函数，别混用）跑完整 18 模式
+# 含 D2/D3 的 src/core 改动之后的回归面
+
+exe_sha12=2e7c06366e2d modes=18
+IDM_ACTIVATE_PROBE       rc=0   PASS=7   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_ACTIVATE_PROBE.log
+IDM_ARROW_PROBE          rc=0   PASS=0   FAIL=0   人眼对照表（无断言，刻意排除在闸门名单外）  /tmp/idm-probes/ui-1001-231845/IDM_ARROW_PROBE.log
+IDM_CONCURRENCY_PROBE    rc=0   PASS=1   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_CONCURRENCY_PROBE.log
+IDM_FILEICON_PROBE       rc=0   PASS=9   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_FILEICON_PROBE.log
+IDM_FLUSH_PROBE          rc=0   PASS=2   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_FLUSH_PROBE.log
+IDM_FORWARD_PROBE        rc=0   PASS=5   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_FORWARD_PROBE.log
+IDM_ICON_PROBE           rc=0   PASS=0   FAIL=0   人眼对照表（无断言，刻意排除在闸门名单外）  /tmp/idm-probes/ui-1001-231845/IDM_ICON_PROBE.log
+IDM_IPC_PROBE            rc=0   PASS=4   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_IPC_PROBE.log
+IDM_NOTICE_PROBE         rc=0   PASS=5   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_NOTICE_PROBE.log
+IDM_OFFTHREAD_PROBE      rc=0   PASS=4   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_OFFTHREAD_PROBE.log
+IDM_PROXY_PROBE          rc=0   PASS=5   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_PROXY_PROBE.log
+IDM_SCHEDULE_PROBE       rc=0   PASS=3   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_SCHEDULE_PROBE.log
+IDM_SETTINGS_PROBE       rc=0   PASS=4   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_SETTINGS_PROBE.log
+IDM_SITEAUTH_PROBE       rc=0   PASS=5   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_SITEAUTH_PROBE.log
+IDM_SIZECOL_PROBE        rc=0   PASS=5   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_SIZECOL_PROBE.log
+IDM_TEXT_PROBE           rc=0   PASS=1   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_TEXT_PROBE.log
+IDM_TOOLPROBE_PROBE      rc=0   PASS=4   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_TOOLPROBE_PROBE.log
+IDM_ZOOM_PROBE           rc=0   PASS=4   FAIL=0   断言型  /tmp/idm-probes/ui-1001-231845/IDM_ZOOM_PROBE.log
+--- 汇总 ---
+PASS=68 FAIL=0 零断言模式=0
+问题模式: 无
+LOGDIR=/tmp/idm-probes/ui-1001-231845
+idm_shots 已清（截图/tasks.json/history.db）；_data\aria2|ffmpeg|yt-dlp 保留

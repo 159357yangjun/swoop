@@ -237,13 +237,21 @@ static void verify_progress_against_disk(DownloadTask *t) {
 
     for (ci = 0; ci < t->chunk_count; ci++) {
         DownloadChunk *c = &t->chunks[ci];
-        span = (c->end >= c->start) ? (c->end - c->start + 1) : 0;
+        /* 长度未知的单流整取写的是 {start:0, end:-1}：它**没有"这片应该多长"这个上界**。
+         * 老写法把 span 算成 0，于是下面 `avail > span ⇒ avail = span` 把可用字节夹成 0 ——
+         * 等于宣称"这片一个字节都不该在盘上"，任何真实进度都被否证。
+         * 实测后果（自测 [36③]，实档 docs/d3-restart-clamp-red-2026-10-01-231434.txt）：
+         * 完整下好的任务重启后 clamp_chunks=1 / clamp_refetch=整份长度、status 3→2，
+         * 用户看到的是「已完成」变成「暂停」，然后整份文件重下一遍。
+         * 未知片只按 c->downloaded 与 backing 比：盘上少了才重取，够了就不动。 */
+        const int unknown = (c->end < c->start);
+        span = unknown ? 0 : (c->end - c->start + 1);
         asserted = c->done ? span : 0;
         if (c->downloaded > asserted) asserted = c->downloaded;
         if (asserted <= 0) continue;
         avail = backing - c->start;
         if (avail < 0) avail = 0;
-        if (avail > span) avail = span;
+        if (!unknown && avail > span) avail = span;
         if (avail >= asserted) continue;
         refetch += asserted - avail;
         dl_fix += c->downloaded > avail ? c->downloaded - avail : 0;
@@ -1330,6 +1338,18 @@ static DWORD WINAPI start_task_threads(LPVOID arg) {
                              t->save_dir, t->filename);
             }
             if (utf8_move(t->tmp_path, final_path)) {
+                /* 探测没拿到长度（HEAD 无 Content-Length：分块传输、动态端点、瞬时 4xx 后
+                 * 放弃重试）时，file_size 会一路停在 -1，而**成品此刻已经完整落盘**。
+                 * 不回填的后果是用户可见的：列表那一行写着「已完成」，「大小」列却是「-」，
+                 * 同一个 -1 还经 TaskInfo 落进状态文件与下载历史。
+                 * ⚠ 只在探测未拿到长度时才回填：服务器声明过的值是另一个事实
+                 *   （「服务器说多少」≠「盘上有多少」），同值时两种写法不可区分，
+                 *   所以自测 [36②] 记为「不占功」，真正有牙的是 [36①]。
+                 * 读盘必须在这条分支里 —— utf8_move 成功之前 final_path 还不存在。 */
+                if (t->file_size <= 0) {
+                    int64_t on_disk = utf8_file_size(final_path);
+                    if (on_disk > 0) t->file_size = on_disk;
+                }
                 t->status     = TASK_COMPLETED;
                 t->downloaded = t->file_size > 0 ? t->file_size : t->downloaded;
             } else {

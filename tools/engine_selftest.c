@@ -314,6 +314,7 @@ static int clean_outputs(const char *outdir)
                                    "cap.bin", "shared.bin", "norange.bin",
                                    "bigoffset.bin", "ra.bin", "lp.bin",
                                    "cut.bin", "cut2.bin", "cutnr.bin", "rs.bin", "resume.bin",
+                                   "sz_unknown.bin", "sz_known.bin",
                                    "reuse.bin", "cap0.bin", "cap1.bin", "cap2.bin", "cap3.bin",
                                    "px1.bin", "px2.bin", "stall.bin",
                                    "\xe4\xb8\xad\xe6\x96\x87\xe5\x90\x8d\xe6\x96\x87\xe4\xbb\xb6.bin" };
@@ -3011,6 +3012,123 @@ int main(int argc, char **argv)
              * 两面都断言是因为对照面同样不该倒退——回归时无需知道跑的是哪一面。 */
             check("[35] 扰动之后记账必须继续前进（修前 noop=0 面是 前进=0）", dl_max > dl0, d35);
             dlmgr_pause(id_run); Sleep(400); utf8_delete(p35f);
+        }
+    }
+
+    /* ── [36] 长度未知的下载完成后，file_size 必须回填成盘上真实字节数 ──
+     * 来源要写准（初稿把它算成了产品那个「-」的根因，错）：
+     *   产品端到端那次「已完成 + 大小列『-』+ 历史库 ('small.bin', -1, 'completed')」
+     *   发生在 21:59，用的是 22:32 之前的二进制 ⇒ 归因是 **模型侧 D1**（row.fileSize 没有
+     *   setter，add 之后恒为初值 -1；recordFinished 读的正是 model 的 t.fileSize），
+     *   已由 b04a18c 修掉。/small.bin 的 HEAD 是回 Content-Length 的，引擎那条路本来就拿得到长度。
+     * 本条测的是**另一条真实存在、且 D1 修不到**的路：服务器不给长度（分块传输 / 动态端点 /
+     *   HEAD 被限流后放弃）⇒ 探测得 -1 ⇒ GUI 的 `info.file_size > 0` 不成立 ⇒ 那一行
+     *   「已完成」但「大小」列仍是「-」，历史库同样收 -1。
+     * 机制（实读 download_core.c 完成处）：收尾只有 `t->downloaded = t->file_size > 0
+     * ? t->file_size : t->downloaded;` —— **只把进度对齐到大小，从不把盘上的真实长度反送回来**，
+     * 说谎方向固定为「有字节、无大小」。
+     * 两面设计（为什么缺一不可）：
+     *   ① 缺陷面 /cut.bin：HEAD 刻意不给 Content-Length ⇒ 探测得 -1，GET 断流后靠
+     *      Range 补齐 ⇒ 完成后必须 file_size == downloaded == 盘上字节数 == 200000。
+     *   ② 对照面 /small.bin：HEAD 就声明了 1 MiB ⇒ 回填**不许**把服务器声明的值改掉。
+     * ⚠ ②的牙要说清：只拦「回填把已知长度也写成 -1/写错变量」这类自毁；对「无条件用盘上
+     *    大小覆盖声明值」这个变异它**不占功**（两者同值时观测不可区分），别记成它拦住了。
+     *   ③ 重启面：回填改了落盘形状（state 里 file_size 不再是 -1），这条钉住"新形状不会
+     *    被引擎自己的对账否证"——它不是回归既有行为，是给本轮改动配的判别式（见块内注释）。
+     * 突变测试：删掉完成处的回填 ⇒ ① 红（file_size 停在 -1）；把回填条件写反
+     * （`file_size > 0` 时才回填）⇒ ① 同样红。 */
+    printf("\n[36] 长度未知的下载完成后，「大小」必须等于盘上真实字节数\n");
+    {
+        char u36[160], p36[MAX_PATH + 64], d36[320];
+        DownloadConfig c36 = dlmgr_get_config();
+        memset(c36.site_logins, 0, sizeof(c36.site_logins));
+        c36.site_login_count = 1;
+        strncpy(c36.site_logins[0].match, "127.0.0.1", sizeof(c36.site_logins[0].match) - 1);
+        strncpy(c36.site_logins[0].user,  user,        sizeof(c36.site_logins[0].user)  - 1);
+        strncpy(c36.site_logins[0].pass,  pass,        sizeof(c36.site_logins[0].pass)  - 1);
+        dlmgr_set_config(&c36);
+
+        /* ①缺陷面 ②对照面：同一个夹具跑两遍，只有「服务器有没有声明长度」这一个变量不同 */
+        long long want36[2] = { 200000, 1048576 };
+        const char *file36[2] = { "sz_unknown.bin", "sz_known.bin" };
+        const char *face36[2] = { "①探测无长度(/cut.bin)", "②探测有长度(/small.bin)" };
+        for (int k36 = 0; k36 < 2; k36++) {
+            snprintf(u36, sizeof(u36),
+                     k36 ? "http://127.0.0.1:%d/small.bin" : "http://127.0.0.1:%d/cut.bin", port);
+            snprintf(p36, sizeof(p36), "%s\\%s", outdir, file36[k36]);
+            char t36[MAX_PATH + 80];
+            snprintf(t36, sizeof(t36), "%s.idmtmp", p36);
+            utf8_delete(p36); utf8_delete(t36);
+            server_reset(port);
+
+            int id36 = dlmgr_add(u36, outdir, file36[k36], 1, NULL, NULL, NULL, NULL);
+            if (id36 < 0) {
+                snprintf(d36, sizeof(d36), "%s 建任务失败 id=%d", face36[k36], id36);
+                check("[36] 两面任务都建得出来", 0, d36);
+                continue;
+            }
+            dlmgr_start(id36);
+            int st36 = -1; int64_t dl36 = 0;
+            wait_final(id36, 30000, &st36, &dl36);
+            TaskInfo i36; memset(&i36, 0, sizeof(i36));
+            int rr36 = dlmgr_get_task_info(id36, &i36);
+            long long disk36 = file_size_i64_of(p36);
+            snprintf(d36, sizeof(d36),
+                     "%s｜输入: 声明长度=%lld 盘上=%lld｜读到的: status=%d 取回=%d "
+                     "file_size=%lld downloaded=%lld（判据: file_size 要 == 盘上 == %lld）",
+                     face36[k36], want36[k36], disk36, st36, rr36,
+                     (long long)i36.file_size, (long long)i36.downloaded, want36[k36]);
+            check(k36 ? "[36②] 服务器已声明长度时 file_size 保持声明值（回填不许覆盖它）"
+                      : "[36①] 长度未知、补齐完成后 file_size 必须等于盘上真实字节数（修前恒 -1）",
+                  st36 == 3 && rr36 == 0 && disk36 == want36[k36] &&
+                      i36.file_size == disk36 && i36.downloaded == disk36,
+                  d36);
+            /* 无条件印：`check()` 只在**失败**时把 detail 带到盘上，通过就只剩一行 [PASS]，
+             * 于是"引擎给的是 1048576 还是 -1"这个数在绿侧根本没有证据（同一个坑
+             * 已经在 p0_rerun.sh 的 error_msg 那行上踩过一次）。 */
+            printf("    [36 读数] %s\n", d36); fflush(stdout);
+
+            /* ③ 重启面：我刚把 file_size 从 -1 改成盘上真实长度，得确认这个新落盘形状
+             *    不会被引擎自己的对账否证。长度未知的任务收尾后 state 里写的是
+             *    {start:0, end:-1, downloaded:N, done:1}，而 verify_progress_against_disk
+             *    的 span = (end>=start) ? end-start+1 : 0 ⇒ end=-1 时 span=0、avail 被夹到 0。
+             *    若它据此把 done=1 的整片判成"被盘否证"，用户看到的是：重启之后
+             *    「已完成」变成「暂停」，并把已经完整躺在盘上的整份文件重下一遍。
+             *    ⚠ dlmgr_load_state 成功返回 **0**（不是恢复条数，实读 :2225），
+             *    条数走 dlmgr_get_task_infos —— 初稿把 lc36 写成 >=1 是测具自己的错期望，
+             *    那条红当时仍由 status=2 / clamp_chunks=1 / clamp_refetch=200000 三个
+             *    产品读数独立成立（实档 docs/d2-selftest-restart-red-…txt）。 */
+            char sj36[MAX_PATH + 64];
+            TaskInfo r36; memset(&r36, 0, sizeof(r36));
+            int sv36 = -1, lc36 = -1, rid36 = -1, rg36 = -1;
+            if (k36 == 0) {
+                snprintf(sj36, sizeof(sj36), "%s\\sz_reload.json", outdir);
+                utf8_delete(sj36);
+                sv36 = dlmgr_save_state(sj36);
+            }
+            dlmgr_remove(id36);
+            if (k36 == 0) {
+                lc36 = dlmgr_load_state(sj36);
+                TaskInfo arr36[32];
+                int n36 = dlmgr_get_task_infos(arr36, 32);
+                for (int q36 = 0; q36 < n36 && q36 < 32; q36++)
+                    if (strcmp(arr36[q36].filename, file36[0]) == 0) rid36 = arr36[q36].task_id;
+                if (rid36 >= 0) rg36 = dlmgr_get_task_info(rid36, &r36);
+                snprintf(d36, sizeof(d36),
+                         "③重启面｜输入: save=%d load=%d 队列=%d 找回id=%d state里file_size=%lld"
+                         "｜读到的: status=%d 取回=%d clamp_chunks=%d clamp_refetch=%lld file_size=%lld",
+                         sv36, lc36, n36, rid36, want36[0],
+                         r36.status, rg36, r36.clamp_chunks,
+                         (long long)r36.clamp_refetch_bytes, (long long)r36.file_size);
+                check("[36③] 长度未知的成品重启后不被自己否证（仍已完成、不误报、不重下）",
+                      lc36 == 0 && rid36 >= 0 && rg36 == 0 && r36.status == 3 &&
+                          r36.clamp_chunks == 0 && r36.clamp_refetch_bytes == 0 &&
+                          r36.file_size == want36[0], d36);
+                printf("    [36 读数] %s\n", d36); fflush(stdout);
+                if (rid36 >= 0) dlmgr_remove(rid36);
+                utf8_delete(sj36);
+            }
+            utf8_delete(p36); utf8_delete(t36);
         }
     }
 
