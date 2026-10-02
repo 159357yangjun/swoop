@@ -1,0 +1,4 @@
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02\_data
+[FAIL] [K1] Ctrl+N 打开新建任务对话框（受理者=MainWindow 已被处理=1 弹窗数 0→0）
+[FAIL] [K2] 从「下载链接」按两次 Tab 落在目录输入框（输入框数=4 锚点=QLineEdit 一次=QLineEdit 二次=「浏览...」类=QPushButton）
