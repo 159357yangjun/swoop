@@ -1368,10 +1368,23 @@ int main(int argc, char** argv) {
         }
         bool stillListening = false;
         { QTcpServer probeSrv; stillListening = !probeSrv.listen(QHostAddress::LocalHost, port); }
-        QDir(dir).removeRecursively();
-        printf("    [LIVE 收摊] 端口仍在监听=%d 数据目录还在=%d\n",
-               stillListening ? 1 : 0, QDir(dir).exists() ? 1 : 0);
-        dlmgr_destroy();
+        dlmgr_destroy();          // 先让引擎收摊（MainWindow 不 delete，见上面的注释）
+        /* 逐条目删 + 先摘 SQL 命名连接：HistoryStore 没有 close()，句柄在单例里，
+         * 不摘就删不掉 history.db（实测每轮剩这一个）；removeRecursively 遇到一个
+         * 删不掉的条目会整棵放弃，所以先自己走一遍再收尾。 */
+        if (QSqlDatabase::contains(QStringLiteral("idm_next_history")))
+            QSqlDatabase::removeDatabase(QStringLiteral("idm_next_history"));   // 实读 history_store.cpp:19
+        {
+            QDir dq(dir);
+            const QFileInfoList es = dq.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
+            for (const QFileInfo& fi : es) {
+                if (fi.isDir()) QDir(fi.absoluteFilePath()).removeRecursively();
+                else QFile::remove(fi.absoluteFilePath());
+            }
+        }
+        const bool purged = QDir(dir).removeRecursively() || !QDir(dir).exists();
+        printf("    [LIVE 收摊] 端口仍在监听=%d 数据目录已清空=%d\n",
+               stillListening ? 1 : 0, purged ? 1 : 0);
         return (okPre && okDone && okSize && okPaintNoSource) ? 0 : 1;
     }
 
