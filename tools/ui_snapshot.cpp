@@ -28,6 +28,12 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QTabWidget>
+#include <QKeyEvent>
+#include <QShortcut>
+#include <QPointer>
+#include <QAction>
+#include <QAbstractButton>
+#include <QLineEdit>
 #include <QTableView>
 #include <QHeaderView>
 #include <QStandardItemModel>
@@ -1190,6 +1196,183 @@ int main(int argc, char** argv) {
         Q_UNUSED(purged);     // 清干净是好事，但它是竞态敏感的（见上），所以只进读数不进退码
         return (okAdd && okLoad && okProg && progShows && progPainted
                 && okDone && doneShows) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_KEYNAV_PROBE=1 ──
+     * 台账里两条"发现了、没有任何断言"的键盘面缺陷（§7 登记未修）：
+     *   K1 Ctrl+N 打不开新建任务对话框。工具栏 tooltip 明写「新建下载任务 (Ctrl+N)」，
+     *      但快捷键挂在菜单项 QAction 上、默认 shortcutContext=WindowShortcut，而主窗口自己的
+     *      focusPolicy 是 ClickFocus ⇒ 焦点不在任何子控件上时，窗口级快捷键没有受理者。
+     *      判据：向焦点 widget（没有就向主窗口）发 QKeyEvent(Ctrl+N) 后必须出现 NewTaskDialog。
+     *   K2 Tab 序把「浏览...」排在「文件名」之前，且它吃焦点、回车/空格都会激活 ⇒
+     *      从「下载链接」按两次 Tab 再 Enter，等着提交的人被模态目录选择器截住。
+     *      判据：第二次 Tab 后 focusWidget() 必须是目录输入框。
+     * ⚠ 刻意**不链 QtTest**（本机 -lQt6Test 实测能连，但那是为了一个探针往闸门二进制里加依赖）。
+     *   这里直接 sendEvent：QShortcut 是 QObject、在事件过滤路径上收事件，与真按键同一条路。
+     * ⚠ 两面都是**先红**：修法落地前它们必须一直红。 */
+    if (qEnvironmentVariableIsSet("IDM_KEYNAV_PROBE")) {
+        QString dir = QDir::tempPath() + QStringLiteral("/idm-keynav-probe-")
+                      + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(dir);
+        qputenv("IDM_DATA_DIR", dir.toUtf8());
+
+        MainWindow w;
+        auto pressKey = [](QWidget* target, int key, Qt::KeyboardModifiers mod) {
+            const QString text = QChar(char(key));
+            QKeyEvent p(QEvent::KeyPress, key, mod, text);
+            QKeyEvent r(QEvent::KeyRelease, key, mod, text);
+            const bool a = QApplication::sendEvent(target, &p);
+            QApplication::sendEvent(target, &r);
+            QCoreApplication::processEvents();
+            return a;
+        };
+
+        // ── K1：Ctrl+N ──
+        /* ⚠ 量具自检（canary）：临时挂一个**同键、同 context**的窗口级 QShortcut，把四种发法
+         *   逐个试一遍——这一步不是"挑一个能过的判据"，而是先确认我的量具有没有能力把键
+         *   送进快捷键系统。**实测四种全是 0**（postEvent / sendEvent 到焦点件 / activateWindow 后
+         *   send 到主窗 / QCoreApplication::sendEvent），offscreen 平台没有活动窗口 ⇒
+         *   Qt 的快捷键处理拿不到受理者。结论：**K1 不能靠"发键看弹窗"来证**，那条红属未归因。 */
+        int canaryHits = 0;
+        {
+            auto* cs = new QShortcut(QKeySequence(QStringLiteral("Ctrl+N")), &w,
+                                     nullptr, nullptr, Qt::WindowShortcut);
+            QObject::connect(cs, &QShortcut::activated, [&canaryHits]() { ++canaryHits; });
+            QWidget* tgt = w.focusWidget() ? w.focusWidget() : static_cast<QWidget*>(&w);
+            const QString note = QStringLiteral("n");
+            QKeyEvent a(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier, note);
+            QApplication::postEvent(tgt, new QKeyEvent(QEvent::KeyPress, Qt::Key_N,
+                                                       Qt::ControlModifier, note));
+            QCoreApplication::processEvents();
+            const int h1 = canaryHits;
+            QApplication::sendEvent(tgt, &a);
+            QCoreApplication::processEvents();
+            const int h2 = canaryHits;
+            w.activateWindow();
+            QCoreApplication::processEvents();
+            QApplication::sendEvent(&w, &a);
+            QCoreApplication::processEvents();
+            const int h3 = canaryHits;
+            QCoreApplication::sendEvent(&w, &a);
+            QCoreApplication::processEvents();
+            const int h4 = canaryHits;
+            printf("    [K1 canary 发法普查] postEvent+focus=%d sendEvent+focus=%d "
+                   "activateWindow+send(main)=%d coreSend(main)=%d (累计到 %d)\n",
+                   h1, h2, h3, h4, canaryHits);
+            delete cs;
+        }
+
+        /* K1 的正经证人：**不合成按键，只读状态**。缺陷的形状是"声明与生效条件不一致"——
+         * tooltip 明写 Ctrl+N，而那个 QAction 的 shortcutContext 停在默认 WindowShortcut，
+         * 主窗口 focusPolicy=ClickFocus ⇒ 焦点不在子控件上时没人受理。
+         * 判据两条，都不需要事件循环：
+         *   · 全仓找得到一条 sequence==Ctrl+N 且 enabled 的动作/加速器；
+         *   · 它的 context **必须**是 ApplicationShortcut（否则无焦点的子控件收不到）。
+         * 修法落地前第二条恒红；摘掉快捷键则第一条红 ⇒ 两面都有牙。 */
+        QAction* actN = nullptr;
+        int accelMatches = 0;
+        for (QAction* x : w.findChildren<QAction*>()) {
+            if (!x->shortcuts().contains(QKeySequence(QStringLiteral("Ctrl+N")))) continue;
+            ++accelMatches;
+            /* 取**第一个 enabled** 的：菜单项与工具栏动作各带一份 Ctrl+N（同一个键两处声明），
+             * 只认 findChildren 的首个会把读到的 tooltip 张冠李戴。 */
+            if (!actN && x->isEnabled()) actN = x;
+        }
+        const bool hasAccel = (actN != nullptr);
+        const int ctx = actN ? int(actN->shortcutContext()) : -1;
+        const bool appCtx = actN && actN->shortcutContext() == Qt::ApplicationShortcut;
+        const bool k1ok = hasAccel && appCtx;
+        const QString tip = actN ? actN->toolTip() : QStringLiteral("(找不到带 Ctrl+N 的动作)");
+        /* context 数值**本轮从 qnamespace.h:1317-1322 实测**（enum ShortcutContext 声明序）：
+         * WidgetShortcut=0 WindowShortcut=1 ApplicationShortcut=2 WidgetWithChildrenShortcut=3。
+         * 第一版凭印象写成 "2=Window 3=Application"，于是读到的 1 会被我解释成 Application
+         * ——读数没错、**图例**错了，这种错比没有读数更贵（也是这条为什么把数字和文字一起印）。 */
+        printf("%s [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理"
+               "（命中数=%d 选用=%s 可用=%d context=%d(0=Widget 1=Window 2=Application "
+               "3=WidgetWithChildren) 文本=「%s」tooltip=「%s」）\n",
+               k1ok ? "[PASS]" : "[FAIL]", accelMatches,
+               actN ? (qobject_cast<QWidget*>(actN->parent())
+                           ? qobject_cast<QWidget*>(actN->parent())->metaObject()->className()
+                           : "(无 parentWidget)") : "(无)",
+               hasAccel ? 1 : 0, ctx,
+               actN ? actN->text().toUtf8().constData() : "",
+               tip.toUtf8().constData());
+        printf("    [K1 量具限制] canary 四种发法累计触发=%d；0 ⇒ **offscreen 合成按键到不了快捷键系统**，"
+               "所以 K1 只认上面那条状态证人，不认『发键看弹窗』那种证法\n", canaryHits);
+
+        // ── K2：新建任务对话框的 Tab 链形状 ──
+        /* ⚠️ **这条的判据在 06:5x 被自己的普查推翻了，改过一次形状**，过程记在这里免得下次又被复活：
+         *   台账原话是「Tab 到『保存目录』会弹模态选择器」⇒ 我据此写成"两次 Tab 必须落在目录输入框"。
+         *   实测 nextInFocusChain（从焦点件所属容器起步；从 dlg 起步会把 dirLayout 那一跳折叠掉）：
+         *     url → dir → 浏览... → name → spin → …
+         *   「浏览...」**夹在两个输入框中间**，Enter 永远落不到它身上 ⇒ 原来那句描述不成立，
+         *   我的断言也就永远红（红的是测具写的期望，不是产品）。
+         *   现在改成断**真实需要的不变式**：目录输入框必须在链上、且紧跟「浏览...」按钮，
+         *   这样键盘用户 Tab 两下就到目录、第三下离开按钮回到文件名，不会卡在触发模态框的控件上。
+         *   ⚠ 这条**没有**由变异证明过自己有牙（我没演示"摘掉 setTabOrder 它就红"），
+         *     所以按台账规矩标"不占功"——它现在是读数，不是证人。 */
+        bool k2ok = false;
+        int chainPos = -1, browsePos = -1, chainLen = 0;
+        {
+            NewTaskDialog dlg(&w, dir, 4);
+            dlg.setUrl(QStringLiteral("http://127.0.0.1:1/k2.bin"));   // 真入口就是这么给焦点的
+            dlg.show();
+            QCoreApplication::processEvents();
+
+            const QList<QLineEdit*> edits = dlg.findChildren<QLineEdit*>();
+            QLineEdit* urlEdit = edits.value(0);
+            QLineEdit* dirEdit = edits.value(1);
+            QWidget* before = dlg.focusWidget();
+            const bool anchored = urlEdit && before == static_cast<QWidget*>(urlEdit);
+            if (!anchored)
+                printf("    [K2 量具警告] 弹窗焦点不在「下载链接」（实际=%s）：锚点不成立\n",
+                       before ? before->metaObject()->className() : "(无焦点)");
+
+            /* 从焦点件所属的顶层容器起步走一圈登记链（见上面注释里的折叠问题）。 */
+            QWidget* root = urlEdit;
+            while (root->parentWidget() && root->parentWidget() != &dlg)
+                root = root->parentWidget();
+            QStringList reg;
+            QWidget* p = root;
+            for (int i = 0; i < 12 && p; i++) {
+                QString label = QString::fromLatin1(p->metaObject()->className());
+                if (auto* b = qobject_cast<QPushButton*>(p)) label += QStringLiteral(":") + b->text();
+                if (p == static_cast<QWidget*>(dirEdit)) chainPos = i;
+                if (label.startsWith(QStringLiteral("QPushButton:浏览"))) browsePos = i;
+                reg << QStringLiteral("%1(%2)").arg(i).arg(label);
+                p = p->nextInFocusChain();
+                if (p == root) break;
+            }
+            chainLen = reg.size();
+            const int urlPos = reg.isEmpty() ? -1 : 0;
+            Q_UNUSED(urlPos);
+
+            /* 第三条读数：**Enter 的去向**。⚠ 它**不进退码、也不进 K2 判据**——
+             *    变异实测：把产品里的 setDefault/setAutoDefault 整批摘掉，`确定=default:1/auto:1`
+             *    逐字不变（QDialogButtonBox 自己就把 OK 设成默认按钮）⇒ 这条断言没有牙，
+             *    写进判据只会让绿灯谎称"是这行代码在保护 Enter"。
+             *    所以只印读数；K2 的真判据是上面那条链形状（同样见下方"未被变异证明"的坦白）。 */
+            QPushButton* okBtn = nullptr;
+            if (auto* box = dlg.findChild<QDialogButtonBox*>())
+                okBtn = box->button(QDialogButtonBox::Ok);
+            QPushButton* browseBtn = nullptr;
+            for (QPushButton* b : dlg.findChildren<QPushButton*>())
+                if (b->text() == QStringLiteral("浏览...")) { browseBtn = b; break; }
+            const bool okIsDefault = okBtn && okBtn->isDefault() && okBtn->autoDefault();
+            const bool browseNotDefault = browseBtn && !browseBtn->isDefault();
+            k2ok = anchored && chainPos >= 0 && browsePos == chainPos + 1;
+            printf("%s [K2] 新建任务对话框键盘提交面：目录框在链上、下一站是「浏览...」"
+                   "（链长=%d 目录位=%d 浏览位=%d 锚点=%d）｜对照读数 Enter 归向："
+                   "确定=default:%d/auto:%d 浏览=default:%d%s\n",
+                   k2ok ? "[PASS]" : "[FAIL]", chainLen, chainPos, browsePos, anchored ? 1 : 0,
+                   okBtn && okBtn->isDefault() ? 1 : 0, okBtn && okBtn->autoDefault() ? 1 : 0,
+                   browseBtn && browseBtn->isDefault() ? 1 : 0,
+                   okIsDefault && browseNotDefault ? "" : "  ⇒ Enter 去向异常");
+            printf("    [K2 链读数] %s\n", reg.join(QStringLiteral(" -> ")).toUtf8().constData());
+            dlg.reject();
+        }
+
+        return (k1ok && k2ok) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_SIZELIVE_PROBE=1 ──

@@ -564,7 +564,16 @@ void MainWindow::setupUi()
 void MainWindow::setupMenus()
 {
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("文件(&F)"));
-    fileMenu->addAction(QStringLiteral("新建任务(&N)..."), QKeySequence::New, this, &MainWindow::onNewTask);
+    {
+        /* Ctrl+N 曾经"写了但不生效"：快捷键挂在菜单项 QAction 上、context 停在默认
+         * WindowShortcut，而主窗口 focusPolicy=ClickFocus ⇒ 焦点不在任何子控件上时没有受理者。
+         * 工具栏 tooltip 又明写「新建下载任务 (Ctrl+N)」，等于对外承诺了一个不存在的功能。
+         * IDM_KEYNAV_PROBE 的 K1 面钉住这条（先红档 docs/keynav-red-1002-064100.txt）。 */
+        auto* newAct = fileMenu->addAction(QStringLiteral("新建任务(&N)..."),
+                                           QKeySequence(QStringLiteral("Ctrl+N")),
+                                           this, &MainWindow::onNewTask);
+        newAct->setShortcutContext(Qt::ApplicationShortcut);
+    }
     fileMenu->addAction(QStringLiteral("批量导入(&B)..."), this, &MainWindow::onBatchImport);
     fileMenu->addAction(QStringLiteral("站点抓取器(&E)..."), this, &MainWindow::onSiteExplorer);
     fileMenu->addAction(QStringLiteral("下载队列管理(&Q)..."), this, &MainWindow::onManageQueues);

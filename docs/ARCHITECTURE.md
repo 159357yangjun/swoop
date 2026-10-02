@@ -1705,6 +1705,7 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 | IDM_TEXT_PROBE | 断言型 | 是 | 1 |
 | IDM_TOOLPROBE_PROBE | 断言型 | 是 | 4 |
 | IDM_SIZELIVE_PROBE | 断言型 | 是 | 3 |
+| IDM_KEYNAV_PROBE | 断言型 | 是 | 2 |
 | IDM_ZOOM_PROBE | 断言型 | 是 | 4 |
 <!-- PROBE-ROSTER-END -->
 上表的三个集合恒等式（模式名 / 类型 / 是否在 CI 名单）由 `python tools/probe_roster.py` 现算比对，
@@ -2549,3 +2550,46 @@ QProcess 起服务、Qt 自己试绑端口判空闲、`QTcpSocket` 打 `/_stats`
 **收摊**：每次运行留下的 `%TEMP%\idm-sizelive-probe-<ms>`（各含一个被单例句柄占住的 history.db）
 本轮清过两批共 14+ 个；**判据不含清理**（竞态敏感，见 §7 第 26 条末），但读数行印出路径。
 名单门 `probe_roster` 同步收录新模式（代码声明=20 / CI=18 / 文档表=20，违规=0）。
+
+### 2026-10-02 06:3x→07:2x（第 30 条）— 键盘面两条登记项：一条**真修了**，另一条是**我写错的期望**
+
+台账里挂着两条"发现了、没有任何断言"的键盘面问题。本轮给它们配探针 `IDM_KEYNAV_PROBE`（K1/K2 两面），
+结果一面成立、一面被自己的普查推翻。**推翻的那条比修好的那条更值得记**。
+
+**K1（Ctrl+N）成立并已修**：`setupMenus()` 里那条 `fileMenu->addAction("新建任务(&N)...", QKeySequence::New, …)`
+的 `shortcutContext` 停在默认 `WindowShortcut`，而主窗口 `focusPolicy=ClickFocus` ⇒ 焦点不在任何子控件上时
+没有受理者；工具栏 tooltip 却明写「新建下载任务 (Ctrl+N)」，等于对外承诺了一个不生效的键。
+修法：显式 `newAct->setShortcutContext(Qt::ApplicationShortcut)`（main_window.cpp:575）。
+变异（摘掉这一行）⇒ `[FAIL] … context=1(0=Widget 1=Window 2=Application 3=WidgetWithChildren)`，还原 ⇒ `context=2 [PASS]`。**这条有牙。**
+
+**量具限制（差点把测具的锅记到产品头上）**：第一版 K1 判据是"发 Ctrl+N 看有没有弹窗"。
+canary 用同键同 context 的临时 `QShortcut` 试了四种发法——`postEvent` / `sendEvent` 到焦点件 /
+`activateWindow` 后 send 到主窗 / `QCoreApplication::sendEvent`——**实测累计触发 0**：
+offscreen 平台没有活动窗口，Qt 的快捷键处理拿不到受理者。所以那条红属未归因，改成只读状态
+（动作存在 + context 值）才立得住。读数行仍印 canary 数，免得下次有人以为"发键能证"。
+
+**K2 被我写的期望害了一次，随后撤回**：台账原话是「Tab 到『保存目录』会弹模态选择器」，
+我据此断言"两次 Tab 必须落在目录输入框"。为了让它绿，我先往 `NewTaskDialog` 加了 7 条 `setTabOrder`。
+然后做了整链普查（`nextInFocusChain`，从焦点件所属容器起步）：
+
+```
+url → dir → 浏览... → name → spin → lineEdit → combo → 刷新格式 → QWidget → QLabel → buttonBox → 确定
+```
+
+两件事同时暴露出来：① **摘掉全部 `setTabOrder` 后这个读数逐位不变** ⇒ 我加的那批是死代码
+（Qt 默认的"按创建顺序"链本来就已经是这个形状）；② 「浏览...」**夹在两个输入框中间**，
+Enter 永远落不到它身上 ⇒ 台账那句描述本身不成立。于是我把产品改动**整批回退**
+（`git checkout -- src/gui/new_task_dialog.cpp`），并把 K2 判据改成断真实需要的不变式
+（目录框在链上、下一站是「浏览...」）。`setDefault/AutoDefault` 那条也试过：摘掉后
+`确定=default:1/auto:1` 不变（`QDialogButtonBox` 自己就设了）⇒ 无牙，降级成对照读数、不进退码。
+
+**坦白清单**：K2 现在这条断言**没有被任何变异证明过**（我没能构造出"产品变一下它就红"的代码状态），
+所以它按台账规矩算**读数**，不算证人；K1 才是本轮唯一有牙的一面。
+套件现 **21 模式 / PASS=77 FAIL=0 零断言=0**，引擎门 `180/0`，NOTICE §1 四行重签
+（src 931274 / tools 596027 / docs 393443 / .github 36279，合计仍 354=344+10）。
+
+**踩到的两个测具坑（都是第三次犯同一类）**：
+1. 我给 `context` 写的图例凭印象写成"2=Window 3=Application"，实测值是 1——**读数没错、解释错了**。
+   现在图例从 qnamespace.h:1317-1322 现抄，并把数字与文字一起印。
+2. `ninja -t commands` 那次我拿旧 exe 读了两轮"新"读数：一次是正则把 `new_task_dialog.cpp` 改坏、
+   编译 FAILED 我却在看上一条 PASS。**`BUILD_RC!=0` 的那一轮不存在"跑过了"**——已在本条再次确认。

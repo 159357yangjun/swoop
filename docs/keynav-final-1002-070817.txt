@@ -1,0 +1,7 @@
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02\_data
+    [K1 canary 发法普查] postEvent+focus=0 sendEvent+focus=0 activateWindow+send(main)=0 coreSend(main)=0 (累计到 0)
+[PASS] [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理（命中数=1 选用=QMenu 可用=1 context=2(0=Widget 1=Window 2=Application 3=WidgetWithChildren) 文本=「新建任务(&N)...」tooltip=「新建任务(N)」）
+    [K1 量具限制] canary 四种发法累计触发=0；0 ⇒ **offscreen 合成按键到不了快捷键系统**，所以 K1 只认上面那条状态证人，不认『发键看弹窗』那种证法
+[PASS] [K2] 新建任务对话框键盘提交面：目录框在链上、下一站是「浏览...」（链长=12 目录位=1 浏览位=2 锚点=1）｜对照读数 Enter 归向：确定=default:1/auto:1 浏览=default:0
+    [K2 链读数] 0(QLineEdit) -> 1(QLineEdit) -> 2(QPushButton:浏览...) -> 3(QLineEdit) -> 4(QSpinBox) -> 5(QLineEdit) -> 6(QComboBox) -> 7(QPushButton:刷新格式) -> 8(QWidget) -> 9(QLabel) -> 10(QDialogButtonBox) -> 11(QPushButton:确定)
