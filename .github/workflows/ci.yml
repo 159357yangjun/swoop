@@ -26,6 +26,13 @@ jobs:
         run: python tools/live_roster.py
         working-directory: ${{ github.workspace }}
 
+      # 配置例外说明（同上：仅新增一个测试入口，无新依赖、无版本变更）：探针模式名单同样不能靠人记。
+      # 2026-10-02 加 IDM_SIZEWIRING_PROBE 时只改了源码与 CI，文档一处没登记 ⇒ "哪个模式存在/是不是断言型/
+      # 进不进闸门"三件事全靠当前代码恰好遵守。这条门把三个集合（源码声明 / ci.yml 名单 / docs 表）互钉。
+      - name: Probe-roster gate (docs PROBE-ROSTER table == modes declared in source == CI list)
+        run: python tools/probe_roster.py
+        working-directory: ${{ github.workspace }}
+
       # 配置例外说明（同上：仅新增一个测试入口，无新依赖、无版本变更）：读数里出现裸控制字节时，工具层会把整段输出当成二进制丢掉，而编译器对其中两种写法根本不给警告，只能靠这条文本门。
       # 整段变成不可见的"二进制"，而 GCC 对其中两种（\%、）根本不给警告 ⇒ 只能靠这条文本门。
       - name: Control-byte gate (no bare control bytes in tracked text files)

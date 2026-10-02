@@ -1683,6 +1683,45 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 总数 62 我用第二套实现复算过一遍：不读汇总行，而是从盘上 15 份 `<模式>.log` 逐个 `grep -ac '\[PASS\]'` 相加
 ⇒ 58（前 14 个模式）+ 4（ZOOM）= **62**，与脚本自己的累加器一致；17 份日志最小 349 字节，没有一份是空的。
 
+<!-- PROBE-ROSTER-BEGIN 由 tools/probe_roster.py 复算；改探针必须同批改这张表，否则门红 -->
+| 模式 | 类型 | 在 CI 闸门名单 | 断言条数（本轮实测） |
+|---|---|---|---|
+| IDM_ACTIVATE_PROBE | 断言型 | 是 | 7 |
+| IDM_ARROW_PROBE | 人眼对照 | 否 | 0 |
+| IDM_CONCURRENCY_PROBE | 断言型 | 是 | 1 |
+| IDM_FILEICON_PROBE | 断言型 | 是 | 9 |
+| IDM_FLUSH_PROBE | 断言型 | 是 | 2 |
+| IDM_FORWARD_PROBE | 断言型 | 是 | 5 |
+| IDM_ICON_PROBE | 人眼对照 | 否 | 0 |
+| IDM_IPC_PROBE | 断言型 | 是 | 4 |
+| IDM_NOTICE_PROBE | 断言型 | 是 | 5 |
+| IDM_OFFTHREAD_PROBE | 断言型 | 是 | 4 |
+| IDM_PROXY_PROBE | 断言型 | 是 | 5 |
+| IDM_SCHEDULE_PROBE | 断言型 | 是 | 3 |
+| IDM_SETTINGS_PROBE | 断言型 | 是 | 4 |
+| IDM_SITEAUTH_PROBE | 断言型 | 是 | 5 |
+| IDM_SIZECOL_PROBE | 断言型 | 是 | 5 |
+| IDM_SIZEWIRING_PROBE | 断言型 | 是 | 4 |
+| IDM_TEXT_PROBE | 断言型 | 是 | 1 |
+| IDM_TOOLPROBE_PROBE | 断言型 | 是 | 4 |
+| IDM_ZOOM_PROBE | 断言型 | 是 | 4 |
+<!-- PROBE-ROSTER-END -->
+上表的三个集合恒等式（模式名 / 类型 / 是否在 CI 名单）由 `python tools/probe_roster.py` 现算比对，
+不一致即 rc=1。**它当时是红的**：`IDM_SIZEWIRING_PROBE` 已进二进制与 CI，但文档一处登记都没有——
+正是"只存在于当前代码恰好遵守、没人断言"的那类约定。
+
+**这道门自己先红过（四个变异，逐条留档）**：`python tools/probe_roster.py`
+| 变异 | 期望 | 实测 |
+|---|---|---|
+| A 删掉 `IDM_SIZEWIRING_PROBE` 那一行 | 红 | `[RED] ROSTER-MISSING IDM_SIZEWIRING_PROBE`，违规=1，rc=1 |
+| B 把 `IDM_ICON_PROBE`（人眼对照）改标成「断言型/在CI」 | 红 | 三条：`ROSTER-CI`＋`ROSTER-CI-FLAG`＋`ROSTER-KIND`，rc=1 |
+| C 删掉一个旧模式行（ZOOM） | 红 | `[RED] ROSTER-MISSING IDM_ZOOM_PROBE`，rc=1 |
+| D 整张表被 `<!-- -->` 注释掉 | **不许变绿** | rc=1（锚点之间解析不出数据行 ⇒ 前置不成立即红） |
+复原后 `违规=0 rc=0`，且 `git diff --numstat docs/ARCHITECTURE.md` 与备份 `sha1sum` 双向对上
+（两边同为 `8d1fe0b6ff0a…`），证明变异已逐字撤回。入口已接进 CI（`probe_roster gate`，排在 live-roster 之后）。
+**它覆盖不到什么**：断言条数那一列不参与比对（每轮都在动，只要求是非负整数并印出来给人核）；
+"某个模式该不该存在"仍是人定的，门只保证三处不打架。
+
 **这条覆盖不到什么**（写清楚，别被读成"UI 没问题了"）：
 ① CI 侧那道 `N≥100 且 M=0` 的判据本轮没碰、也没在 runner 上执行过 ⇒ 与之前一样是**永久验证缺口**，
 本机这 62 条不能顶替它；② 探针跑的是 `QT_QPA_PLATFORM=offscreen` 的 `ui_snapshot.exe`，
