@@ -32,7 +32,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEXT_EXT = {".c", ".h", ".cpp", ".hpp", ".py", ".md", ".qss", ".txt", ".json",
-            ".js", ".yml", ".yaml", ".ps1", ".bat", ".qrc", ".nsi", ".in", ".cmake"}
+            ".js", ".yml", ".yaml", ".ps1", ".bat", ".qrc", ".nsi", ".in", ".cmake",
+            # .sh 补进来是 2026-10-01 收的账：仓里一直跟踪着 .sh（tools/p0_rerun.sh、
+            # ui_probe_run.sh、load_diff_run.sh、mutation_fixture_fileicon.sh …），
+            # 而门以前看不见它们 ⇒ 一个"扫了 N 个文件"的绿灯里含着一整类零覆盖的文件。
+            ".sh"}
 ALLOWED = {0x09, 0x0A, 0x0D}
 NAMES = {0x00: "NUL", 0x01: "SOH(\\01 八进制转义被吃)", 0x02: "STX(\\02 同上)",
          0x07: "BEL", 0x08: "BS", 0x0B: "VT", 0x0C: "FF", 0x1B: "ESC", 0x7F: "DEL"}

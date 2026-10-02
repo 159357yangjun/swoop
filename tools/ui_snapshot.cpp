@@ -923,9 +923,25 @@ int main(int argc, char** argv) {
         printf("%s FileType 六个取值每个都画得出图标（非空且有墨）\n", everyTypeHasIcon ? "[PASS]" : "[FAIL]");
         printf("%s 六个取值的图标两两不同（漏 case 会撞成同一个）\n", typesDistinct ? "[PASS]" : "[FAIL]");
         printf("%s detectFileType 永不返回 All（10 种输入，含空串与「a.」）\n", allNeverProduced ? "[PASS]" : "[FAIL]");
+        /* 第 9 条：应用级图标（任务栏 + 托盘兜底的唯一真源）。
+         * 由来是 2026-10-01 冒烟里 Qt 打的那句「QSystemTrayIcon::setVisible: No Icon set」：
+         * 改之前 src/main.cpp 从没调 QApplication::setWindowIcon，而
+         * src/app/tray_controller.cpp:25-26 的回退恰好就是 QApplication::windowIcon()
+         * ⇒ Windows 无图标主题 + 回退也是空 ⇒ 两个候选全空。
+         * 这条只问一件事：那个资源**加载得到、画得出墨**。名字写错、qrc 漏登记、
+         * svg 图标引擎没部署，都会在这里红——而不是等用户去盯托盘。 */
+        const QIcon appIcon(QStringLiteral(":/icons/app.svg"));
+        const QPixmap appPix = appIcon.pixmap(16, 16);
+        const int appInk = ink(appPix.toImage());
+        const bool appIconOk = !appIcon.isNull() && !appPix.isNull() && appInk > 0;
+        printf("[fileicon] 应用图标 :/icons/app.svg isNull=%d naturalSize=%dx%d 16px 墨点=%d\n",
+               int(appIcon.isNull()), appIcon.actualSize(QSize(64, 64)).width(),
+               appIcon.actualSize(QSize(64, 64)).height(), appInk);
+        printf("%s 应用级窗口图标非空且 16px 画得出墨（任务栏与托盘的唯一真源）\n",
+               appIconOk ? "[PASS]" : "[FAIL]");
         delete testView; delete ctrlView; delete plainView;
         return (decoEmpty && keyOk && sameAsCtrl && delegateVisible && ctrlVisible
-                && everyTypeHasIcon && typesDistinct && allNeverProduced) ? 0 : 1;
+                && everyTypeHasIcon && typesDistinct && allNeverProduced && appIconOk) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──

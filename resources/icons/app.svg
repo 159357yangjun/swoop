@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- IDM Next 应用图标。设计语言沿用 resources/qss/light.qss 顶部那条注释：
+     中性底 + 单一强调蓝（#2563eb，与 QToolButton#primaryToolBtn 同值）、小圆角、无渐变、克制。
+     存在的理由：改之前 QApplication::windowIcon() 从未被设过，
+     于是 src/app/tray_controller.cpp:25-26 的 fromTheme("download", windowIcon()) 在 Windows 上
+     两个候选都是空 ⇒ 运行时打印 `QSystemTrayIcon::setVisible: No Icon set`，
+     且任务栏用 Qt 的通用图标。这个文件是给那两处兜底的唯一真源。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="4" y="4" width="120" height="120" rx="26" ry="26" fill="#2563eb"/>
+  <path d="M64 30v40" stroke="#ffffff" stroke-width="11" stroke-linecap="round" fill="none"/>
+  <path d="M44 55l20 21 20-21" stroke="#ffffff" stroke-width="11" stroke-linecap="round"
+        stroke-linejoin="round" fill="none"/>
+  <path d="M34 92h60" stroke="#ffffff" stroke-width="11" stroke-linecap="round" fill="none"/>
+</svg>

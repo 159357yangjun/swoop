@@ -2109,3 +2109,66 @@ python tools/freshness_gate.py ; echo "rc=$?"                            # 本�
 
 门的状态没被这件事污染：`.ps1` **在** `lint_control_bytes` 的 `TEXT_EXT` 里（实测 True），
 所以这份新脚本进门被扫；`.sh` 仍然不在（盲区维持原状，已在 ENGINE-NOTES 挂账）。
+
+
+### 2026-10-01 22:0x（第 22 条）— 应用图标补上、`.sh` 盲区关掉，并且**真的用它下了一条**
+上一条末尾我把"要不要跑产品 exe"交回给人，被驳回。这一条是做完的样子。
+
+**① 托盘/任务栏图标：根因不是一个调用，是两个都缺**
+冒烟里那句 `QSystemTrayIcon::setVisible: No Icon set` 追下去：
+`src/app/tray_controller.cpp:25-26` 写的是 `QIcon::fromTheme("download", QApplication::windowIcon())`
+——Windows 没有图标主题 ⇒ 第一个候选空；而 `git grep setWindowIcon -- src` **零命中** ⇒ 兜底也是空。
+⇒ 新增唯一真源 `resources/icons/app.svg`（128 viewBox、圆角方底 `#2563eb`、白色下箭头 + 底线；
+配色与 `QToolButton#primaryToolBtn` 同值，形状语言沿用 `light.qss` 顶部那句"中性底 + 单一蓝强调 + 小圆角 + 无渐变"），
+`resources.qrc` 登记，`src/main.cpp` 在 `QApplication` 构造后调 `setWindowIcon(QIcon(":/icons/app.svg"))`
+⇒ 任务栏与托盘兜底同时有了。截图里主窗口和「新建下载任务」对话框的标题栏都是这枚蓝底白箭头。
+
+**② 这条修复由探针自己发现，不靠人眼**
+`IDM_FILEICON_PROBE` 加第 9 条断言：`:/icons/app.svg` 必须 `!isNull && !pixmap.isNull && 16px 墨点>0`，并加进该模式退码。
+实测 `[fileicon] 应用图标 :/icons/app.svg isNull=0 naturalSize=64x64 16px 墨点=228` ⇒ PASS；sweep 从 62 涨到 **63 条全过**。
+**会红演示**（只改资源名一处 `app.svg`→`app.TYPO.svg`）：
+```
+[fileicon] 应用图标 :/icons/app.svg isNull=1 naturalSize=-1x-1 16px 墨点=0
+[FAIL] 应用级窗口图标非空且 16px 画得出墨（任务栏与托盘的唯一真源）      模式退码=1
+```
+还原后 `git hash-object tools/ui_snapshot.cpp` 与改前记录的 `8d7e558cafdae2dd2b377782080c66e6ad11ed86` **逐字相等**，重编后回绿。
+顺带被编译器教了一条 Qt 6 事实：`QIcon::available()` 在这个版本**已不存在**
+（`error: 'const class QIcon' has no member named 'available'`）⇒ 换成 `actualSize(QSize(64,64))`。
+
+**③ `.sh` 盲区关掉**：`TEXT_EXT` 补 `.sh`（带理由注释）。分母 277 → **296**；
+`--selftest` 两面 + "真实分母非空(296)" 全过；全仓 **0 处裸控制字节**。
+新被扫到的 5 个：`tools/ext_shot/run.sh`、`load_diff_run.sh`、`mutation_fixture_fileicon.sh`、`p0_rerun.sh`、`ui_probe_run.sh`。
+
+**④ 真的用它下了一条（不是"起得来"而已）**：computer-use 点「新建任务」→ 填
+`http://idmuser:idmpass@127.0.0.1:18080/small.bin` → 保存目录改到临时目录 → 「确定」
+→ 表格出现 `small.bin / 已完成 / 2.66 MB/s / 127.0.0.1`，侧栏 分类 1·其他 1·已完成 1，状态栏 `任务: 1 下载中: 0`。
+应用自己的日志（第一手，不是我推的）：
+```
+[INFO] "添加任务 #1 (队列:无): http://idmuser:idmpass@127.0.0.1:18080/small.bin"
+[INFO] "任务 1 完成"
+```
+盘上核账：`size=1048576`、与服务器载荷 `bytes(i%251)` **逐字节全等**、
+`sha256` 前 16 位 下载件 `631b84027d6b9e52` == 独立重算的期望件 `631b84027d6b9e52`（两套实现，不共用同一次判断）；
+服务端 `/_stats`：`auth_ok=10 ranges=9 max_cur=8` ⇒ **8 线程并发 Range 真发生了**，URL 里的 Basic 凭据被 GUI 这条路带上。
+⇒ P0 修的那类"大小对、内容错、状态还显示已完成"，在真实用户路径上第一次端到端核过。
+
+**⑤ 三条只有真操作才撞得见的事实**
+1. **这台机器的键鼠输入不独占**：我启动应用后、还没操作前，它 stderr 里已经有
+   `视图缩小 12pt → 11pt → 视图放大 → 视图缩放重置` 四行（不是我发的——四路会话共用一个焦点窗口）；
+   我 `type_text` 填保存目录时 **`idm-gui-215114` 被吞成 `idm--ui--15114`**。
+   ⇒ 规矩：**UIA 写入必须回读**（`set_value` 的 `verification:"matched" + verifiedValue` 就是干这个的）；
+   "我输入了 X"不等于"框里是 X"。
+2. **`大小` 列在已完成任务上显示 `-`**（截图与 UIA 树一致，而文件实际 1,048,576 字节）
+   ⇒ 这是 P2（进度字段对已完整落盘的下载不报数）**第一次在真实 UI 上被看见**，不再是从引擎读数推的。
+3. **UIA 的组节点会吃掉点击**：`QDialogButtonBox` 是元素 11、`确定` 是 12；点 11 返回 `succeeded` 但对话框不关。
+   ⇒ "调用成功"不等于"点中了要点的控件"，必须带 `post_action_state` 看后置状态。
+
+**⑥ 我自己的一处数字失实（当场订正）**：归档初稿把下载件的 sha 写成 `be2099c214f63a3c`——
+那是上一节 **aria2c.exe 拷贝**的哈希，被我错抄成下载件的。真值 `631b84027d6b9e52`，订正连同来历写在
+`docs/product-smoke-2026-10-01.md` 里。
+
+**收尾**：我起的服务器走它自己的 `/_shutdown`（`{"ok":1,"bye":1}`，端口监听数回 0）、
+我起的 app 实例 `taskkill`（`GUI_PID=23968`，全程只有这一个实例，现 `tasklist` 查无）——
+**单实例门闩必须还给用户**，否则他自己打开 IDM Next 会交接到我这个用临时数据目录的实例上。
+取证件留在 `%TEMP%\idm-gui-215114\`。本轮重编：`idm-next.exe` `91de8e79e7ac`、`ui_snapshot.exe` `379411249120`；
+`engine_selftest.exe` 未动（`8af9e43168de`，它的输入集合不含本轮改的这些文件，门也据此判它 FRESH）。

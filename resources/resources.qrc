@@ -5,6 +5,7 @@
         <file>qss/dark.qss</file>
         <file>plugins/direct_links.json</file>
         <file>plugins/example_media.json</file>
+        <file>icons/app.svg</file>
         <file>icons/chevron-down-light.png</file>
         <file>icons/chevron-down-dark.png</file>
         <file>icons/chevron-up-light.png</file>

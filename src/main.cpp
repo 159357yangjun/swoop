@@ -5,6 +5,7 @@
 #include <QLocalSocket>
 #include <QFile>
 #include <QTranslator>
+#include <QIcon>
 #include <QHash>
 #include <QTextStream>
 
@@ -200,6 +201,11 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("IDM Next"));
     QApplication::setApplicationVersion(QString::fromLatin1(IDM_NEXT_VERSION));
+    // 应用级图标：任务栏图标与托盘的兜底真源。不设它的后果是实测到的一条 Qt 警告——
+    // src/app/tray_controller.cpp 里是 fromTheme("download", QApplication::windowIcon())，
+    // Windows 没有图标主题、windowIcon() 又是空的，两个候选全空 ⇒
+    // 「QSystemTrayIcon::setVisible: No Icon set」，任务栏退回 Qt 通用图标。
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app.svg")));
 
     installZhCnTranslator();
 
