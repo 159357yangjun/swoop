@@ -12,14 +12,14 @@
 |---|---|---|---|
 | `src/` | 114 | 923962 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
 | `tools/` | 30 | 531589 | ✅ 在——自测与门禁脚本 |
-| `docs/` | 19 | 301799 | ✅ 在 |
+| `docs/` | 22 | 316560 | ✅ 在 |
 | `resources/` | 17 | 33821 | ✅ 在 |
 | `installer/` | 2 | 17671 | ✅ 在 |
 | `.github/` | 2 | 35566 | ✅ 在 |
 | `third_party/` | 125 | 20168154 | ⚠️ 在范围内但**不是本项目的原创代码**，见 §3 |
 | `browser-extension/` | 19 | 656497 | ❌ **不在**——浏览器扩展不属开源交付物（所有者口头指示）；处置见 §2 |
 | 仓根散装文件 | 10 | — | ✅ 在（`CMakeLists.txt`、`README.md`、`NOTICE.md`、`vcpkg.json`、`REFACTOR_PLAN.md`、`开发文档.md`、`.gitignore`、`.gitattributes`、`.editorconfig`、`.clang-format`） |
-| **合计（`git ls-files`）** | **338** | | 恒等式 `328 + 10 = 338`，由 `--verify` 当场断言 |
+| **合计（`git ls-files`）** | **341** | | 恒等式 `331 + 10 = 341`，由 `--verify` 当场断言 |
 
 复算命令（在仓库根跑；注意 `bc` 在本机**没有**，所以求和走 `awk`，别抄成 `| bc`）：
 

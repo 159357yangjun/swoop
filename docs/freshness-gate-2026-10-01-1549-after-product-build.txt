@@ -1,0 +1,11 @@
+基准 rev=HEAD (91f90c0)  现在=2026-10-01 15:49:48 -0400  容差=3600s（规则数，理由在文件头）
+[FRESH] build/idm-next.exe sha12=fe0f82754e16 mtime=2026-10-01 15:49:23 -0400 ｜输入最新提交=7777bce 2026-10-01 08:14:34 -0400 fix(core): 跨任务污染根因修复(延后压缩)——删空闲任务不 差=27289s 构建证人=no work to do
+         复算: stat -c '%y %s' build/idm-next.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- src resources third_party/libcurl/include CMakeLists.txt ; ninja -C build -n idm-next ; git status --porcelain -- src resources third_party/libcurl/include CMakeLists.txt
+[FRESH] build/idm-next-host.exe sha12=a908f656e862 mtime=2026-10-01 15:49:32 -0400 ｜输入最新提交=ef3e778 2026-09-29 13:00:10 -0400 refactor(ipc): 把"推完再关"抽成 drainSock 差=182962s 构建证人=no work to do
+         复算: stat -c '%y %s' build/idm-next-host.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- src/host CMakeLists.txt ; ninja -C build -n idm-next-host ; git status --porcelain -- src/host CMakeLists.txt
+[FRESH] build/engine_selftest.exe sha12=8af9e43168de mtime=2026-10-01 08:12:58 -0400 ｜输入最新提交=7777bce 2026-10-01 08:14:34 -0400 fix(core): 跨任务污染根因修复(延后压缩)——删空闲任务不 差=-96s 构建证人=说要重编 5 步(rc=0) ⇒ 落在容差内(96s)；提示：ninja 想重编，但输入内容与 HEAD 一致 ⇒ 是被碰过不是变了（本轮实测：download_core.c mtime 08:21:31 > exe 08:12:58，git status 却干净）
+         复算: stat -c '%y %s' build/engine_selftest.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- tools/engine_selftest.c src/core src/utils src/protocols CMakeLists.txt ; ninja -C build -n engine_selftest ; git status --porcelain -- tools/engine_selftest.c src/core src/utils src/protocols CMakeLists.txt
+[FRESH] build/ui_snapshot.exe sha12=944123ae728b mtime=2026-10-01 14:00:51 -0400 ｜输入最新提交=678826a 2026-10-01 14:05:10 -0400 test(probe): 拆名落地——worstEventLoopT 差=-259s 构建证人=no work to do ⇒ 落在容差内(259s)
+         复算: stat -c '%y %s' build/ui_snapshot.exe ; git log -1 --format='%h %ct %ad %s' --date=iso HEAD -- tools/ui_snapshot.cpp src resources CMakeLists.txt ; ninja -C build -n ui_snapshot ; git status --porcelain -- tools/ui_snapshot.cpp src resources CMakeLists.txt
+[FRESHNESS_GATE] rev=HEAD 目标=4 不合格=0 tool=97a3e7da1334/168行
+注：STALE 不是回归，是发现——它说「这枚二进制不含那次改动」。要能把『产品 exe == 当前源码』这句话讲出口，必须重编产品目标（本轮边界禁止）。两道证人都不读文档、都进退码。

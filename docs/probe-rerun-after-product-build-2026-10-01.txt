@@ -1,0 +1,81 @@
+# 第 12 令：产品目标重编后的两面读数（2026-10-01 15:48→21:26）
+
+## ① 只编这两个目标（命令原文与产物）
+
+```
+ninja -C build idm-next
+[1/7] Automatic MOC and UIC for target idm-next
+[2/7] Automatic RCC for resources/resources.qrc
+[3/7] Building CXX object …/qrc_resources.cpp.obj
+[4/7] Building CXX object …/mocs_compilation.cpp.obj
+[5/7] Building CXX object …/src/cli/cli_app.cpp.obj
+[6/7] Building CXX object …/src/main.cpp.obj
+[7/7] Linking CXX executable idm-next.exe; 拷贝 libcurl 运行期文件…      rc=0
+ninja -C build idm-next-host                                              rc=0
+```
+33 秒完成（15:49:01→15:49:34 之间的两次链接），**没有要求下载任何东西**；
+没碰 packaging / installer / 发布清单 / 签名 / CI 重跑 / 版本号 / CMake 配置。
+
+| 产物 | 编前 sha12 / mtime | 编后 sha12 / mtime |
+|---|---|---|
+| `build/idm-next.exe` | `45bbbab03006` / 09-30 20:04:54 | **`fe0f82754e16`** / 10-01 15:49:23 |
+| `build/idm-next-host.exe` | `d1cb57613930` / 09-29 03:46:29 | **`a908f656e862`** / 10-01 15:49:32 |
+| `build/engine_selftest.exe` | `8af9e43168de` / 08:12:58（未动） | 同左（未动） |
+| `build/ui_snapshot.exe` | `944123ae728b` / 14:00:51（**本轮未授权重编**） | 同左 |
+
+## ② 新鲜度门：rc 从 1 变 0（两面原文各存一份）
+
+| 面 | 命令 | 结果 |
+|---|---|---|
+| 编前 | `python tools/freshness_gate.py` | `idm-next STALE(-43780s)`、`idm-next-host STALE(-33221s)`、不合格=2、**rc=1** → `docs/freshness-gate-2026-10-01-1548-before-product-build.txt` |
+| 编后 | `python tools/freshness_gate.py` | 四条全 FRESH、不合格=0、**rc=0** → `docs/freshness-gate-2026-10-01-1549-after-product-build.txt` |
+
+⇒ "产品 exe == 当前源码"这句话从今天起才有证人（证人形状：内容 `git status` 干净 + mtime 晚于输入集合最新提交）。
+
+## ③ 17 模式在**当前探针二进制**上的读数
+
+```
+exe_sha12=944123ae728b modes=17 → PASS=62 FAIL=0 零断言模式=0 问题模式: 无   (15:52，sweep)
+```
+⚠ 这里有一条必须先讲清的错位：令上要求"新的 exe_sha12，不许沿用 `944123ae728b`"，
+但 ① 只授权了 `idm-next` 与 `idm-next-host` 两个目标 ⇒ **探针目标不在授权范围内，我没有编它**。
+能用的证人是 `ninja -C build -n ui_snapshot` ⇒ `no work to do`：ninja 的 mtime 规则只会**多报**过期
+（上一条令实测过：`download_core.c` 被碰过就喊重编），所以"不干活"在"新鲜"这个方向上是可信的
+⇒ `944123ae728b` 相对当前 `src/` 不含缺口；且它静态链的是 `idm_app_lib`（含 `src/core/download_core.c`，
+`CMakeLists.txt:233`）⇒ **这枚探针本来就已经带着 P0 修复**（14:00:51 编，源码是 08:14 那笔）。
+我试过用符号名验证（`grep -ac pending_detach` 于三枚 exe），三枚全 =0 ⇒ **方法瞎，弃用**，不作证据。
+
+## ④ 两个读数的分布（拆名后的代码，n=19 轮，逐轮取自日志不是口头）
+
+| 量 | n | min | median | max | 振幅 |
+|---|---|---|---|---|---|
+| `worstEventLoopTurnMs`（进判据那条，<500） | 19 | 211 | 216 | 220 | **9ms** |
+| `idleBehindReplyMs`（新读数，只进报告行） | 19 | 212 | 217 | 220 | **8ms** |
+| 新读数自己窗内的最长轮次 | 19 | 216 | 219 | 223 | 7ms |
+
+逐轮 turn：`217 217 216 216 217 217 217 220 216 220 217 218 214 211 215 216 215 216 213`
+逐轮 reply：`217 217 218 220 217 218 215 220 219 220 216 214 215 216 217 219 212 217 216`
+
+- **本轮 0 红**（19/19）。分母对照：旧标签那枚二进制 `e9ebbba101e2` 上是 **24 轮 1 红（3263ms）**；
+  拆名后的代码上 **19 轮 0 红**——但这是**两枚不同 exe**，所以"红消失了"不能归因给任何修复，
+  只能说：本轮没能复现它。
+- **与上一轮（n=4，217/217/218/215）比，分布相同**（同一区间、同振幅量级）⇒
+  ④ 问"重编后分布是否不同"：**相同，照实报相同**。原因也讲清：探针二进制没变，
+  而 P0 修复对 GUI 路径的效果**不是本轮这两个目标能测的**——要测它需要拿**修复前**的 `src/core`
+  编一枚探针做受控消融（一次重编 + 一次 checkout，风险与授权都不在本轮）。
+- 三个量都落在 211–223ms 这一条带里、彼此差在振幅内 ⇒ **量级分不开，但可分离性已被证过**：
+  上一轮的扰动演示里 turn=1026ms 而 reply=221ms ⇒ 它们不是同一个数换了说法。
+
+## ⑤ 计时读数的背景（以及一条我没躲过去的坑）
+
+- 每轮前后各做一次固定功量忙等标定：`641/514、640/535、581/510、505/599、637/549、508/1122、733/262、264/245`（ms）
+  ⇒ 机器当时并不稳定空闲；阈值一个都没改。
+- 背景普查（起）：`svchost 91 / bash 20 / conhost 16 / msedge 14 / node 10 / postgres 6 / Qoder CN 13`；
+  （讫）：`svchost 101 / bash 21 / conhost 16 / msedge 14 / node 10 / postgres 6 / Qoder CN 13`。
+- **一条必须记下的坑**：这 8 轮的日志 mtime 是 `15:53:24 … 15:54:02`，然后**跳到 `21:25:45`**。
+  间隔不是探针慢——是那条命令超过 10 分钟被工具挪到后台后**被挂起了**（同一时间我还有一份
+  `rerun-155105/` 的 8 轮在 15:51:14→15:52:20 跑完，那来自我先失败的那次尝试 `exec > /dev/tty`）。
+  ⇒ 教训：**报"多久"必须当场取 `date` 并用日志 mtime 排序核对**，不能拿一次采样的时刻当跨度。
+  单轮真实耗时 ≈ 9–11 秒（15:53 段连续五轮的间隔）。
+- 我这 8 轮没带 `QT_LOGGING_TO_CONSOLE=1`（sweep 带）⇒ 日志比 sweep 少若干 INFO 行（19 行 vs 132 行），
+  但 7 条断言与两行读数齐全 ⇒ 断言面不受影响；有两轮是 18 行，差的也是一行 INFO，`PASS=7 FAIL=0` 不变。

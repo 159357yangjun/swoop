@@ -2031,3 +2031,35 @@ python tools/freshness_gate.py ; echo "rc=$?"                            # 本�
 （本轮 HEAD 之后就有三笔文档提交），而它报的根本不是"二进制过期"。所以比较量是
 **该产物输入集合里最新一次提交的 committer 时间**，且每个产物一套输入
 （`idm-next-host` 只看 `src/host + CMakeLists.txt`，不被 `src/core` 的改动冤枉）。
+
+
+### 2026-10-01 15:49→21:26（第 20 条）— 两个产品目标编出来了：门从 `rc=1` 变 `rc=0`，本轮 19 轮 0 红
+主控授权重编（理由：他承认自己上一轮"重编要抢几分钟 CPU"是没量就下判断，而我的 `ninja -n` 读数说
+`idm-next` 只要 7 步、`idm-next-host` 4 步 ⇒ 是增量）。全部细节在
+`docs/probe-rerun-after-product-build-2026-10-01.txt`，这里只留承重：
+
+- **命令**：`ninja -C build idm-next` / `ninja -C build idm-next-host`，33 秒，`rc=0×2`，
+  没要求下载任何东西，没碰 packaging / installer / 发布清单 / 签名 / CI / 版本号 / CMake 配置。
+- **新身份**：`idm-next.exe` `45bbbab03006`(09-30 20:04:54) → **`fe0f82754e16`**(15:49:23)；
+  `idm-next-host.exe` `d1cb57613930`(09-29 03:46:29) → **`a908f656e862`**(15:49:32)。
+  `engine_selftest.exe` 与 `ui_snapshot.exe` 本轮**未重编**（前者不在授权里且无需，后者见下）。
+- **门的两面**（原文各存一份，不许只留最新那份）：
+  `docs/freshness-gate-2026-10-01-1548-before-product-build.txt` ⇒ 不合格=2 **rc=1**；
+  `docs/freshness-gate-2026-10-01-1549-after-product-build.txt` ⇒ 四条全 FRESH 不合格=0 **rc=0**。
+  ⇒ 从今天起"产品 exe == 当前源码"这句话第一次有证人（内容等于 HEAD + mtime 晚于输入集合最新提交）。
+- **③ 那条令里有一处我按边界顶回去了**：令要求探针"必须是本轮产出的那枚 exe，不许沿用 `944123ae728b`"，
+  但 ① 只授权两个产品目标 ⇒ 我没编探针。可用的证人是 `ninja -C build -n ui_snapshot` ⇒ `no work to do`，
+  而第 19 条刚实测过 ninja 的 mtime 规则只会**多报**过期（被碰过就喊重编）⇒ "不干活"在"新鲜"这个方向可信；
+  加上 `ui_snapshot` 静态链 `idm_app_lib`（`CMakeLists.txt:233`，含 `src/core/download_core.c`）
+  ⇒ 这枚探针本来就带着 P0 修复。我试过用符号名 grep 验（`pending_detach` 三枚全 =0）⇒ **方法瞎，弃用不作证据**。
+- **④ 分布（n=19，逐轮从日志取）**：`worstEventLoopTurnMs` 211/216/220（振幅 9ms）、
+  `idleBehindReplyMs` 212/217/220（振幅 8ms）、新读数自己窗内最长轮次 216/219/223（振幅 7ms）。
+  **本轮 19 轮 0 红**；与上一轮 n=4 的分布**相同**，照实报相同。
+  两个"0 红 vs 1 红"的对照**不能归因给修复**——那是两枚不同 exe（旧的 `e9ebbba101e2` 24 轮 1 红，
+  拆名后的 19 轮 0 红），本轮只能说"没复现"。要看 P0 对 GUI 路径的真实效果，需要拿**修复前**的 `src/core`
+  编一枚探针做受控消融（一次重编 + 一次 checkout），本轮既不授权也不该顺手做。
+- **一条我自己踩到的计时坑（记下来防重犯）**：这 8 轮日志 mtime 从 `15:53:24` 连到 `15:54:02`，
+  然后跳到 `21:25:45`——不是探针慢，是那条命令超过 10 分钟被挪到后台后**被挂起**了。
+  ⇒ 报"多久"必须当场取 `date` 并用日志 mtime 排序核对；单轮真实耗时 ≈ 9–11 秒。
+  另：这 8 轮没带 `QT_LOGGING_TO_CONSOLE=1`（sweep 带），日志比 sweep 少 INFO 行（19 vs 132），
+  断言面齐全（`PASS=7 FAIL=0`）；有两轮 18 行，差的也是一行 INFO。
