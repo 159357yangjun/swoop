@@ -2063,3 +2063,49 @@ python tools/freshness_gate.py ; echo "rc=$?"                            # 本�
   ⇒ 报"多久"必须当场取 `date` 并用日志 mtime 排序核对；单轮真实耗时 ≈ 9–11 秒。
   另：这 8 轮没带 `QT_LOGGING_TO_CONSOLE=1`（sweep 带），日志比 sweep 少 INFO 行（19 vs 132），
   断言面齐全（`PASS=7 FAIL=0`）；有两轮 18 行，差的也是一行 INFO。
+
+
+### 2026-10-01 21:36（第 21 条）— 新编的产品 exe **真的跑了一次**：起得来、在监听、单实例交接成功
+第 20 条末尾我留了一句"没运行过产品 exe，要你点头才做"——那是把能自己做的验证交回给人。
+本轮自己去做了，可复算的入口是仓库里的 **`tools/idm_next_smoke.ps1`**（不是我的临时脚本），
+逐字输出与解码后的 stderr 存在 **`docs/product-smoke-2026-10-01.md`**。
+
+被测：`build/idm-next.exe`，`exe_sha12=fe0f82754e16`，mtime 15:49:23，size 2124565（就是第 20 条那枚**新**二进制）。
+
+四条承重结论，每条指到具体一行：
+1. **能起**：`INSTANCE1 pid=7648 alive_after_5s=True`，Qt 日志一路走到 `[INFO] "主窗口初始化完成"`。
+2. **在监听**：`[INFO] "IPC server 已启动，监听 idm-next-ipc"`。
+3. **单实例交接成功**：第二个实例自己退了（`exited_within_15000ms=True`），而第一个实例的 stderr 里出现
+   `[INFO] "IPC 请求: activate → 成功（排队 0ms，处理 16ms，送达=1，回话时客户端=在）"`
+   ——这正是 `ci.yml` 单实例那段注释里写的"两句都有 = 交接成功"的分诊形状，**本机第一次拿到**。
+4. **数据隔离有效**：`[INFO] "HistoryStore 已打开: C:\Users\yyyy\AppData\Local\Temp\idm-smoke-1001-213619\history.db"`
+   ⇒ 依 `src/utils/app_paths.cpp:14-19`，设了 `IDM_DATA_DIR` 就不碰注册表与 %LOCALAPPDATA%。
+   隔离目录由脚本**先断言不存在**再创建，收尾删自己造的 `history.db` 与 aria2 拷贝。
+
+顺带否掉一个我自己差点误报的点：隔离目录里冒出 5,649,408 字节的 `aria2\aria2c.exe`，看着像"运行时下载了东西"。
+比哈希即可证伪：它与用户缓存 `C:\Users\yyyy\idm_shots\_data\aria2\aria2c.exe` 的 sha256 前 16 位
+**完全相同（`be2099c214f63a3c`）**，且用户那份 mtime 仍是 2023-11-15（我没动他的缓存）
+⇒ 是从本地缓存**拷进**数据目录，不是网络来的。
+
+三条产品侧观察（只记不修）：
+· `QSystemTrayIcon::setVisible: No Icon set` ⇒ 托盘项是在没有图标的情况下 setVisible 的，
+  Windows 上表现为一个空白/不可见条目。出现位置在 `已加载主题: light` 之后、`主窗口初始化完成` 之前。
+· `QT_LOGGING_TO_CONSOLE is deprecated, use QT_ASSUME_STDERR_HAS_CONSOLE and/or QT_FORCE_STDERR_LOGGING`
+  ⇒ `ci.yml` 和这份脚本都靠它把 Qt 日志引到 stderr；今天仍生效（否则 `instance1_stderr_bytes=0`），
+  后继开关记在这里，等它真失效时不用重新考古。
+· `exitcode=(unreadable)`：PS 5.1 从 `Start-Process -PassThru` 读不到已退进程的 ExitCode。
+  脚本把空值显式印成 `(unreadable)` 并加一句 `blank or unreadable is NOT the same as 0`；
+  交接是否成立由第 3 条那行 activate 作保，不由一个数字作保。
+
+这份脚本自己身上踩的两个坑（都修在脚本里）：
+① **PowerShell 5.1 把无 BOM 的 UTF-8 当 ANSI 读**——第一版脚本含中文提示，解析在第 30 行炸；
+   第二版我把中文留在字符串里，导致 `INSTANCE2` 那行从我的 grep 结果里**静默消失**。
+   ⇒ 现在文件头写明 ASCII-only，且逐字符核过：非 ASCII 计数 **0**。
+② **一次采样不能当结论**——第一次跑印了 `CLEANUP_WARN pid=20860 still alive`，
+   复核 `tasklist //FI "PID eq 20860"` 与 `IMAGENAME eq idm-next.exe` 都是"没有匹配的任务"
+   ⇒ 是 1 秒采样太紧。现在轮询到 10 秒印最终状态：`CLEANUP pid=7648 terminated_within_1s=True`、
+   `CLEANUP pid=29276 terminated_within_0s=True`。杀进程的名单只有本脚本 `Start-Process` 记下的两个 PID，
+   别的会话的进程一个都不碰。
+
+门的状态没被这件事污染：`.ps1` **在** `lint_control_bytes` 的 `TEXT_EXT` 里（实测 True），
+所以这份新脚本进门被扫；`.sh` 仍然不在（盲区维持原状，已在 ENGINE-NOTES 挂账）。
