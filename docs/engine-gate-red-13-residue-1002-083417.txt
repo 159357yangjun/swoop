@@ -1,0 +1,311 @@
+== 下载引擎自测（本地带 Basic 认证的 HTTP 服务 127.0.0.1:18080）==
+    服务端就绪检查：已响应 /_stats
+  [PASS] 启动清扫确实生效（通配数到 0 个上轮残留）
+    输出目录 C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out（清理了 0 个上轮遗留产物）
+
+[0] HEAD 探测：文件大小与 Range 支持
+      success=1 file_size=41943040 supports_range=1 http=200 ver=HTTP/1.1
+  [PASS] 探测到正确的文件大小
+  [PASS] 探测到服务器支持 Range
+
+[1] 未配置站点登录 → 401 站点应当失败
+  [PASS] 任务创建成功
+  [PASS] 无凭据时判定为失败（status=4）
+
+[2] 配置站点登录 → 同一 URL 应当成功
+  [PASS] 任务创建成功
+  [PASS] 带凭据下载完成（status=3）
+  [PASS] 落盘文件与下载字节一致
+
+[3] 每服务器连接数：真实并发连接数封顶（服务端统计并发峰值）
+  [PASS] 任务创建成功
+      [stats:3a 不封顶] {"auth_fail": 41, "auth_ok": 41, "ranges": 40, "cur": 0, "max_cur": 8, "norange_get": 0, "norange_range": 0, "retryafter_gets": 0, "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0, "stall_hits": 0, "conns": 13, "big_reqs": 0}
+      chunk_count=10（40MiB/4MiB 期望 10）
+  [PASS] 不封顶时确实并发（对照有效）
+  [PASS] 任务创建成功
+      [stats:3b 封顶2] {"auth_fail": 41, "auth_ok": 41, "ranges": 40, "cur": 0, "max_cur": 2, "norange_get": 0, "norange_range": 0, "retryafter_gets": 0, "cut_range": 0, "cutnr_ignored": 0, "probe429_heads": 0, "sink_hits": 0, "proxy_req": 0, "proxy_407": 0, "proxy_ok": 0, "stall_hits": 0, "conns": 13, "big_reqs": 0}
+  [PASS] 并发被 max_conn_per_server 封顶到 2
+
+[4] 中文文件名落盘
+  [PASS] 任务创建成功
+  [PASS] 中文文件名文件存在于磁盘且非空
+
+[5] 「不使用代理」不得被环境变量代理覆盖
+      强制注入 http_proxy=http://127.0.0.1:9（原有值：(未设置)）
+  [PASS] 已注入一个必然连不通的代理（确保本用例真的在测东西）
+  [PASS] 任务创建成功
+  [PASS] 界面选「不使用代理」时，环境里的 http_proxy 被压住、真直连成功
+
+[6] 服务器无视 Range → 必须自动降级为单连接，且内容正确
+  [PASS] 任务创建成功
+  [PASS] 确实向服务端发过 Range 请求（确保本用例真的触发了该场景）
+  [PASS] 降级重下后完成（status=3）
+  [PASS] 落盘内容与源文件逐字节一致（不是「大小对但内容错位」）
+
+[7] >2GB 偏移写盘（32 位 long 截断探针）
+  [PASS] 3 GiB 偏移处的 Range 请求成功（HTTP 206）
+  [PASS] 文件长度 = 3GiB + 4KiB（偏移没有被截断到低位）
+  [PASS] 3 GiB 处读回的字节与源数据一致（数据没写错位置）
+
+[8] 暂停排队中的任务（PENDING → PAUSED）与暂停后继续
+  [PASS] 新建任务是排队中（PENDING）而不是已在下载
+  [PASS] 暂停排队中的任务后状态为「已暂停」
+  [PASS] 暂停状态已落盘（下次启动不会自动开始）
+  [PASS] 暂停后继续能真正下完（status=3）
+  [PASS] 继续时确实做了分段（chunk_count>0，不是空转）
+  [PASS] 继续后落盘内容逐字节正确
+
+[9] 状态文件 JSON 转义：含反斜杠与引号的路径往返
+  [PASS] 转义版状态文件能被加载（id=9001 可查）
+  [PASS] 文件名中的引号被正确还原
+  [PASS] 加载后再存一次，url/file/dir 三元组逐字符不变
+
+[10] 乱序 task_id 的状态文件（二分查找不变量）
+  [PASS] 乱序文件加载后三个 id 都能查到（9001 是修复前必失的那个）
+  [PASS] 乱序文件里的任务同样能被暂停
+
+[11] 重复 dlmgr_load_state 的幂等性（队列不得翻倍）
+  [PASS] 同一进程重复 load 后任务数不翻倍
+  [PASS] 重复 load 后 task_id 不重复、三条任务都在
+  [PASS] 重复 load 后按 id 查任务仍然唯一且正确
+
+[12] 全局限速 256 KB/s：耗时必须接近理论值
+  [PASS] 限速任务创建成功
+    · 实测 4234 ms / 理论 4000 ms（105%）
+  [PASS] 限速下载完成且耗时 ≥ 理论值 60%（未走块放行的空子）
+  [PASS] 取消限速后明显更快（证明限速确实在起作用）
+
+[13] 保存目录不存在（多级）→ 必须自动创建并下载成功
+  [FAIL] 目标多级目录预先确实不存在  -> 目标目录 = C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\dirfix_missing\sub
+  [PASS] 任务创建成功
+  [PASS] 保存目录不存在时下载仍然成功（status=3）
+  [PASS] 文件确实落在被自动创建的多级目录里
+
+[14] 文件名含 Windows 非法字符（: ? * | < > "）→ 清理后仍成功
+  [PASS] 任务创建成功
+  [PASS] 含非法字符的文件名被清理且下载成功
+  [PASS] 清理后的文件确实落盘（不是只改了个名字）
+
+[15] dl_infer_filename 纯函数：查询串/%XX/保留设备名
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+  [PASS] 推断名正确
+
+[16] 同名文件：默认自动重命名（不覆盖、不删除）
+  [PASS] 占位文件写入成功
+  [PASS] 同名任务创建成功
+  [PASS] 同名下载仍然成功
+  [PASS] 落盘名被自动改成「名字 (1).ext」
+  [PASS] 原来那个同名文件仍然存在
+  [PASS] 原文件内容一字未改（没有被覆盖/截断）
+  [PASS] 新文件落在改名后的路径上
+  [PASS] 勾选「覆盖同名文件」后按原名覆盖
+
+[17] 打开失败的错误文案必须带原因
+  [PASS] 路径不成立时任务仍能创建（错误在启动后暴露）
+  [PASS] 保存目录是文件 → 任务失败
+  [PASS] 文案带「打开临时文件失败」前缀（不是光一个路径）
+  [PASS] 文案给出了具体原因（没落到「未知原因」）
+  [PASS] 不再是旧的无信息量文案
+  [PASS] 临时文件已设为只读
+  [PASS] 只读临时文件 → 任务失败
+  [PASS] 文案指出是权限/占用问题
+
+[18] 写盘失败 → 必须是「写入磁盘失败：<中文原因>」
+  [PASS] 只读句柄打开成功
+  [PASS] 写盘失败必须判为失败
+  [PASS] 标记为不可重试（磁盘/权限问题重试没意义）
+  [PASS] 文案是「写入磁盘失败：<原因>」
+  [PASS] 不再暴露英文的 Failed writing / CURLE 文案
+
+[19] 超长保存路径（>260 字符）→ 必须落盘成功
+  [PASS] 长路径任务创建成功
+  [PASS] 超长路径下下载仍然完成（status=3）
+  [PASS] 文件确实落在超长路径目录里（非空）
+  [PASS] 超长路径落盘内容逐字节正确
+
+[20] parse_retry_after 纯函数：整数秒 / HTTP-date / 非法
+  [PASS] 整数秒 "120" -> 120000ms
+  [PASS] 整数秒带空格 " 30 " -> 30000ms
+  [PASS] 整数秒 "0" -> 0ms（立即重试）
+  [PASS] 非法字符串 -> 回退 fallback(1000ms)
+  [PASS] NULL -> 回退 fallback(1000ms)
+  [PASS] HTTP-date 未来120s -> 约120000ms
+  [PASS] HTTP-date 在过去 -> 0ms（立即重试）
+
+[21] 重试尊重 Retry-After（429 + Retry-After:3 → 实际等待≈3s 而非固定 1s）
+  [PASS] 任务创建成功
+  [PASS] 尊重 Retry-After：重试后下载成功
+  [PASS] 尊重 Retry-After：实际等待≈3s（非固定1s退避）
+
+[22] 服务器提前断流 → 必须续传补全，不许把半截文件判成已完成
+  [PASS] 断流响应：收到字节但被标记为 truncated
+  [PASS] 断流响应：已收字节确实落盘（供断点续传）
+  [PASS] 断流续传任务创建成功
+  [PASS] 断流后补齐到完整长度（不是 8000 字节的假完成）
+  [PASS] 断流后确实带 Range 续传过（而不是整份重下）
+  [PASS] 断流不可续传任务创建成功
+  [PASS] 断流且续不上时判为失败（status=4）
+  [PASS] 失败任务没有把截断数据改名成成品文件
+
+[23] HEAD 探测重试：瞬时 429 + Retry-After 后仍拿到大小（401 不白等）
+  [PASS] 探测在 429 之后重试成功并拿到文件大小
+  [PASS] 探测确实补发了 HEAD（重试真的发生过）
+  [PASS] 探测重试尊重 Retry-After: 2（而非固定 1s 退避）
+  [PASS] 401 这类确定性失败立即返回，不占用探测重试
+  [PASS] 连不上的主机不重试探测（不拖住 GUI 线程）
+
+[24] 限流等待可见：429 期间读到倒计时，暂停立刻摘掉、过后不残留
+  [PASS] 限流可见任务创建成功
+  [PASS] 429 等待期间能读到剩余秒数（Retry-After: 3 → 观察到 ≥2）
+  [PASS] 倒计时知道自己是为什么在等（429）
+  [PASS] 暂停立刻摘掉倒计时
+  [PASS] 等待窗口过后倒计时保持为 0
+  [PASS] 倒计时全程不再残留
+
+[25] 限流等待期间暂停→继续：任务必须正常完成，不能假失败
+  [PASS] 暂停续传任务创建成功
+  [PASS] 已确认停在 Retry-After 窗口里（旧组线程还没退出）
+  [PASS] 继续之后任务正常完成且成品完整
+  [PASS] 没有留下半截 .idmtmp
+
+[26] 中途暂停→继续：必须从断点续完（不幽灵、不假失败）
+  [PASS] 中途续传任务创建成功
+  [PASS] 暂停发生在中途（已下了一部分但没下完）
+  [PASS] 继续之后从断点续到完整（40 MiB 且逐字节正确）
+  [PASS] 续完没有留下半截 .idmtmp
+
+[27] 跨 host 重定向：凭据/Cookie 不外递，Referer/UA 按设计保留
+      ① 对照 同 host   ：{"host": "127.0.0.1:18080", "auth": "Basic aWRtdXNlcjppZG1wYXNz", "cookie": "sid=SELFTESTCOOKIEVALUE", "referer": "http://127.0.0.1/private/lease-page", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 IDM/6.42", "hits": 1}
+  [PASS] 对照组：同 host 跳转三样都收得到（观测点有效）
+      ② 跨 host（配了机密）：{"host": "localhost:18080", "auth": "", "cookie": "", "referer": "http://127.0.0.1/private/lease-page", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 IDM/6.42", "hits": 2}
+  [PASS] 跨 host 跳转不带 Authorization（口令不送给第三方域）
+  [PASS] 跨 host 跳转不带 Cookie
+  [PASS] 跨 host 仍带 Referer 与 UA（防盗链需要，故意保留）
+      ③ 跨 host（未配机密）：{"host": "localhost:18080", "auth": "", "cookie": "", "referer": "", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 IDM/6.42", "hits": 3}
+  [PASS] 未配置时不会被自动补上 Referer（源 URL 不外递）
+
+[28] 代理 407：报错指向代理，填对账号要真能下下来
+  [PASS] 代理 407（未配凭据）任务创建成功
+      未配凭据：status=4 err=「HTTP 407：代理服务器要求认证：请在设置里填写代理用户名和密码」
+  [PASS] 未配代理凭据 → 判定失败
+  [PASS] 失败文案同时给出「代理」与 407（指向能改的地方）
+  [PASS] 代理 407（配了凭据）任务创建成功
+  [PASS] 填对代理账号后下载成功（凭据确实下发到下载线程）
+  [PASS] 服务端确实 407 挑战过、也收到过正确的 Proxy-Authorization
+
+[29] 慢服务器：dlmgr_start 必须立刻返回，探测挪到监督线程
+  [PASS] 慢服务器任务创建成功
+  [PASS] 点开始后调用线程不被探测占住
+  [PASS] 挪到监督线程后任务仍正常完成
+  [PASS] 探测与下载都真的发出去了
+
+[30] 分块下载复用连接（每 1MiB 重连 = 快链路上白等握手）
+  [PASS] 任务创建成功（单线程，排除并发对计数的干扰）
+  [PASS] 12MiB 确实被拆成多块请求（≥6 次，本用例真的在测复用）
+  [PASS] 连接跟着分片走而不是跟着块走（握手次数不再等于块数）
+  [PASS] 复用连接之后落盘内容仍逐字节正确
+
+[31] 「同时下载的任务数」真的约束「全部开始」
+  [PASS] 三个 12MiB 单线程任务创建成功（场景 A 前提）
+  [PASS] 上限 1 时「全部开始」只起走 1 个，其余进等待表而不是被丢弃
+  [PASS] 补位一次只放行一个（不给刚交出去的那个记账就会在这里红）
+  [PASS] 等待表里的任务后来被逐个补起并下完（限制没变成丢任务）
+  [PASS] 排队任务被暂停后不再算进「等待空位」的数量
+
+[32] 重启后带进度恢复（面 A 正常 / 面 B 截短 / 面 C 删 .idmtmp）
+    [前提读数] 面A｜20s 轮询后 status=2 downloaded=8388608 deferred=0（status=0 且 deferred>0 ⇒ 任务压根没被起来过）
+    [分桶] 面A｜采样=3 次(每100ms,分母) 从未创建=1 全程0字节=0 有增长=0 tmp最大=12582912 成品路径最大=-1 status区间=[0,1](0排队/1下载中/2暂停) deferred最大=0 GET首次非零=i=-1 tmp首次>0=i=1 计数器首次>0=i=1 GET最大=0 网络采样数=1 conns最大=3(探针自占约2) filename=「rst_a.bin」 ⇒ 对照：正常拿到进度 ⇒ 本案这一轮未复现
+  [PASS] 暂停发生在中途，且状态里带着非零进度
+  [PASS] save 写出的状态文件确实带着分片进度（面 A/B/C 共同前提）
+    [状态] 面A｜总 downloaded=9437184｜本任务的 chunks 原文=「"chunks":[{"start":0, "end":4194303, "downloaded":4194304, "done":1},{"start":4194304, "end":8388607, "downloaded":4194304, "done":1},{"start":8388608, "end":12582911, "downloaded":1048576, "done":0}] }
+  ]
+}
+」
+  [PASS] load 回来的任务带着原来的进度与分片（不是从 0 重来）
+    [读数] 面A｜正常恢复（盘没被动过）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=(空) Range=12 最大写偏移=9437184 引擎自愈读数 clamp_refetch=0B clamp_chunks=0｜兜底=不涉及（盘未动）
+  [PASS] 面 A：引擎不误报自愈（两个计数恒 0）
+  [PASS] 面 A：接得上并下完（尺寸对且逐字节正确）
+  [PASS] 面 A：续传而不是整份重下
+    [前提读数] 面B｜20s 轮询后 status=2 downloaded=8388608 deferred=0（status=0 且 deferred>0 ⇒ 任务压根没被起来过）
+    [分桶] 面B｜采样=3 次(每100ms,分母) 从未创建=1 全程0字节=0 有增长=0 tmp最大=12582912 成品路径最大=-1 status区间=[0,1](0排队/1下载中/2暂停) deferred最大=0 GET首次非零=i=-1 tmp首次>0=i=1 计数器首次>0=i=1 GET最大=0 网络采样数=1 conns最大=3(探针自占约2) filename=「rst_b.bin」 ⇒ 对照：正常拿到进度 ⇒ 本案这一轮未复现
+  [PASS] 暂停发生在中途，且状态里带着非零进度
+  [PASS] save 写出的状态文件确实带着分片进度（面 A/B/C 共同前提）
+    [状态] 面B｜总 downloaded=9437184｜本任务的 chunks 原文=「"chunks":[{"start":0, "end":4194303, "downloaded":4194304, "done":1},{"start":4194304, "end":8388607, "downloaded":4194304, "done":1},{"start":8388608, "end":12582911, "downloaded":1048576, "done":0}] }
+  ]
+}
+」
+  [PASS] load 回来的任务带着原来的进度与分片（不是从 0 重来）
+  [PASS] 面 B：截短确实生效（写偏移已跑到文件尾之外）
+    [读数] 面B｜截短 .idmtmp（r+b 会成功 ⇒ 未触发兜底）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=[STATE-CLAMP] 发现 3 片进度被盘否证，重取 9433088 字节 Range=21 最大写偏移=9437184 引擎自愈读数 clamp_refetch=9433088B clamp_chunks=3｜兜底=未触发（文件存在，r+b 成功）
+  [PASS] 面 B：引擎自己发现 state 被盘否证（计数非零）
+  [PASS] 面 B：截短后不得静默把坏内容报成完成
+    [前提读数] 面C｜20s 轮询后 status=2 downloaded=8388608 deferred=0（status=0 且 deferred>0 ⇒ 任务压根没被起来过）
+    [分桶] 面C｜采样=3 次(每100ms,分母) 从未创建=1 全程0字节=0 有增长=0 tmp最大=12582912 成品路径最大=-1 status区间=[0,1](0排队/1下载中/2暂停) deferred最大=0 GET首次非零=i=-1 tmp首次>0=i=1 计数器首次>0=i=1 GET最大=0 网络采样数=1 conns最大=3(探针自占约2) filename=「rst_c.bin」 ⇒ 对照：正常拿到进度 ⇒ 本案这一轮未复现
+  [PASS] 暂停发生在中途，且状态里带着非零进度
+  [PASS] save 写出的状态文件确实带着分片进度（面 A/B/C 共同前提）
+    [状态] 面C｜总 downloaded=9437184｜本任务的 chunks 原文=「"chunks":[{"start":0, "end":4194303, "downloaded":4194304, "done":1},{"start":4194304, "end":8388607, "downloaded":4194304, "done":1},{"start":8388608, "end":12582911, "downloaded":1048576, "done":0}] }
+  ]
+}
+」
+  [PASS] load 回来的任务带着原来的进度与分片（不是从 0 重来）
+  [PASS] 面 C：.idmtmp 确实不存在（r+b 打不开 ⇒ 才走 w+b 兜底）
+    [读数] 面C｜删掉 .idmtmp（r+b 必失败 ⇒ 真走 w+b 兜底）｜status=3 成品=12582912/12582912 内容=1（1对 0错位 -1长度错 -2无文件） 首个错位偏移=-1 错位字节=0 error_msg=[STATE-CLAMP] 发现 3 片进度被盘否证，重取 9437184 字节 Range=21 最大写偏移=9437184 引擎自愈读数 clamp_refetch=9437184B clamp_chunks=3｜兜底=已触发（文件不存在 ⇒ w+b 新建）
+  [PASS] 面 C：引擎自己发现 state 被盘否证（计数非零）
+  [PASS] 面 C：删掉 .idmtmp 后不得静默把坏内容报成完成
+
+[33] 真·跨进程重启（第二个进程只有状态文件与盘，没有内存态）
+    [环境] 本 exe=「D:\visual studio\lianxi\MFC\idm-next\build\engine_selftest.exe」 证据目录=(未设 IDM_SELFTEST_EVIDENCE_DIR：只留 outdir，随收尾清掉)
+  [PASS] 能取到自己的路径（子进程要起的就是它）
+  [PASS] 交出前父进程确实停了笔（状态=已暂停 且 文件尺寸不再增长）
+  [PASS] 父进程把带进度的状态交出去了（面 A/B 共同前提）
+    [父] 面A｜state 与盘匹配（正常重启：半成品还在，进度能用）｜save=0 交出时 .idmtmp=12582912（-1=不存在）state=440 字节 已下=8388608
+  [PASS] 子进程真的起来了（跨进程边界成立，不是同进程两份内存态）
+  [PASS] 子进程自己收尾并交出退码
+    [子进程留档 C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_ok.result.txt｜675 字节]
+[子进程] pid=34428 exe 自己拼出来的路径=C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_ok.bin
+[子进程] load_state(「C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_ok.json」)=0
+[子进程] 载入后队列条数=1
+[子进程] 第0条 id=9133 file=「s2_ok.bin」 size=12582912 downloaded=8388608 status=2 chunk_count=3
+[子进程] 动手前盘上：.idmtmp=12582912 成品=-1（-1=不存在）state 里记的 size=12582912
+[子进程] 结局：wait=0 status=3 成品=12582912/12582912 内容比对=1（1对 0错位 -1长度错 -2无文件） 首个错位=-1 错位字节=0 error_msg=(空)
+[子进程] 结论：问题数=0（退码就是这个数）
+  [PASS] 面 A：真重启之后下得完，且父进程独立复核逐字节一致
+  [PASS] 交出前父进程确实停了笔（状态=已暂停 且 文件尺寸不再增长）
+  [PASS] 面 B：不匹配是**真的**造出来了（.idmtmp 确实不存在，不是删除失败装了个假的）
+  [PASS] 父进程把带进度的状态交出去了（面 A/B 共同前提）
+    [父] 面B｜故意不匹配：state 说若干片 done=1，盘上 .idmtmp 已删｜save=0 交出时 .idmtmp=-1（-1=不存在）state=440 字节 已下=8388608 ［不匹配已造出］
+  [PASS] 子进程真的起来了（跨进程边界成立，不是同进程两份内存态）
+  [PASS] 子进程自己收尾并交出退码
+    [子进程留档 C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_mm.result.txt｜663 字节]
+[子进程] pid=28080 exe 自己拼出来的路径=C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_mm.bin
+[子进程] load_state(「C:\Users\yyyy\AppData\Local\Temp\idm_selftest_out\s2_mm.json」)=0
+[子进程] 载入后队列条数=1
+[子进程] 第0条 id=9134 file=「s2_mm.bin」 size=12582912 downloaded=0 status=2 chunk_count=3
+[子进程] 动手前盘上：.idmtmp=-1 成品=-1（-1=不存在）state 里记的 size=12582912
+[子进程] 结局：wait=0 status=3 成品=12582912/12582912 内容比对=1（1对 0错位 -1长度错 -2无文件） 首个错位=-1 错位字节=0 error_msg=(空)
+[子进程] 结论：问题数=0（退码就是这个数）
+  [PASS] 面 B：state 与盘不匹配时必须被妥善处理，不许静默交出坏成品
+  [PASS] A 桶：成品完整 + .idmtmp 缺失 ⇒ 引擎**不误报**、也不许整份重下
+    [34 读数] A｜盘上成品=12582912｜load_rc=0｜clamp_chunks=0 clamp_refetch=0 status=3（期望 0/0/3=完成）｜.idmtmp=不存在(与夹具一致)
+  [PASS] A″ 桶：成品只剩前半 ⇒ ① 在 load 当场报出非零缺口并收回『已完成』
+    [34 读数] A″｜盘上成品=6291456｜load_rc=0｜clamp_chunks=2 clamp_refetch=6291456（期望 2/6291456）status=2（期望 !=3）｜.idmtmp=不存在(与夹具一致)
+    [35 读数] noop=0起点=6291456 扰动后最大=29360128 前进=1 status 1->1 chunk_count=10 chunks_done=6 .idmtmp 41943040->41943040(不作证人)
+  [PASS] [35] 探针跑到非零起点（两面都必须有起点，否则差分无意义）
+  [PASS] [35] 扰动之后记账必须继续前进（修前 noop=0 面是 前进=0）
+
+[36] 长度未知的下载完成后，「大小」必须等于盘上真实字节数
+  [PASS] [36①] 长度未知、补齐完成后 file_size 必须等于盘上真实字节数（修前恒 -1）
+    [36 读数] ①探测无长度(/cut.bin)｜输入: 声明长度=200000 盘上=200000｜读到的: status=3 取回=0 file_size=200000 downloaded=200000（判据: file_size 要 == 盘上 == 200000）
+  [PASS] [36③] 长度未知的成品重启后不被自己否证（仍已完成、不误报、不重下）
+    [36 读数] ③重启面｜输入: save=0 load=0 队列=2 找回id=7344 state里file_size=200000｜读到的: status=3 取回=0 clamp_chunks=0 clamp_refetch=0 file_size=200000
+  [PASS] [36②] 服务器已声明长度时 file_size 保持声明值（回填不许覆盖它）
+    [36 读数] ②探测有长度(/small.bin)｜输入: 声明长度=1048576 盘上=1048576｜读到的: status=3 取回=0 file_size=1048576 downloaded=1048576（判据: file_size 要 == 盘上 == 1048576）
+
+== 结果：179 通过，1 失败 ==

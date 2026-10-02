@@ -1192,10 +1192,33 @@ int main(int argc, char **argv)
         snprintf(d2, sizeof(d2), "%s\\sub", d1);
         snprintf(got_path, sizeof(got_path), "%s\\dirfix.bin", d2);
 
-        /* 清掉上次残留，保证目标目录**真的**不存在（否则本项什么都没验证） */
+        /* 清掉上次残留，保证目标目录**真的**不存在（否则本项什么都没验证）。
+         * ⚠ RemoveDirectoryA 只能删**空**目录：上一轮被中途打断时这里会留下一个装着
+         *    dirfix.bin 的 sub/（2026-10-02 实测 179/1 红在这一条），于是"先删再断言不存在"
+         *    静默失败 ⇒ 本项什么都没测。所以先把里面的文件删掉、再摘目录。
+         * ⚠ 这一处是**夹具健壮性**，不是产品缺陷的证人：控制变量 A/B 实测（同一夹具、
+         *    只切拆除算法）旧代码也返回"已删净"⇒ **本修复没有被变异证明，不占功**。 */
         utf8_delete(got_path);
         RemoveDirectoryA(d2);
         RemoveDirectoryA(d1);
+        if (GetFileAttributesA(d2) != INVALID_FILE_ATTRIBUTES) {
+            char pat[MAX_PATH + 96];
+            WIN32_FIND_DATAA fd;
+            snprintf(pat, sizeof(pat), "%s\*", d2);
+            HANDLE h = FindFirstFileA(pat, &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+                    char fp[MAX_PATH + 128];
+                    snprintf(fp, sizeof(fp), "%s\%s", d2, fd.cFileName);
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(fp);
+                    else DeleteFileA(fp);
+                } while (FindNextFileA(h, &fd));
+                FindClose(h);
+            }
+            RemoveDirectoryA(d2);
+            RemoveDirectoryA(d1);
+        }
         snprintf(d, sizeof(d), "目标目录 = %s", d2);
         check("目标多级目录预先确实不存在",
               GetFileAttributesA(d2) == INVALID_FILE_ATTRIBUTES, d);
