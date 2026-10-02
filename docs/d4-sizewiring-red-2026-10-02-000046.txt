@@ -1,0 +1,14 @@
+# D4 先红原文（IDM_SIZEWIRING_PROBE，offscreen + 真 MainWindow）
+# 夹具本身有牙：摘掉探针里那句 dlmgr_init 时，前置行是 [FAIL] ... load后条数=1 模型行数=0（实档见本文件末）
+# 现在前置 PASS、三条接线断言全 FAIL ⇒ 红的是产品接线，不是测具
+
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02\_data
+[PASS] 前置：行能进模型（add=1 tid=1 引擎查得=0 add后条数=1 save=0 state文件字节=249 load=0 load后条数=1 找到模型=1 模型行数=1 首行id=1 找到行=1 建行前第1列=「0 B」）
+[FAIL] onTaskProgress 带 total=200000 之后第 1 列变成 195.3 KB（实测「0 B」invoked=1）
+[FAIL] 回填确实发了覆盖第 1 列的 dataChanged（次数=2 列 2..5）
+[FAIL] 长度未知的任务完成那一刻，第 1 列也必须出现大小（实测「0 B」invoked=1 模型值=0）
+
+# --- 中途一次失败的原样留档（测具自己踩的坑，不是产品的红）---
+# [FAIL] 前置：行能进模型（add=1 tid=1 引擎查得=0 save=0 load=0 引擎条数=1 找到模型=1 模型行数=0 首行id=-1 找到行=0 建行前第 1 列=「(无行)」）
+# 根因：dlmgr_list() 不查 g_initialized 而 dlmgr_get_task_infos() 查 ⇒ total=min(1,0)=0，一行都不建。

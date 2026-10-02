@@ -1291,6 +1291,12 @@ void MainWindow::onTaskProgress(int taskId, qint64 downloaded, qint64 total, int
     m_totalSpeed += ns - (oldS > 0 ? oldS : 0);
     if (m_totalSpeed < 0) m_totalSpeed = 0;   // 防御增量漂移
     m_speeds[taskId] = speedBps;
+    /* total 是引擎已经在推的数（探测拿到 Content-Length 之后就是正数），以前这里整个丢掉：
+     * 于是「大小」列只能等 refreshFromEngine —— 而那一步并不在定时器上（见 D4，§7 第 25 条）。
+     * ⚠️ `> 0` 不是可省的守卫：长度未知的任务 total 恒为 -1，而 formatBytes(<=0) 印 "0 B"，
+     *    无守卫就会把建行时的 "-" 悄悄改成 "0 B" —— 那是比 "-" 更糟的谎（看着像量到了零字节）。 */
+    if (total > 0)
+        m_taskModel->setFileSize(taskId, total);
     // HLS 后端以 (百分比, 100) 上报进度；视频/引擎以真实字节上报
     if (isStreamTask(taskId) && total == 100)
         m_taskModel->setProgressPct(taskId, static_cast<int>(downloaded));
@@ -1305,6 +1311,15 @@ void MainWindow::onTaskCompleted(int taskId, bool success, const QString& error)
     m_speeds[taskId] = 0;
     // 记录终态（完成=3 / 失败=4），保证“全部完成”判定不依赖 stateChanged 到达顺序
     m_states[taskId] = success ? 3 : 4;
+    /* 完成那一刻必须从引擎**现读一次**：长度未知的任务整条路上 total 都是 -1，
+     * 盘上真实长度是 D2 在收尾时才回填出来的（download_core.c 完成处），
+     * 所以只有这里能拿到它。不读的话「大小」列与下面的 history 就一起收 -1 ——
+     * 2026-10-01 实拍正是那样：成品 200000 字节、界面 "-"、history.db ('cut.bin',-1,'completed')。
+     * 放在 updateStatus 之前：状态列的百分比也吃这个数（模型按 fileSize 算）。 */
+    TaskInfo finTi;
+    memset(&finTi, 0, sizeof(finTi));
+    if (dlmgr_get_task_info(taskId, &finTi) == 0 && finTi.file_size > 0)
+        m_taskModel->setFileSize(taskId, finTi.file_size);
     m_taskModel->updateStatus(taskId, m_states[taskId]);
     syncStatus();
 
@@ -1397,6 +1412,11 @@ void MainWindow::refreshFromEngine()
     // 把 4Hz 热路径上的锁竞争降到 2 次（list + infos），不与下载线程的进度回调抢锁。
     TaskInfo infos[128];
     int m = dlmgr_get_task_infos(infos, 128);
+    /* ⚠️ 这两个读侧守卫**不对称**，是实测出来的坑：dlmgr_list() 不看 g_initialized，
+     * 而 dlmgr_get_task_infos() 在未初始化时直接 return 0 ⇒ total = min(n, m) = 0，
+     * 于是"引擎里明明有 1 条任务，模型却一行都不建"。产品进程里 init 在 MainWindow 之前，
+     * 所以这条路平时看不出来；自测探针（tools/ui_snapshot.cpp 的 IDM_SIZEWIRING_PROBE）
+     * 构造真 MainWindow 时就撞上了。别把这里读成"没任务可刷"。 */
     int total = n < m ? n : m;
 
     // 仅当存在尚未同步进模型（恢复/历史）的任务时，才去拉取 URL 摘要——

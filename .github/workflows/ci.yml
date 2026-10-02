@@ -102,7 +102,7 @@ jobs:
                   IDM_PROXY_PROBE IDM_ZOOM_PROBE IDM_TOOLPROBE_PROBE
                   IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE
                   IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE IDM_FLUSH_PROBE
-                  IDM_FILEICON_PROBE IDM_SIZECOL_PROBE"
+                  IDM_FILEICON_PROBE IDM_SIZECOL_PROBE IDM_SIZEWIRING_PROBE"
           BAD=""
           TOTAL_PASS=0
           # 判据：**红的原文必须可重取**。以前每个探针的输只活在 shell 变量里，

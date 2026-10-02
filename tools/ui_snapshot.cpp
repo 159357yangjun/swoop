@@ -296,6 +296,9 @@ int main(int argc, char** argv) {
     }
 
     dlmgr_init(nullptr);
+    /* ⚠️ 这一行不是可有可无的样板：dlmgr_list() 不查 g_initialized、dlmgr_get_task_infos() 查，
+     * 所以没 init 时 refreshFromEngine() 会拿到 n=1/m=0 ⇒ 一行都不建（实测踩过，
+     * 读数见 docs/d4-sizewiring-red-*.txt 的"引擎条数=1 模型行数=0"）。 */
     Settings settings;
     settings.load();
     const QString origTheme = settings.theme();   // 记录原主题，截图后还原，避免污染用户设置
@@ -995,6 +998,159 @@ int main(int argc, char** argv) {
                pctFollows ? "[PASS]" : "[FAIL]", stBefore.toUtf8().constData(), stAfter.toUtf8().constData());
         return (before == QStringLiteral("-") && after == QStringLiteral("1.0 MB")
                 && painted && quietOnSame && pctFollows) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_SIZEWIRING_PROBE=1 ──
+     * D4：引擎知道大小 ≠ 界面显示得出大小。由来是 2026-10-01 的产品实拍（§7 第 25 条）：
+     * 同一条 /cut.bin，引擎侧自测 [36①] 给的是 file_size=200000，界面上「大小」列仍是 "-"、
+     * history.db 里仍是 -1。断点在 GUI 接线：
+     *   ① onTaskProgress 收到了 total 却整个丢掉；
+     *   ② refreshFromEngine() 没挂在任何定时器上（全仓只有 loadState/onStartAll/onPauseAll 三处），
+     *      所以"每 tick 回填"从来没发生过；
+     *   ③ 完成时 recordFinished 读的是模型里的旧值 ⇒ 落库的就是 -1。
+     * ⚠️ 必须走 MainWindow 的真实槽（私有槽经元对象系统按名调用，先例见本文件 ScheduleService::onTick），
+     *    IDM_SIZECOL_PROBE 那五条只测 TaskListModel 自己——模型有接口而没人调它，正是这次的缺陷形状。
+     * 夹具用 dlmgr_add + dlmgr_load_state 造行（不 start ⇒ 零网络、零线程），任务 id 由引擎分配后回读。 */
+    if (qEnvironmentVariableIsSet("IDM_SIZEWIRING_PROBE")) {
+        /* 数据目录必须**显式**指到一个本轮新建的空目录：MainWindow 会 loadState(那个目录/tasks.json)，
+         * 而探针的隔离数据目录是按日期分层的、跨轮复用——实测同一条命令连跑三次得到
+         * "模型行数=1/7/7"，多出来的行全是上一轮这个夹具留下的任务。那样第 1 列读的是谁家的行
+         * 都不确定，判据就成了掷骰子。这里不复用任何已有目录。 */
+        QString dir = QDir::tempPath() + QStringLiteral("/idm-sizewiring-probe-")
+                      + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(dir);
+        qputenv("IDM_DATA_DIR", dir.toUtf8());
+        const QString url = QStringLiteral("http://127.0.0.1:1/size_wiring.bin");
+        QFile::remove(dir + QStringLiteral("/size_wiring.bin"));
+        QFile::remove(dir + QStringLiteral("/size_wiring.bin.idmtmp"));
+
+        int tid = dlmgr_add(url.toUtf8().constData(), dir.toUtf8().constData(),
+                            "size_wiring.bin", 1, nullptr, nullptr, nullptr, nullptr);
+        bool okAdd = (tid >= 0);
+        TaskInfo probeTi;
+        memset(&probeTi, 0, sizeof(probeTi));
+        int rg = dlmgr_get_task_info(tid, &probeTi);   // 夹具前提：引擎确实存着这个任务
+        int engN1 = 0; { int eids[16]; engN1 = dlmgr_list(eids, 16); }
+        QString st = dir + QStringLiteral("/probe_state.json");
+        QFile::remove(st);
+        int sv = okAdd ? dlmgr_save_state(st.toUtf8().constData()) : -1;
+        long svSz = QFileInfo(st).exists() ? QFileInfo(st).size() : -1;
+        int lc = (sv == 0) ? dlmgr_load_state(st.toUtf8().constData()) : -1;
+        int engN2 = 0; { int eids[16]; engN2 = dlmgr_list(eids, 16); }   // load 之后引擎里有几条
+
+        MainWindow w;
+        /* 引擎队列此刻就是夹具那一条（load_state 会先清空再灌）。构造里那次 singleShot(0)
+         * 的 loadState 排在事件循环第一轮，本块同步跑完之前它不会插进来。 */
+        auto modelOf = [&w]() { return w.findChild<TaskListModel*>(); };
+        auto rowOf = [&w, &modelOf](int id) -> const TaskRow* {
+            TaskListModel* m = modelOf();
+            if (!m) return nullptr;
+            for (const TaskRow& r : m->tasks()) if (r.id == id) return &r;
+            return nullptr;
+        };
+        // load_state 只灌引擎队列；把它搬进模型的那一步正是 refreshFromEngine
+        w.refreshFromEngine();
+        bool okModel = (modelOf() != nullptr);
+        const TaskRow* firstRow = okModel && modelOf()->rowCount() > 0
+                                      ? &modelOf()->tasks().at(0) : nullptr;
+        int rowCountAfter = okModel ? modelOf()->rowCount() : -1;
+        bool okRow = rowOf(tid) != nullptr;
+        bool okLoad = (sv == 0 && lc == 0 && okModel && okRow);
+
+        int paints = 0, firstCol = -1, lastCol = -1;
+        int col1Count = 0, col1Lo = -1, col1Hi = -1;
+        auto countCol1 = [&](int lo, int hi) { if (lo <= 1 && hi >= 1) { ++col1Count; col1Lo = lo; col1Hi = hi; } };
+        auto snapPaint = [&]() { paints = 0; firstCol = -1; lastCol = -1;
+                                 col1Count = 0; col1Lo = -1; col1Hi = -1; };
+        struct Paint { int n, lo, hi, c1n, c1lo, c1hi; bool hitsCol1; };
+        if (TaskListModel* m = modelOf()) {
+            QObject::connect(m, &QAbstractItemModel::dataChanged,
+                             [&](const QModelIndex& a, const QModelIndex& b, const QVector<int>&) {
+                                 ++paints; firstCol = a.column(); lastCol = b.column();
+                                 countCol1(a.column(), b.column());
+                             });
+        }
+        /* ⚠️ 采样必须"调用前清零、调用后立刻读"：Qt6 默认 DirectConnection，槽在**本线程内联**执行，
+         *    两次 invokeMethod 之间攒下的计数会被下一次覆盖。第一版拿"最后一次调用的快照"当判据，
+         *    读到的是 updateProgress 那一发（列 2..5），于是这条恒红——红的是测具。
+         * ⚠️ 而且只能数**覆盖第 1 列**的那一发：onTaskProgress 自己还要走 updateProgress，
+         *    那里合法地发 2..5；拿"有没有发 dataChanged"当判据就把一条正确的实现读成错。 */
+        const QString colBefore = okLoad ? modelOf()->index(0, 1).data(Qt::DisplayRole).toString()
+                                         : QStringLiteral("(无行)");
+        // ① 实时进度回调带上 total（下载途中探测已经拿到长度的那条路）
+        snapPaint();
+        bool okProg = okLoad && QMetaObject::invokeMethod(
+            &w, "onTaskProgress", Qt::DirectConnection,
+            Q_ARG(int, tid), Q_ARG(qint64, 4096), Q_ARG(qint64, 200000), Q_ARG(int, 50000));
+        const Paint prog{paints, firstCol, lastCol, col1Count, col1Lo, col1Hi, col1Count >= 1};
+        const QString colAfterProg = okLoad ? modelOf()->index(0, 1).data(Qt::DisplayRole).toString()
+                                            : QStringLiteral("(无行)");
+
+        // ② 长度未知的任务：完成那一刻引擎才把盘上长度回填出来（D2 那条路）
+        TaskInfo ti;
+        memset(&ti, 0, sizeof(ti));
+        bool okInfo = okLoad && dlmgr_get_task_info(tid, &ti) == 0;
+        QByteArray errUtf8;
+        /* 先让引擎侧的完成路径自己跑一遍（不 start ⇒ 没有线程，就地收尾）：
+         * dlmgr_start 会探测失败 → 单流下载失败 → 监督线程把状态置成终态。
+         * 这一步是必须的：MainWindow::onTaskCompleted 现在**从引擎现读** file_size，
+         * 一个从没跑过的 PENDING 任务那里根本没有长度可读——那才是 D2 要防的那种谎。 */
+        if (okLoad) {
+            dlmgr_start(tid);
+            for (int i = 0; i < 60; i++) {                   // 最多 6 秒等它进终态
+                QCoreApplication::processEvents();
+                TaskInfo t2;
+                if (dlmgr_get_task_info(tid, &t2) == 0 && (t2.status == 3 || t2.status == 4)) break;
+                QThread::msleep(100);
+            }
+        }
+        snapPaint();
+        bool okDone = okLoad && QMetaObject::invokeMethod(
+            &w, "onTaskCompleted", Qt::DirectConnection,
+            Q_ARG(int, tid), Q_ARG(bool, true), Q_ARG(QString, QString()));
+        const Paint done{paints, firstCol, lastCol, col1Count, col1Lo, col1Hi, col1Count >= 1};
+        const TaskRow* doneRow = rowOf(tid);
+        TaskInfo engTi;                 // 完成面读到的**引擎**读数（不是测具写的）
+        memset(&engTi, 0, sizeof(engTi));
+        int engRc = okLoad ? dlmgr_get_task_info(tid, &engTi) : -1;
+        const QString colAfterDone = doneRow ? modelOf()->index(0, 1).data(Qt::DisplayRole).toString()
+                                             : QStringLiteral("(无行)");
+        Q_UNUSED(okInfo); Q_UNUSED(errUtf8);
+
+        const bool progShows = (colAfterProg == QStringLiteral("195.3 KB"));
+        /* ⚠️ 完成面**不数 dataChanged 发数**：到这一步第 1 列已经是 195.3 KB（上一面刚回填过），
+         *    setFileSize 的"同值不发重绘"守卫就会吞掉这一发——那是上一面的功劳，不是这一面的缺陷。
+         *    第一版把它写成 `doneShows && donePainted` 时，这条恒红且红得没有意义。
+         *    两面对调顺序也测不出差别 ⇒ 这一面只认 DisplayRole 与模型字段这两个独立证人。 */
+        const bool doneShows = (colAfterDone == QStringLiteral("195.3 KB"))
+                               && doneRow && doneRow->fileSize == 200000;
+        const bool progPainted = prog.hitsCol1;
+        Q_UNUSED(done);
+
+        printf("%s 前置：行能进模型（add=%d tid=%d 引擎查得=%d add后条数=%d save=%d state文件字节=%ld "
+               "load=%d load后条数=%d 找到模型=%d 模型行数=%d 首行id=%d 找到行=%d 建行前第1列=「%s」）\n",
+               okLoad ? "[PASS]" : "[FAIL]", okAdd ? 1 : 0, tid, rg, engN1, sv, svSz, lc, engN2,
+               okModel ? 1 : 0, rowCountAfter,
+               firstRow ? firstRow->id : -1, okRow ? 1 : 0, colBefore.toUtf8().constData());
+        printf("%s onTaskProgress 带 total=200000 之后第 1 列变成 195.3 KB（实测「%s」invoked=%d）\n",
+               (okProg && progShows) ? "[PASS]" : "[FAIL]", colAfterProg.toUtf8().constData(),
+               okProg ? 1 : 0);
+        printf("%s 进度回调那次调用内发了覆盖第 1 列的 dataChanged（该发数=%d 列 %d..%d；同窗口总发数=%d）\n",
+               progPainted ? "[PASS]" : "[FAIL]", prog.c1n, prog.c1lo, prog.c1hi, prog.n);
+        printf("%s 长度未知的任务完成那一刻，第 1 列也必须出现大小（实测「%s」invoked=%d 模型值=%lld；"
+               "该次调用内覆盖第1列发数=%d 列 %d..%d——同值不发重绘，只作对照不作判据）\n",
+               (okDone && doneShows) ? "[PASS]" : "[FAIL]", colAfterDone.toUtf8().constData(),
+               okDone ? 1 : 0, doneRow ? (long long)doneRow->fileSize : -999, done.c1n, done.c1lo, done.c1hi);
+        printf("    [D4 引擎读数] 完成面取回=%d status=%d file_size=%lld downloaded=%lld err=「%s」\n",
+               engRc, engTi.status, (long long)engTi.file_size, (long long)engTi.downloaded,
+               engTi.error_msg);
+
+        QFile::remove(st);
+        dlmgr_remove(tid);
+        QFile::remove(dir + QStringLiteral("/size_wiring.bin"));
+        QFile::remove(dir + QStringLiteral("/size_wiring.bin.idmtmp"));
+        return (okAdd && okLoad && okProg && progShows && progPainted
+                && okDone && doneShows) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──

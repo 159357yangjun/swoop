@@ -2341,3 +2341,50 @@ D2 是计划里的那条，D3 是给 D2 配的判别式自己炸出来的——�
   本轮没有证人。
 - 第二发任务的失败原因没查（只到"名字不对 ⇒ 可能 404/写盘失败"这一层，未取证）。
 - CI 从未执行（88 笔未推）。
+
+### 2026-10-02 00:0x（第 26 条）— D4 修完：接线补上，并且**量出这条探针哪一面没有牙**
+第 25 条登记的 D4 落地了。先红原文 `docs/d4-sizewiring-red-2026-10-02-000046.txt`，
+变异差分 `docs/d4-mutation-differential-2026-10-02.txt`。
+
+**新探针 `IDM_SIZEWIRING_PROBE`（4 条断言）**——与 `IDM_SIZECOL_PROBE` 的分工要说清：
+后者只测 `TaskListModel` 自己（模型有接口），前者测**有没有人调它**。这次坏就坏在"有接口没人调"，
+所以必须有一面走真 `MainWindow`：私有槽按仓里先例用 `QMetaObject::invokeMethod` 按名调用，不开后门。
+
+**改了两处接线（`src/gui/main_window.cpp`）**
+1. `onTaskProgress` 用掉引擎已经在推的 `total`：`if (total > 0) m_taskModel->setFileSize(taskId, total);`。
+   `> 0` 不是装饰：长度未知的任务 `total` 恒 -1，而 `formatBytes(<=0)` 印 `0 B` ⇒ 无守卫会把 `-` 换成 `0 B`，
+   那是比 `-` 更响的谎。
+2. `onTaskCompleted` 在 `updateStatus`/`recordFinished` 之前**现读一次** `dlmgr_get_task_info`：
+   历史库那个 size 就是从这儿取的，不现读就继续收 -1。
+
+**夹具本身踩了三个坑，都当场量出来了（这些是测具的错，不是产品的红）**
+- `dlmgr_list()` 不查 `g_initialized`、`dlmgr_get_task_infos()` 查 ⇒ 没 init 时 `total=min(1,0)=0`，
+  一行都不建。读数 `引擎条数=1 模型行数=0` 把它指了出来；已在 `refreshFromEngine` 上方写明这个不对称。
+- 探针的数据目录按日期分层、**跨轮复用** ⇒ MainWindow 载入上一轮留下的队列，连跑三次得到
+  `模型行数=1/7/7`。改成每轮新建空目录后三轮全一致。
+- Qt6 默认 `DirectConnection`，槽在本线程内联执行 ⇒ 拿"最后一次调用的快照"当判据会读到上一次的计数；
+  而且 `onTaskProgress` 自己还要发一发合法的 2..5，判据只能数**覆盖第 1 列**的那一发。
+
+**三面变异（同一枚夹具，只切 `main_window.cpp`）**
+| 切掉什么 | 结果 | 说明 |
+|---|---|---|
+| 进度面 `setFileSize(total)` | 3 条 `[FAIL]`，退码 1 | 牙在这里 |
+| 完成面"现读引擎"那一发 | **退码 0，不红** | ⚠️ 这一面**没有被证明** |
+| 只切进度面、留完成面 | 2 条进度面 `[FAIL]` | 两面不能互相冒充 |
+
+第二行为什么不红：夹具在建行时已经走过一次 `refreshFromEngine`，进度面把 200000 写进模型之后，
+完成面的 `setFileSize` 撞上自己的"同值不发重绘"守卫直接 return ⇒ 它在 offscreen 里没有独立可观测效果。
+要让它有牙必须造"全程 `total=-1`、完成那一刻才有长度"的真链路（真服务器 + 真下载）。
+**所以这一发的正确性目前只有代码为凭**，写进未验证清单，不许记成"D4 已被四条断言钉住"。
+
+**复跑**：探针套件现在 **19 模式 / PASS=72 FAIL=0 零断言=0**（68→72 就是这 4 条）；
+引擎门 `180 通过，0 失败`；`lint_layering`/`live_roster`/`lint_control_bytes`/`notice_verify` 四道 rc=0；
+四个目标全部重编（`idm-next`、`idm-next-host`、`engine_selftest`、`ui_snapshot`）。
+
+**仍然没验证的东西**
+- 产品 GUI 在 D4 之后**没有再拍过一次**：本轮 UIA 通道坏了（`GetWindowTextW` 对同一 hwnd 返回空串，
+  MCP 调用超时），只做到"进程起得来、窗口标题在、`Responding=True`"。⇒「大小列现在真的有数」这句话
+  的证据仍然是**探针级**，不是像素级。
+- 上一轮那条未归因的文件名掺入仍未做干净复现（键盘输入路线被同一个 UIA 故障挡住）。
+- 完成面那一发的牙（见上表第二行）。
+- CI 从未执行（90 笔未推）。
