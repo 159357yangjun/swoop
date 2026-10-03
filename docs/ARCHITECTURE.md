@@ -1705,7 +1705,7 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 | IDM_TEXT_PROBE | 断言型 | 是 | 1 |
 | IDM_TOOLPROBE_PROBE | 断言型 | 是 | 4 |
 | IDM_SIZELIVE_PROBE | 断言型 | 是 | 3 |
-| IDM_KEYNAV_PROBE | 断言型 | 是 | 2 |
+| IDM_KEYNAV_PROBE | 断言型 | 是 | 3 |
 | IDM_ZOOM_PROBE | 断言型 | 是 | 4 |
 <!-- PROBE-ROSTER-END -->
 上表的三个集合恒等式（模式名 / 类型 / 是否在 CI 名单）由 `python tools/probe_roster.py` 现算比对，
@@ -2833,3 +2833,32 @@ B0/B1/B2 三面跑的是**带 REPRO-HOOK 的二进制**（`exe_sha12=144ae566163
 B 改成"单轮预算命中数"判据／C 先修量具（把空转窗口与采样窗口解耦，别让 msleep 切成常数）。
 建议顺序 **C→B**；A 单独做不建议。数据档：`docs/activate-baseline-idle-1003-010247.txt`、
 `docs/activate-baseline-load-1003-010941.txt`，工具 `tools/activate_calibrate.py`（只用标准库，无新依赖）。
+
+### 2026-10-03 01:5x（第 39 条）— K2/K3 mutation testing：三段链现在有牙，且三种破坏的失败原因可区分
+
+**为什么要加第三段**：K1 读静态属性（动作存在 + context）、K2 读 Tab 链形状 —— 两条都**不经过命令路由、
+也不到行为末端**。所以"破坏 accelerator / 破坏路由 / handler 不开窗"三种 mutation **一个都杀不死**：
+不是测试没牙，是牙不在那个位置。新增 K3 把 `key → command → handler → dialog` 拆成三条独立判据。
+
+**结果（每面只切一个变量，各留原始输出于 `docs/k2-mutations-3face-f5f093406454.txt`）**
+| mutation | 改了什么 | ①key→command | ②command→handler | ③handler→dialog | rc |
+|---|---|---|---|---|---|
+| M1 accelerator | `Ctrl+N` → `Ctrl+J` | **红**（act=(无)） | 红（连带） | 红（连带） | 1 |
+| M2 command-route | 槽改接 `onBatchImport`（键与 context 都对） | 绿 | **红**，`wrongDlg=BatchImportDialog` | 红 | 1 |
+| M3 handler | `onNewTask()` 首行 `return`（键与路由都对） | 绿 | **绿**（`actFired=1 wrongDlg=-`） | **红**（peak=0） | 1 |
+| 干净基线 | src/ diff=0 | 绿 | 绿 | 绿 | 0 |
+
+⇒ **三段的失败签名互不相同**，M2 与 M3 不再撞成同一句：M2 说"路由开了别的窗"，M3 说"什么都没开"。
+恢复源码后复跑全绿（探针 exe_sha12=`f5f093406454`），套件 **21 模式 PASS=78 FAIL=0**（比上一版多一条断言）。
+
+**这条链上踩到的三个测具坑（都是"挂死冒充红/绿"的形状）**
+1. `trigger()` 直接调 ⇒ 内联进 `dlg.exec()`，外层 `QEventLoop` 还没起来 ⇒ 守卫的 quit 作用不到它，
+   M2 表现成 **rc=124 挂死而不是 FAIL**。改成 `Qt::QueuedConnection` 投递 trigger，让 exec 跑在外层循环里。
+2. 守卫只认 `NewTaskDialog` ⇒ 路由被改接后开的是 `BatchImportDialog`，永远关不掉 ⇒ 同样挂死。
+   现在兜底会关掉**任何模态对话框**并把它类名记进 `wrongDlg`——这一改同时把 ② 与 ③ 分开了。
+3. offscreen 下窗口收不到 `Show` 事件 ⇒ 用事件过滤器采样会得到 `peak=0` 的假阴性；改用定时器轮询。
+
+**仍未覆盖的一段（如实标出）**：① 只是"Ctrl+N 被某个 enabled QAction 占着"这种静态读取，
+**没有**证明"按下 Ctrl+N 会 fire 它" —— offscreen 合成按键进不了快捷键系统（canary 四种发法累计触发 0，
+本轮再次复现）。要证那一段只能靠真窗口人工按一次，或换 windows 平台跑探针。
+K2 那条 Tab 链断言依旧**未被变异证明**（摘掉 setTabOrder 读数逐位不变），保持"算读数不算证人"。

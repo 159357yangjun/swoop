@@ -1,0 +1,30 @@
+# repo=D:/visual studio/lianxi/MFC/idm-next HEAD=a91d19d 探针 exe_sha12=2d9d7c1f97cf
+# 每个 mutation 只切一个变量、改完重编再跑；三段各自独立红，FAIL 原因可区分
+[FAIL] [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理（命中数=0 选用=(无) 可用=0 context=-1(0=Widget 1=Window 2=Application 3=WidgetWithChildren) 文本=「」tooltip=「(找不到带 Ctrl+N 的动作)」）
+[FAIL] [K3] Ctrl+N 三段链 key->command=0 (act=(无)) | command->handler=0 (peakDlg=0) | handler->dialog=0 (closed=0 before=0 after=0)
+[PASS] [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理（命中数=1 选用=QMenu 可用=1 context=2(0=Widget 1=Window 2=Application 3=WidgetWithChildren) 文本=「新建任务(&N)...」tooltip=「新建任务(N)」）
+
+[M2 command-route mutation] 槽改接 onBatchImport（accelerator 与 context 都保持正确）
+[PASS] [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理（命中数=1 选用=QMenu 可用=1 context=2(0=Widget 1=Window 2=Application 3=WidgetWithChildren) 文本=「新建任务(&N)...」tooltip=「新建任务(N)」）
+[PASS] [K2] 新建任务对话框键盘提交面：目录框在链上、下一站是「浏览...」（链长=12 目录位=1 浏览位=2 锚点=1）｜对照读数 Enter 归向：确定=default:1/auto:1 浏览=default:0
+    [K3 reading] spyTicks=1 peak=0 closed=0 before=0 after=0 wrongDlg=BatchImportDialog
+[FAIL] [K3] Ctrl+N 三段链 key->command=1 (act=新建任务(&N)...) | command->handler=0 (peakDlg=0) | handler->dialog=0 (closed=0 before=0 after=0)
+rc=0 （0=未挂死，FAIL 正常报出）
+
+[M3 handler mutation] onNewTask 首行 return（accelerator 与路由都保持正确）
+[PASS] [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理（命中数=1 选用=QMenu 可用=1 context=2(0=Widget 1=Window 2=Application 3=WidgetWithChildren) 文本=「新建任务(&N)...」tooltip=「新建任务(N)」）
+[PASS] [K2] 新建任务对话框键盘提交面：目录框在链上、下一站是「浏览...」（链长=12 目录位=1 浏览位=2 锚点=1）｜对照读数 Enter 归向：确定=default:1/auto:1 浏览=default:0
+    [K3 reading] spyTicks=201 peak=0 closed=0 before=0 after=0 wrongDlg=-
+[FAIL] [K3] Ctrl+N 三段链 key->command=1 (act=新建任务(&N)...) | command->handler=0 (peakDlg=0) | handler->dialog=0 (closed=0 before=0 after=0)
+rc=上面 M3_rc
+
+[M3 handler mutation 重跑，分段可区分后] onNewTask 首行 return
+    [K3 分段] a)key->command=1 b)command->handler=1(actFired=1 wrongDlg=-) c)handler->dialog=0
+    [K3 reading] spyTicks=201 peak=0 closed=0 before=0 after=0 wrongDlg=-
+[FAIL] [K3] Ctrl+N 三段链 key->command=1 (act=新建任务(&N)...) | command->handler=1 (peakDlg=0) | handler->dialog=0 (closed=0 before=0 after=0)
+
+[干净基线复跑] src/ diff=0，探针 exe_sha12=f5f093406454
+[PASS] [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦�
+[PASS] [K2] 新建任务对话框键盘提交面：目录框在链上、下一�
+[PASS] [K3] Ctrl+N 三段链 key->command=1 (act=新建任务(&N)...) | command-
+clean_rc=0

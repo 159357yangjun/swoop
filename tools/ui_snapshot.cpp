@@ -1373,6 +1373,168 @@ int main(int argc, char** argv) {
             dlg.reject();
         }
 
+        /* ── K3：把 `key → command → handler → dialog` 拆成三段独立断言 ──
+         * 为什么要这三段（2026-10-03 主控验收条件）：K1 读的是**静态属性**（动作存在 + context），
+         * K2 读的是**Tab 链形状** —— 两条都不经过命令路由，也不到行为末端。
+         * 于是"破坏 accelerator / 破坏路由 / 让 handler 不建对话框"三种 mutation **一个都杀不死**：
+         * 牙不在那个位置，不是测试没牙。三段各自单独红，失败原因可区分：
+         *   ① key→command    ：Ctrl+N 这个键序列确实被某个 enabled QAction 占着
+         *   ② command→handler：该动作**真的被触发时会产生副作用** ⇒ 用 trigger() 驱动整条路由，
+         *                       不看 connect 表（Qt 6.11 **没有** QObject::connectsTo 这种公开 API，
+         *                       qobject.h:403 那个 QSlotObjectBase 是私有参数；靠猜接收者就是假牙）
+         *   ③ handler→dialog ：trigger 期间**必须出现一个 NewTaskDialog**（peak 计数），
+         *                       且它是在 exec() 里被关掉的（不是没开过）
+         * ⚠ 全程**不发键盘事件**：offscreen 下合成按键进不了快捷键系统（canary 四种发法累计触发 0）。
+         *   所以这条链的可核形式是"程序化触发已注册的动作"，它覆盖 command→handler→dialog 三段，
+         *   唯独 key→accelerator 那一段只能停在静态读取——这一点在结论里要如实标出来。 */
+        bool seg1 = false, seg2 = false, seg3 = false;
+        QString wrongDlg;
+        int peakDlg = 0, closedDlg = 0, beforeDlg = 0, afterDlg = 0;
+        QString actText;
+        {
+            QList<QAction*> hits;
+            for (QAction* x : w.findChildren<QAction*>())
+                if (x->shortcuts().contains(QKeySequence(QStringLiteral("Ctrl+N")))) hits << x;
+            seg1 = !hits.isEmpty() && hits.first()->isEnabled();
+            actText = seg1 ? hits.first()->text() : QStringLiteral("(无)");
+
+            /* trigger() 会内联跑到 onNewTask → dlg.exec()：模态循环嵌在里面，
+             * 探针自己再 processEvents 就会切进那个循环。所以"弹窗出现过"必须在**循环期间**采样。
+             * ⚠ 不能用事件过滤器：offscreen 下窗口不会收到 Show（`isVisible()` 仍为真），
+             *    第一版就是这么把一条真链读成 peak=0 的。改成轮询 —— 轮询不依赖任何绘制事件。 */
+            struct Poller {
+                static int count() {          // 我们要的那个（NewTaskDialog）
+                    int n = 0;
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (qobject_cast<NewTaskDialog*>(x)) ++n;
+                    return n;
+                }
+                static QString anyModal() {   // 任何挡路的模态顶层窗（含冒名顶替者）
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (auto* d = qobject_cast<QDialog*>(x); d && d->isModal())
+                            return QString::fromLatin1(d->metaObject()->className());
+                    return QString();
+                }
+                static void closeOne() {
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (auto* d = qobject_cast<NewTaskDialog*>(x)) { d->reject(); return; }
+                }
+                /* ⚠ M2（路由改接 onBatchImport）实测 rc=124 而不是 FAIL：那条路开的是
+                 *    BatchImportDialog，只认 NewTaskDialog 的守卫永远不关它 ⇒ 探针挂死。
+                 *    "挂死"和"红"必须可区分，所以兜底要能关掉**任何**模态对话框并记下它的类名。 */
+                static QString closeAnyModal() {
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (auto* d = qobject_cast<QDialog*>(x); d && d->isModal()) {
+                            const QString nm = QString::fromLatin1(d->metaObject()->className());
+                            d->reject();
+                            return nm;
+                        }
+                    return QString();
+                }
+            };
+            if (seg1) {
+                QAction* routeAct = hits.first();
+                int peak = 0;
+                beforeDlg = Poller::count();
+                /* ⚠ 探针槽**必须挂在 handler 之前**：QAction::activate() 的顺序是
+                 *   triggered 信号（按 connect 顺序）→ activateCommand()。
+                 *   第一版把 pump 循环挂在信号里再 trigger()，pump 跑完时 exec 还没起来 ⇒
+                 *   峰值恒 0；改成"trigger 排在 pump 之后"又直接挂死（实测 rc=124）。
+                 *   现在：先 connect 一个会自己等弹窗的槽，再 trigger —— 该槽在 onNewTask
+                 *   之前跑？不行，它会挡住 exec。所以正确形状只有一个：
+                 *   **让 pump 跑在 exec 之内**，即由 Qt 的事件派发驱动，而不是我们自己等。 */
+                QEventLoop outer;
+                QTimer hardStop;
+                hardStop.setSingleShot(true);
+                /* ⚠ 兜底必须**自己会收摊**，不能只 quit 一个我们可能永远走不到的外层循环：
+                 *   M2（路由改接到别的槽）实测就卡在这里 —— exec 起来后外层 `outer.exec()` 根本
+                 *   没被驱动，hardStop 排上了也不 fire ⇒ rc=124 挂死。
+                 *   现在兜底做两件事：关掉任何还开着的 NewTaskDialog（让 exec 返回），再 quit。 */
+                QObject::connect(&hardStop, &QTimer::timeout, &outer, [&]() {
+                    for (int guard = 0; guard < 50; guard++) {
+                        if (Poller::count() == 0) break;
+                        Poller::closeOne();
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                    }
+                    outer.quit();
+                });
+                QObject probe;
+                /* 采样器：外层循环每转一次就看一眼有没有 NewTaskDialog，有就记峰值并关掉它。
+                 * 外层循环由 trigger() 内联启动（见下），exec 的模态循环会在其中被驱动吗？
+                 * ——不会。所以这里换成"先 trigger、后采样"不可行的另一种解法：
+                 * 用 QTimer(0ms) 排队，trigger 里 exec 起来后这个定时器才在其事件循环里 fire。 */
+                QTimer spy;
+                int spyTicks = 0;
+                QObject::connect(&spy, &QTimer::timeout, &probe, [&]() {
+                    ++spyTicks;
+                    const int n = Poller::count();
+                    if (n > peak) peak = n;
+                    if (n > 0) { ++closedDlg; Poller::closeOne(); return; }
+                    const QString w = Poller::anyModal();
+                    if (!w.isEmpty()) { wrongDlg = w; Poller::closeAnyModal(); outer.quit(); }
+                    if (closedDlg >= 1 && Poller::count() == 0) outer.quit();
+                    if (spyTicks > 200) outer.quit();      // ≈1s 上限，防挂死
+                });
+                spy.start(5);
+                hardStop.start(20000);
+                /* 自杀式兜底：exec 的模态循环里**只有 exec 自己的事件派发在跑**，
+                 * 外层 outer.exec() 那时拿不到控制权 ⇒ 光靠它兜不住。
+                 * 所以再加一条挂在 qApp 上的定时器：它会被任何事件循环（含 exec 的）fire。 */
+                QTimer globalGuard;
+                globalGuard.setTimerType(Qt::PreciseTimer);
+                QObject::connect(&globalGuard, &QTimer::timeout, qApp, [&]() {
+                    ++spyTicks;                       // 兼作"守卫真的 fire 过"的计数
+                    if (Poller::count() > 0) { ++closedDlg; Poller::closeOne(); return; }
+                    const QString w = Poller::closeAnyModal();
+                    if (!w.isEmpty()) { wrongDlg = w; outer.quit(); }
+                });
+                globalGuard.start(1500);         // 1.5s 还没见到弹窗就替它收摊
+                /* ⚠ trigger() 必须**排到队列里**、由 outer.exec() 驱动，不能在连接处直接调：
+                 *    直接调会内联进 onNewTask→exec()，那时 outer.exec() 还没起来 ⇒
+                 *    spy/守卫的 quit 都作用不到它（M2 实测 rc=124 就是这么来的）。 */
+                QObject firedProbe;
+                int actFired = 0;
+                QObject::connect(routeAct, &QAction::triggered, &firedProbe,
+                                 [&]() { ++actFired; });
+                QMetaObject::invokeMethod(routeAct, [routeAct]() { routeAct->trigger(); },
+                                          Qt::QueuedConnection);
+                outer.exec();              // trigger 与 handler 的 exec 都在这个循环里跑
+                spy.stop();
+                globalGuard.stop();
+                for (int i = 0; i < 40 && Poller::count() > 0; i++) QCoreApplication::processEvents();
+                afterDlg = Poller::count();
+                peakDlg = peak;
+                /* 三段各自的证人，**互不重叠**：
+                 *   ① key→command   ：动作存在且 enabled（actText 非空即已成立）
+                 *   ② command→handler：动作真的 fire 了（actFired≥1）**且弹出来的是对的那个窗**
+                 *                      （wrongDlg 非空 = 路由到了会开别的对话框的 handler）
+                 *   ③ handler→dialog：NewTaskDialog 确实出现并被我们关掉、没留野窗口
+                 * ⚠ 光看 peakDlg 会把 ② 与 ③ 混成同一条（M2/M3 都只表现为 peak=0）。
+                 *    加 actFired + wrongDlg 之后：M2 → ②红(冒名顶替)、③红；M3 → ②绿(fire 了)、③红(什么都没开)。 */
+                const bool routedRight = (actFired >= 1) && wrongDlg.isEmpty();
+                seg2 = routedRight;
+                seg3 = (peakDlg >= 1 && closedDlg >= 1 && afterDlg == beforeDlg);
+                printf("    [K3 分段] a)key->command=%d b)command->handler=%d(actFired=%d wrongDlg=%s)"
+                       " c)handler->dialog=%d\n",
+                       seg1 ? 1 : 0, seg2 ? 1 : 0, actFired,
+                       wrongDlg.isEmpty() ? "-" : wrongDlg.toUtf8().constData(),
+                       seg3 ? 1 : 0);
+                /* ⚠ 挂死必须能被区分出来：上一版 M2 是 rc=124（挂死）而不是 FAIL ——
+                 *    路由改接后开的是 BatchImportDialog，只认 NewTaskDialog 的守卫永远不关它。
+                 *    现在 wrongDlg 记下"挡在那条路上的到底是哪个窗"。 */
+                printf("    [K3 reading] spyTicks=%d peak=%d closed=%d before=%d after=%d wrongDlg=%s\n",
+                       spyTicks, peak, closedDlg, beforeDlg, afterDlg,
+                       wrongDlg.isEmpty() ? "-" : wrongDlg.toUtf8().constData());
+            }
+        }
+        printf("%s [K3] Ctrl+N 三段链 key->command=%d (act=%s) | command->handler=%d (peakDlg=%d)"
+               " | handler->dialog=%d (closed=%d before=%d after=%d)\n",
+               (seg1 && seg2 && seg3) ? "[PASS]" : "[FAIL]",
+               seg1 ? 1 : 0, actText.toUtf8().constData(),
+               seg2 ? 1 : 0, peakDlg,
+               seg3 ? 1 : 0, closedDlg, beforeDlg, afterDlg,
+               wrongDlg.isEmpty() ? "-" : wrongDlg.toUtf8().constData());
+
         /* 收尾：本探针不建任务、对话框也没提交过，数据目录里只可能有 MainWindow 析构前
          * saveState/loadState 留下的东西。实测不清时每轮攒一个 `%TEMP%\idm-keynav-probe-<ms>`
          * （连跑后盘上堆到 37 个）⇒ 摘掉命名连接后逐条目删；删不动就印出来，别静默吞残留。
