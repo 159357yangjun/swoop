@@ -12,3 +12,7 @@ keynav-final-1002-070817.txt。
 `env $E` 在 E 为空时仍执行成 `env IDM_FWD_DIAG= ...`，变量被置成空值，而判据用的是
 qEnvironmentVariableIsSet（空串也算"已设置"）⇒ 两面其实是同一面。留这一句是为了记住形状：
 **对照面必须用"变量不存在"来构造，不能用"变量等于空"**。正确版在 forward-differential-1002-232927.txt。
+
+（第 35 条）activate-criterion-differential-1002-235631.txt 已删：那份对照**没印口径生效证人行**，
+两面读数又几乎重叠 ⇒ 无法区分"两写法等价"与"开关根本没生效"。可解释性不足即作废，
+重做版在 docs/activate-criterion-differential-1002-235922-main.txt（每行末尾印「口径=…」）。

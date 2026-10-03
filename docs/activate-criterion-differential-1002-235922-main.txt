@@ -1,0 +1,43 @@
+# repo=D:/visual studio/lianxi/MFC/idm-next @ 72caa3f
+# exe_sha12(sha256前12)=0980d043f275 ← 两面同一枚二进制，只切 IDM_ROUND_CRITERION
+# BUILD_RC=0 gate_rc=0 本轮是否重编=是；判据表达式与阈值 500ms 两边都没动
+# 开关生效证人：每行末尾印「口径=…」，两面值不同（上一版没印 ⇒ 那份对照不可解释，已作废）
+[count run1] rc=0 FAIL=0 单轮最长=217ms 口径=count
+[count run2] rc=0 FAIL=0 单轮最长=220ms 口径=count
+[count run3] rc=0 FAIL=0 单轮最长=221ms 口径=count
+[count run4] rc=0 FAIL=0 单轮最长=222ms 口径=count
+[count run5] rc=0 FAIL=0 单轮最长=217ms 口径=count
+[count run6] rc=0 FAIL=0 单轮最长=213ms 口径=count
+
+[deadline run1] rc=1 FAIL=1 单轮最长=1779ms 口径=deadline
+[deadline run2] rc=0 FAIL=0 单轮最长=306ms 口径=deadline
+[deadline run3] rc=0 FAIL=0 单轮最长=218ms 口径=deadline
+[deadline run4] rc=0 FAIL=0 单轮最长=207ms 口径=deadline
+[deadline run5] rc=0 FAIL=0 单轮最长=216ms 口径=deadline
+[deadline run6] rc=0 FAIL=0 单轮最长=217ms 口径=deadline
+# ── 追加 8+8 轮（同枚 exe_sha12=0980d043f275，与上面同一二进制）──
+[count run1] rc=0 FAIL=0 单轮=216ms
+[count run2] rc=0 FAIL=0 单轮=213ms
+[count run3] rc=0 FAIL=0 单轮=217ms
+[count run4] rc=0 FAIL=0 单轮=208ms
+[count run5] rc=0 FAIL=0 单轮=217ms
+[count run6] rc=0 FAIL=0 单轮=225ms
+[count run7] rc=0 FAIL=0 单轮=217ms
+[count run8] rc=0 FAIL=0 单轮=209ms
+
+[deadline run1] rc=0 FAIL=0 单轮=223ms
+[deadline run2] rc=0 FAIL=0 单轮=213ms
+[deadline run3] rc=0 FAIL=0 单轮=223ms
+[deadline run4] rc=0 FAIL=0 单轮=223ms
+[deadline run5] rc=0 FAIL=0 单轮=218ms
+[deadline run6] rc=0 FAIL=0 单轮=213ms
+[deadline run7] rc=0 FAIL=0 单轮=213ms
+[deadline run8] rc=0 FAIL=0 单轮=216ms
+
+# ── 汇总（同一枚 exe_sha12=0980d043f275，只切 IDM_ROUND_CRITERION；判据表达式与阈值 500ms 未动）──
+# count   面 n=14：min/max = 208/225ms，超阈 0 次
+# deadline面 n=14：min/max = 207/1779ms，超阈 1 次（run1 rc=1 FAIL=1）
+# ⇒ 本轮抓到的那次红落在【新口径】面上，不是在旧口径面上。
+# 那一次的一手读数：[act] D 段归因：排空静默=成 peakN=1 取尽自身峰值=215ms 单轮最长=1779ms IPC占比=12%
+#   同轮 [report] 真请求往返=220ms、同窗口最长轮次=221ms ⇒ 1779ms 不是那条真请求造成的
+# ⇒ 定性到「一轮 processEvents 花了 1779ms，其中 IPC 只占 12%」；剩下 88% 是谁——**未归因**。

@@ -1926,6 +1926,10 @@ int main(int argc, char** argv) {
         bool firstAbandonedAck = false;
         bool okIdleAck = false;
         int truncatedTurns = 0;   // D 段里"撞到每轮 20ms 预算"的次数（量具读数，不进判据分子）
+        /* 取对照数据用的口径开关：只改变**采样调用形状**，判据表达式与阈值 500 都不动。 */
+        const bool roundCriterionCount =
+            qEnvironmentVariableIsSet("IDM_ROUND_CRITERION")
+            && qgetenv("IDM_ROUND_CRITERION").toLower() == "count";
         /* 两个读数分开命名，各说各的量（以前是一个数顶着另一句话）：
          *   worstEventLoopTurnMs —— D 段窗口里最长的一次 processEvents 轮次，= GUI 线程被独占多久；
          *     进判据（500ms 挂在它身上，与它实际测的东西一致）。
@@ -2121,7 +2125,15 @@ int main(int argc, char** argv) {
             while (idleWindow.elapsed() - sampleStart < 2000 && !idleClosed.load()) {
                 QElapsedTimer one;
                 one.start();
-                QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
+                /* 口径开关（只为取对照数据，**不改判据、不改阈值**）：
+                 *   IDM_ROUND_CRITERION=deadline（默认/缺省）→ 每轮 QDeadlineTimer(20)（新口径）
+                 *   IDM_ROUND_CRITERION=count               → processEvents(flags, 20)（旧口径原样）
+                 * ⚠ Qt6 里第二参数是 `int maxtime`（墙钟上限），我当初误当成"事件条数"——
+                 *    两种写法在源码上是两个形状，所以必须各自跑同一枚二进制才能比。 */
+                if (roundCriterionCount)
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                else
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
                 const qint64 took = one.elapsed();
                 if (took >= 20) ++truncatedTurns;
                 worstLoopMs = qMax(worstLoopMs, took);
@@ -2196,8 +2208,11 @@ int main(int argc, char** argv) {
                     QElapsedTimer one;
                     one.start();
                     /* 与 D 段同一个理由：第二参数是墙钟上限，不是事件条数。给每轮硬预算，
-                     * 免得队列里不属于本探针的事件把"别人的阻塞"记成我的轮次。 */
-                    QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
+                     * 免得队列里不属于本探针的事件把"别人的阻塞"记成我的轮次。口径开关同 D 段。 */
+                    if (roundCriterionCount)
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                    else
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
                     turnBehindMs = qMax(turnBehindMs, one.elapsed());
                     const IpcServer::DrainStat ds = IpcServer::drainStat();
                     nBehind = qMax(nBehind, ds.connections);
@@ -2314,9 +2329,14 @@ int main(int argc, char** argv) {
         printf("%s 连续投递 %d 次全部拿到回话（%d/%d；回话被丢掉就在这里红）\n",
                ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
         ok7 = (okIdleAck && worstEventLoopTurnMs >= 0 && worstEventLoopTurnMs < 500);
+        /* ⚠ 口径旗子必须印出来：第一版对照我切了 IDM_ROUND_CRITERION=count，两面读数几乎重叠
+         *   （219~228 vs 203~227），当时无法区分"两种写法等价"还是"开关根本没生效"。
+         *   没有这一行，那份对照就是不可解释的数据。 */
         printf("%s 空转连接占着 GUI 线程时，最长一次事件循环轮次仍 <500ms"
-               "（量的是 GUI 线程被独占多久，不是请求延迟；实测 %lldms 撞每轮预算次数=%d）\n",
-               ok7 ? "[PASS]" : "[FAIL]", (long long)worstEventLoopTurnMs, truncatedTurns);
+               "（量的是 GUI 线程被独占多久，不是请求延迟；实测 %lldms 撞每轮预算次数=%d "
+               "口径=%s）\n",
+               ok7 ? "[PASS]" : "[FAIL]", (long long)worstEventLoopTurnMs, truncatedTurns,
+               roundCriterionCount ? "count(旧:第二参当墙钟上限)" : "deadline(新:QDeadlineTimer(20))");
         /* 第二个具名读数：本轮首次测量、无基线 ⇒ 只进报告行，不进退码、不配阈值。
          * 攒到能看出抖动振幅的轮数之后，再谈它是否进判据（阈值要从读数里取，不许拍）。 */
         printf("[report] 压在空转连接后面的那条真请求：往返=%lldms ack=%d"
