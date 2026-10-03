@@ -1,0 +1,6 @@
+rc=4
+[repo] D:\visual studio\lianxi\MFC\idm-next @ 479069f ｜[gate] ninja rc=0 构建开始=1790997806 日志=C:\Users\yyyy\AppData\Local\Temp\idm-build-gate\2026-10-02
+[BUILD_GATE] RED exe=ui_snapshot.exe sha12=e17205880457 mtime=1790997831 最新输入=tools/ui_snapshot.cpp(1791001406, 00:23:26) 差=-3575s 本轮是否重编=是 ⇒ 产物比它的输入旧 ⇒ 不含那次改动，整轮作废
+[BUILD_GATE] RED exe=engine_selftest.exe sha12=73797cae3ab8 mtime=1790997808 最新输入=tools/engine_selftest.c(1791001406, 00:23:26) 差=-3598s 本轮是否重编=是 ⇒ 产物比它的输入旧 ⇒ 不含那次改动，整轮作废
+[BUILD_GATE] RED exe=idm-next.exe sha12=e46af9db9642 mtime=1790997823 最新输入=src/gui/main_window.h(1791001406, 00:23:26) 差=-3583s 本轮是否重编=是 ⇒ 产物比它的输入旧 ⇒ 不含那次改动，整轮作废
+[BUILD_GATE] RED J2 3/3 个产物不合格 ⇒ 不进断言阶段

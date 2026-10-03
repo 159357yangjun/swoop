@@ -1,0 +1,15 @@
+# repo=D:/visual studio/lianxi/MFC/idm-next @ 479069f exe_sha12=0af3cadceca0
+# 扰动定义：IDM_FWD_DIAG=1 ⇒ worker 之后多开一条连接并重放同一条用例（等长扰动，不改被测分支）
+# ⚠ 第一版用 env \ 且 E 为空串，结果  仍然把变量置成空值 ⇒ qEnvironmentVariableIsSet 为真、off 面根本没关。现改成两条独立命令。
+
+[fault=off run1] rc=0 FAIL=0 PASS=5 diag行数=0
+[fault=off run2] rc=0 FAIL=0 PASS=5 diag行数=0
+[fault=off run3] rc=0 FAIL=0 PASS=5 diag行数=0
+[fault=off run4] rc=0 FAIL=0 PASS=5 diag行数=0
+[fault=off run5] rc=0 FAIL=0 PASS=5 diag行数=0
+
+[fault=on  run1] rc=0 FAIL=0 PASS=5 diag行数=5
+[fault=on  run2] rc=0 FAIL=0 PASS=5 diag行数=5
+[fault=on  run3] rc=0 FAIL=0 PASS=5 diag行数=5
+[fault=on  run4] rc=0 FAIL=0 PASS=5 diag行数=5
+[fault=on  run5] rc=0 FAIL=0 PASS=5 diag行数=5

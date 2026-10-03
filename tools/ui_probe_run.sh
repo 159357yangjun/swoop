@@ -25,6 +25,19 @@ export QT_QPA_FONTDIR="C:/Windows/Fonts"
 export QT_LOGGING_TO_CONSOLE=1
 BIN=build/ui_snapshot.exe
 [ -x "$BIN" ] || { echo "MISSING $BIN — 先 ninja -C build ui_snapshot（要 -DIDM_BUILD_UI_SNAPSHOT=ON）"; exit 6; }
+
+# ── 新鲜度门（会拦退码，不是日志）──
+# 踩过的坑：编译 FAILED 的那一轮里我照样看到六个 rc=0 —— 它们吃的是**旧二进制**。
+# 红会被看到，假绿直接进结论，所以断言之前必须先证明"产物含本轮改动"。
+# J1 BUILD_RC!=0 ⇒ 退 3；J2 exe 比它的输入旧 ⇒ 退 4。两面各有反面夹具：python tools/build_gate.py --selftest
+echo "--- 新鲜度门 ---"
+PYTHONIOENCODING=utf-8 python tools/build_gate.py --targets ui_snapshot
+GATE_RC=$?
+if [ "$GATE_RC" -ne 0 ]; then
+  echo "BUILD_GATE rc=$GATE_RC ⇒ 整轮作废，不跑任何探针"
+  exit $((8 + GATE_RC))     # 11=编译失败 12=产物过期
+fi
+
 MODES=$(strings -n 6 "$BIN" 2>/dev/null | grep -aoE 'IDM_[A-Z_]+_PROBE' | sort -u)
 [ -n "$MODES" ] || { echo "NOMODES 从二进制里一个模式名都没扫到 ⇒ 整轮作废"; exit 7; }
 echo "exe_sha12=$(sha256sum < "$BIN" | cut -c1-12) modes=$(echo "$MODES" | wc -l)"

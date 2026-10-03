@@ -7,3 +7,8 @@
     当场差点被我读成"跑过了"；实际只有 rc 可用。留档是为了记住这个形状。
 承重三份在仓根 docs/：keynav-red-1002-064100.txt（先红）、keynav-green-1002-070504.txt、
 keynav-final-1002-070817.txt。
+
+（本轮追加）forward-differential-1002-232916.txt 已删：那份的 fault=off 面根本没关——
+`env $E` 在 E 为空时仍执行成 `env IDM_FWD_DIAG= ...`，变量被置成空值，而判据用的是
+qEnvironmentVariableIsSet（空串也算"已设置"）⇒ 两面其实是同一面。留这一句是为了记住形状：
+**对照面必须用"变量不存在"来构造，不能用"变量等于空"**。正确版在 forward-differential-1002-232927.txt。
