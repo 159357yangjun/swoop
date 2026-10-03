@@ -70,6 +70,7 @@
 #include <QToolBar>
 #include <QFont>
 #include <QElapsedTimer>
+#include <QDeadlineTimer>
 #include <atomic>
 #include <QSpinBox>
 #include <QCheckBox>
@@ -1725,6 +1726,12 @@ int main(int argc, char** argv) {
         };
 
         int bad = 0;
+        /* ⚠ 偶发红的归因诊断（只在 IDM_FWD_DIAG=1 时开）：那次红看到 `waitForBytesWritten(2000)`
+         *   返回 false、`errorString()` 是 "Unknown error"，但**没有状态码**——分不清是
+         *   WriteError / TimedOut / Disconnect，也看不出管道此刻还在不在。
+         *   本轮 5/5 + 5/5 复现不出来 ⇒ 判不了根因，先把"能一次定性的读数"装上。
+         *   写句柄 1 而不是 cerr：cerr 正被下面的 Capture 重定向，会污染断言读数。 */
+        const bool fwdDiag = qEnvironmentVariableIsSet("IDM_FWD_DIAG");
         const QStringList addArgs { QStringLiteral("add"), QStringLiteral("http://example.com/a.bin") };
         const QStringList helpArgs { QStringLiteral("help") };
         const QStringList actArgs { QStringLiteral("activate") };
@@ -1752,6 +1759,16 @@ int main(int argc, char** argv) {
         std::atomic<int> mode { 0 };
         std::atomic<int> conns { 0 };
         QList<QLocalSocket*> held;
+        /* ⚠⚠ 假服务必须**每条用例回到干净状态**：handler 按 `seen`（累计连接数）决定回不回话，
+         *   mode 3 故意"第一条装不响"。我加诊断重放时多占了一次连接，而 `held` 里那条 socket
+         *   永不清空 ⇒ 后面每条用例都被它劫持，case1~4 稳定全红。这个形状与被测代码无关，
+         *   是我自己造的第二把半坏的门（见 §7 第 33 条）。 */
+        auto resetPeer = [&] {
+            for (QLocalSocket* c : held) c->deleteLater();
+            held.clear();
+            conns.store(0);
+            QCoreApplication::processEvents();     // 让 deleteLater 真的落地
+        };
         QObject::connect(&srv, &QLocalServer::newConnection, [&srv, &mode, &conns, &held] {
             while (srv.hasPendingConnections()) {
                 QLocalSocket* c = srv.nextPendingConnection();
@@ -1787,11 +1804,17 @@ int main(int argc, char** argv) {
         for (const Case& c : cases) {
             const QString target = c.pipe.isEmpty() ? base : c.pipe;
             mode.store(c.mode);
-            conns.store(0);
+            resetPeer();
 
             ForwardResult result = ForwardResult::NotConnected;
-            const QString errPath = QDir::tempPath() + QStringLiteral("/idm_fwd_probe_%1.log")
-                                        .arg(QCoreApplication::applicationPid());
+            /* ⚠ 路径必须**每条用例唯一**：Capture 用 freopen 把**整个进程**的 fd 2 重定向，
+             *   而 forwardToGui 跑在 worker 线程上。上一轮那次偶发红（结果=2 期望=1、
+             *   stderr 里同时出现 Log::warn 与 QTextStream 两份"没写进去"）说明有第二个
+             *   写者共用过这条管道；同名文件被 dup2 复原时截断 ⇒ 读数互相吞。
+             *   现在每条用例一个文件，谁写的、写了什么按用例隔离，不再靠时间运气。 */
+            const QString errPath = QDir::tempPath() + QStringLiteral("/idm_fwd_probe_%1_%2.log")
+                                        .arg(QCoreApplication::applicationPid())
+                                        .arg(&c - cases);
             Capture cap(errPath);
             std::atomic<bool> done { false };
             QThread* worker = QThread::create([&] {
@@ -1806,6 +1829,44 @@ int main(int argc, char** argv) {
             worker->wait(20000);
             delete worker;
             const QString err = cap.finish();
+            /* 超时未完成的显式读数：上面那个循环最多 2400×5ms≈12s，worker 若还卡着，
+             * `result` 就停在初值 NotConnected(2) —— 那正是这次红看到的形状。没有这一行，
+             * 下次再红就只能猜是"写失败"还是"根本没跑完"。 */
+            const bool finishedInTime = done.load();
+
+            /* 诊断态（IDM_FWD_DIAG=1）：用**探针自己的客户端**重放同一条用例，把状态码打到手。
+             * ⚠⚠ 第一版把这个重放放在 worker **之前**，于是它自己就是元凶：假服务按 `seen`
+             *   （累计连接数）决定回不回话，我的重放多占一次连接 ⇒ mode 3 那条"装不响"的分支
+             *   被跳过、真 worker 变成第 2 次连接被 held 住不回话 ⇒ case 2/3/4 三连红（3/3 稳定）。
+             *   现在：① 挪到 worker **之后**；② 先 reset conns，让计数只反映被测那一次；
+             *   ③ 重放完把这条额外连接从服务端记账里摘掉（held 由本探针持有，不影响断言）。
+             *   读数写句柄 1（stdout），不碰被 Capture 接管的 stderr。 */
+            if (fwdDiag) {
+                const int seenByWorker = conns.load();
+                QLocalSocket probe;
+                probe.connectToServer(target);
+                const bool conn = probe.waitForConnected(500);
+                qint64 wrote = -1;
+                bool flushed = false, okBytes = false;
+                int st = -1, errCode = -1;
+                QString errStr;
+                if (conn) {
+                    wrote = probe.write(QByteArrayLiteral("{\"command\":\"help\"}"));
+                    flushed = probe.flush();
+                    okBytes = probe.waitForBytesWritten(2000);
+                    st = static_cast<int>(probe.state());
+                    errCode = static_cast<int>(probe.error());
+                    errStr = probe.errorString();
+                }
+                fprintf(stdout, "[diag] case=%d worker看到=%d 重放: 连接=%d 写入字节=%lld flush=%d "
+                        "写完确认=%d state=%d error=%d errStr=「%s」\n",
+                        int(&c - cases), seenByWorker, conn ? 1 : 0,
+                        (long long)wrote, flushed ? 1 : 0, okBytes ? 1 : 0, st, errCode,
+                        errStr.toUtf8().constData());
+                fflush(stdout);
+                probe.disconnectFromServer();
+                resetPeer();        // ⚠ 重放占的那条连接必须收摊，否则下一条用例被 held 劫持
+            }
 
             bool ok = (result == c.wantResult);
             if (c.want == QLatin1String("<empty>"))
@@ -1821,9 +1882,9 @@ int main(int argc, char** argv) {
 
             printf("%s %s\n", ok ? "[PASS]" : "[FAIL]", c.name.toUtf8().constData());
             if (!ok) {
-                printf("       结果=%d 期望=%d 服务端看到连接=%d（期望 %d）stderr=%d 字节: %s\n",
+                printf("       结果=%d 期望=%d 服务端看到连接=%d（期望 %d）worker按时跑完=%d stderr=%d 字节: %s\n",
                        static_cast<int>(result), static_cast<int>(c.wantResult), seen,
-                       c.wantConns,
+                       c.wantConns, finishedInTime ? 1 : 0,
                        int(err.size()),
                        err.toUtf8().constData());
             }
@@ -1864,6 +1925,7 @@ int main(int argc, char** argv) {
         bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false, ok6 = false, ok7 = false;
         bool firstAbandonedAck = false;
         bool okIdleAck = false;
+        int truncatedTurns = 0;   // D 段里"撞到每轮 20ms 预算"的次数（量具读数，不进判据分子）
         /* 两个读数分开命名，各说各的量（以前是一个数顶着另一句话）：
          *   worstEventLoopTurnMs —— D 段窗口里最长的一次 processEvents 轮次，= GUI 线程被独占多久；
          *     进判据（500ms 挂在它身上，与它实际测的东西一致）。
@@ -2048,11 +2110,21 @@ int main(int argc, char** argv) {
             int peakN = 0;               // 窗口内「一次取尽」的最大连接数
             qint64 peakDrainMs = 0;      // 窗口内「一次取尽」的最大自身耗时
             const qint64 sampleStart = idleWindow.elapsed();
+            /* ⚠ 偶发红的归因（2026-10-02 实测：单轮最长 2510ms，而 IPC 自身只占 8%）：
+             *   `processEvents(AllEvents, 20)` 的第二参数在 Qt6 是**墙钟上限**，不是事件条数。
+             *   这一轮被 Windows 消息队列里**不属于本探针**的事件占着时（同机别的会话在前台、
+             *   系统级广播），它会一直等到 20ms 用尽或队列有动静 ⇒ 计时把"别人的阻塞"
+             *   记成我的 GUI 线程占用。判据要的是"我们的活儿让 GUI 线程转不动多久"，
+             *   所以改成 QDeadlineTimer 给每轮一个硬预算；撞预算的次数单独印，
+             *   **不进判据分子**（它不是产品缺陷，也不许被读成通过）。 */
+            // truncatedTurns 在外层声明（判据行要读它）
             while (idleWindow.elapsed() - sampleStart < 2000 && !idleClosed.load()) {
                 QElapsedTimer one;
                 one.start();
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-                worstLoopMs = qMax(worstLoopMs, one.elapsed());
+                QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
+                const qint64 took = one.elapsed();
+                if (took >= 20) ++truncatedTurns;
+                worstLoopMs = qMax(worstLoopMs, took);
                 const IpcServer::DrainStat ds = IpcServer::drainStat();
                 peakN = qMax(peakN, ds.connections);
                 peakDrainMs = qMax(peakDrainMs, ds.lastMs);
@@ -2123,7 +2195,9 @@ int main(int argc, char** argv) {
                 while (w2.elapsed() - s2 < 3000 && !rDone.load()) {
                     QElapsedTimer one;
                     one.start();
-                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                    /* 与 D 段同一个理由：第二参数是墙钟上限，不是事件条数。给每轮硬预算，
+                     * 免得队列里不属于本探针的事件把"别人的阻塞"记成我的轮次。 */
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
                     turnBehindMs = qMax(turnBehindMs, one.elapsed());
                     const IpcServer::DrainStat ds = IpcServer::drainStat();
                     nBehind = qMax(nBehind, ds.connections);
@@ -2241,8 +2315,8 @@ int main(int argc, char** argv) {
                ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
         ok7 = (okIdleAck && worstEventLoopTurnMs >= 0 && worstEventLoopTurnMs < 500);
         printf("%s 空转连接占着 GUI 线程时，最长一次事件循环轮次仍 <500ms"
-               "（量的是 GUI 线程被独占多久，不是请求延迟；实测 %lldms）\n",
-               ok7 ? "[PASS]" : "[FAIL]", (long long)worstEventLoopTurnMs);
+               "（量的是 GUI 线程被独占多久，不是请求延迟；实测 %lldms 撞每轮预算次数=%d）\n",
+               ok7 ? "[PASS]" : "[FAIL]", (long long)worstEventLoopTurnMs, truncatedTurns);
         /* 第二个具名读数：本轮首次测量、无基线 ⇒ 只进报告行，不进退码、不配阈值。
          * 攒到能看出抖动振幅的轮数之后，再谈它是否进判据（阈值要从读数里取，不许拍）。 */
         printf("[report] 压在空转连接后面的那条真请求：往返=%lldms ack=%d"

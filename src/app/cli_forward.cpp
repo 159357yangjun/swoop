@@ -96,8 +96,16 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
     socket.write(data);
     socket.flush();
     if (!socket.waitForBytesWritten(2000)) {
-        const QString why = QStringLiteral("已连上运行中的实例，但请求没写进去（%1）")
-                                .arg(socket.errorString());
+        /* 这条分支曾经只给出一句 `Unknown error`（QLocalSocket::error() 停在 NoError、
+         * errorString 空 ⇒ Qt 翻成 "Unknown error"），**状态码没落进任何读数**，
+         * 于是"写失败"到底是超时/断开/权限还是我测具自己造的，判不了。
+         * 现在把现场三件（state / error 枚举 / 字节数）一起写进原因里，一次红就能定性。 */
+        const QString why = QStringLiteral("已连上运行中的实例，但请求没写进去（%1；管道状态=%2，"
+                                           "错误码=%3，送出=%4 字节）")
+                                .arg(socket.errorString())
+                                .arg(static_cast<int>(socket.state()))
+                                .arg(static_cast<int>(socket.error()))
+                                .arg(data.size());
         socket.disconnectFromServer();
         reportFailure(why, printResponse);
         return ForwardResult::Failure;
