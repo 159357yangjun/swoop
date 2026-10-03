@@ -1,4 +1,4 @@
-# install_host.ps1 — 注册 IDM Next Native Messaging Host（Windows）
+﻿# install_host.ps1 — 注册 IDM Next Native Messaging Host（Windows）
 # 便携包：默认 CurrentUser；安装版由 NSIS 以管理员权限传 -Scope Machine。
 param(
     [ValidateSet("CurrentUser", "Machine")]

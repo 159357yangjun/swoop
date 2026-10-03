@@ -2897,3 +2897,53 @@ K2 那条 Tab 链断言依旧**未被变异证明**（摘掉 setTabOrder 读数�
 
 **仍未验的（不在本轮范围）**：真实 E2E 一次都没跑过（加载 unpacked → 视频站 → 发送 → host → `idm-next-ipc` → GUI 任务列表）；
 装载后 Chrome 实际分配的扩展 ID 未测；HKLM 若被安装包写过则搜索顺序谁赢未测；相对 path 真被解析成功无记录。
+
+### 2026-10-03 09:3x（第 41 条）— 第一次真实 Native Messaging E2E：**主链跑通，并当场抓出一条让整条安装链失效的缺陷**
+
+顺序按主控给的九步走，只拿普通 HTTP 直链（不混 yt-dlp/FFmpeg/HLS）。工具 `tools/nm_e2e.py`：
+headless Edge 加载 unpacked 扩展 → CDP 打开扩展自己的 popup → `sendNativeMessage`
+→ `idm-next-host.exe` → `\.\pipe\idm-next-ipc` → `ipc_server` 的 `add` → GUI 收下。
+
+**运行态读数（逐字档 `docs/nm-e2e-gui-pass-1003-092712.txt`）**
+```
+[扩展] 扩展页面里 chrome.runtime.id=fmnehlhldcoknecihnlbbcmhpaaapmbp ｜与 key 派生一致=True
+[第7跳-a] ping 回执={"resp":{"message":"pong","success":true,"version":"0.3.0"},"lastError":null}
+[第7跳-b] add_download 回执={"resp":{"message":"已添加下载: http://…/512KB.zip","success":true}}
+[证人] [INFO] "IPC 请求: add → 成功（排队 -1ms，处理 59ms，送达=1，回话时客户端=在）"
+```
+⇒ 上一轮挂在"推断"上的六件事一次性升级为观测：实际扩展 ID == `key` 现算值、浏览器接受生成物、
+LOCALAPPDATA 方案可用、Chrome+Edge HKCU 注册有效、宿主被浏览器真拉起、`QLocalSocket → GUI` 通。
+
+**E2E 第一次执行就撞出的缺陷（不是静态门能发现的）**：`install_host.ps1` 是 UTF-8 **无 BOM + 中文注释**
+⇒ PowerShell 5.1 按 ANSI(GBK) 解码，中文字节被切成假引号、字符串跨行 ⇒ 整个脚本 ParserError，
+`PS_RC=1`。**README 教用户执行的那一步根本跑不起来**。探针（PSParser::Tokenize）实测
+无 BOM=2 个语法错、加 BOM=0 ⇒ 修法是给受跟踪的 `.ps1` 加 UTF-8 BOM（方向与 D 判据相反：
+manifest 必须**没有** BOM，脚本必须**有**）。新门判据 E 先红原文：
+```
+[FAIL] E 安装器含 316 个非 ASCII 字符却无 BOM ⇒ PowerShell 5.1 按 GBK 解码会当场 ParserError（实测 TOKEN_ERRS=2）
+```
+`installer/package.ps1` 同形状，一并加 BOM。
+
+**测具自己踩的三个坑（都写进 `nm_e2e.py` 注释了）**：
+1. GUI 的 `Log` 走 `qDebug` ⇒ Windows 下按 **GBK** 落盘；用 utf-8 读会把中文解成乱码，
+   判据永远匹配不上——第一轮就栽在这里，**证人明明在文件里却报"没等到"**。
+2. `/json` 里的 `chrome-extension://…/background.rollup.js` 是 **Edge 自带服务**，不是本扩展的 SW；
+   拿它当"扩展已加载"会得出"实际 ID ≠ key 派生 ID"的假结论。正解：由 `key` 现算 ID，
+   `Target.createTarget(chrome-extension://<ID>/popup.html)` 进去问 `chrome.runtime.id`。
+3. flatten 模式下 sessionId 要**逐帧比对**，否则别的 session 的回执会被当成答案（`got=None`）。
+   另：WIN32 子系统的 GUI 必须给 `QT_ASSUME_STDERR_HAS_CONSOLE=1` 才把日志吐进管道。
+
+**证人的形状要说清**：产品那行只印 `命令 → 结果（排队/处理/送达/客户端）`，**不印 URL**
+（`ipc_server.cpp:350`）。所以"GUI 收到了这条 URL"是靠 `add → 成功` 这一行 + host 侧 success=true
+两头夹出来的，不是日志里直接出现 URL。任务列表那一格属像素面，仍未验。
+
+**第 8 步（host → CLI fallback）没走完，卡在测具不在产品**：无 GUI 时 host 正确走到
+`cliAdd()`，但 `resolveCli()` 在开发树找不到 exe（候选只有同目录 / `NMH/build/` / 三个安装路径 / PATH）
+⇒ 返回"IDM Next 未找到"。我手工复制出"安装形状"目录复测，四次都在同一处失败：
+独立目录里的 `idm-next.exe` 报 `error while loading shared libraries: libcurl-x64.dll`，
+即使 dll 就在旁边、连 Qt 与 platforms/styles/tls 一起拷也一样（而 `build/` 里同一个 exe 正常）。
+⇒ **归因未完成，不写结论**；按"CI 红先读一手诊断、无证据不许沿同一假设盲改"停在这里。
+便宜的下一步是读 `dumpbin /imports` 或直接在安装包里验，而不是继续手工拷贝试第五种组合。
+
+**恢复点**：`%TEMP%/idm-probes/e2e-*/00-restore-point.json`；注册表两键已逐值写回测试前的仓库模板路径
+（HKLM 本来不存在，未动）。生成目录 `%LOCALAPPDATA%\IDMNext\NativeMessagingHosts\` 保留（它是本轮验证过的产物）。

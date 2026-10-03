@@ -1,0 +1,18 @@
+[NM-E2E] face=gui
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HEAD=60684f6
+[身份] app_exe_sha12=8ef5f379685f host_exe_sha12=3dcb1c2cb61f
+[身份] key 现算 ID=fmnehlhldcoknecihnlbbcmhpaaapmbp
+[前置] 生成 manifest 存在=True path=C:\Users\yyyy\AppData\Local\IDMNext\NativeMessagingHosts\com.tencent.idm_next.json
+[GUI] pid=27084 监听就绪（等 1.0s，日志按 gbk 解出）
+[GUI] 命名管道可开=False（err=3）
+[浏览器] Edg/154.0.4258.48
+[CDP] /json 条目数=0 类型分布=[]
+[扩展] 由 key 现算的 ID=fmnehlhldcoknecihnlbbcmhpaaapmbp
+[扩展] 扩展页面里 chrome.runtime.id=fmnehlhldcoknecihnlbbcmhpaaapmbp ｜与 key 派生一致=True
+[第7跳-a] ping 回执={"resp":{"message":"pong","success":true,"version":"0.3.0"},"lastError":null}
+[第7跳-b] add_download 回执={"resp":{"message":"已添加下载: http://ipv4.download.thinkbroadband.com/512KB.zip","success":true},"lastError":null}
+[证人] GUI 日志里『IPC 请求:』行数=3
+[证人] [INFO] "IPC 请求:  → 失败（排队 -1ms，处理 0ms，送达=1，回话时客户端=已走）"
+[证人] [INFO] "IPC 请求: add → 成功（排队 -1ms，处理 59ms，送达=1，回话时客户端=在）"
+[证人] 其中 add→成功 行数=1
+[VERDICT] 主链跑通：浏览器→host→管道→GUI 收下（逐字证人见上）

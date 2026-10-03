@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import re
 import sys
 from pathlib import Path
@@ -211,15 +212,58 @@ def is_tracked(path):
         return False
 
 
-def main():
-    ran = [check_installer_does_not_write_tracked(),
-           check_origin_matches_key(),
-           check_path_resolves(),
-           check_strict_utf8()]
-    skipped = 4 - sum(1 for r in ran if r)
+# ── E：安装器必须真能被 Windows PowerShell 解析 ───────────────────
+# 这条是 E2E 第一次真跑（2026-10-03 09:1x）撞出来的，不是想出来的：
+# `install_host.ps1` 是 UTF-8 **无 BOM** + 中文注释 ⇒ PS 5.1 按 ANSI(GBK) 解码，
+# 中文字节被切成假引号，字符串跨行、整个脚本 ParserError（TOKEN_ERRS=2），
+# 后果是「用户照着 README 跑 install_host.ps1 = 直接失败」。
+# D 判据管的是 manifest 别带 BOM；这里方向相反：**ps1 必须带 BOM**，两者不能混为一谈。
+def check_installer_parses():
+    if not INSTALLER.exists():
+        fail("E 跳过：找不到安装器")
+        return False
+    raw = INSTALLER.read_bytes()
+    has_bom = raw.startswith(b"\xef\xbb\xbf")
+    non_ascii = sum(1 for c in raw.decode("utf-8", "replace") if ord(c) > 0x7f)
+    if non_ascii and not has_bom:
+        fail(f"E 安装器含 {non_ascii} 个非 ASCII 字符却无 BOM ⇒ PowerShell 5.1 按 GBK 解码"
+             f"会当场 ParserError（实测 TOKEN_ERRS=2），README 教的这一步根本跑不起来")
+        return True
+    # 有 BOM 或纯 ASCII：调 PSParser 复核，别只信字节头
+    ps = ("$t = Get-Content -Raw -LiteralPath '" + str(INSTALLER) + "'; $e=$null;"
+          " [void][System.Management.Automation.PSParser]::Tokenize($t,[ref]$e);"
+          " \"TOKEN_ERRS=\" + $e.Count")
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                            "-Command", ps], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        fail(f"E 跳过：无法调用 powershell 复核语法（{e}）")
+        return False
+    out = p.stdout.decode("gbk", errors="replace").strip()
+    m = re.search(r"TOKEN_ERRS=(\d+)", out)
+    if not m:
+        fail(f"E 跳过：powershell 没回话（stdout={out[:120]!r} stderr={p.stderr.decode('gbk','replace')[:120]!r}）")
+        return False
+    n = int(m.group(1))
+    if n != 0:
+        fail(f"E PowerShell 解析安装器失败：TOKEN_ERRS={n}（BOM={has_bom}）")
+    else:
+        notes.append(f"E 安装器可被 PowerShell 解析（TOKEN_ERRS=0 BOM={int(has_bom)} "
+                     f"非ASCII={non_ascii}）")
+    return True
 
-    print(f"[HOST-MANIFEST-GATE] 仓根={ROOT} 断言块=4 实际执行={sum(1 for r in ran if r)}"
-          f" 跳过={skipped}")
+
+def main():
+    checks = [check_installer_does_not_write_tracked,
+              check_origin_matches_key,
+              check_path_resolves,
+              check_strict_utf8,
+              check_installer_parses]
+    ran = [c() for c in checks]
+    skipped = len(checks) - sum(1 for r in ran if r)
+
+    print(f"[HOST-MANIFEST-GATE] 仓根={ROOT} 断言块={len(checks)} "
+          f"实际执行={sum(1 for r in ran if r)} 跳过={skipped}")
     for n in notes:
         print("    [OK]   " + n)
     for m in failures:

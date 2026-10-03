@@ -41,10 +41,10 @@ def fail_blocks(out):
     blocks = set()
     for line in out.splitlines():
         if "[FAIL]" in line:
-            for b in "ABCD":
+            for b in "ABCDE":
                 if f"] {b} " in line or f"{b} 安装" in line or f"{b} allowed" in line \
                    or f"{b} path" in line or f"{b} manifest" in line or f"{b} 跳过" in line \
-                   or f"{b} 扩展" in line or f"{b} host" in line:
+                   or f"{b} 扩展" in line or f"{b} host" in line or f"{b} 安装器" in line:
                     blocks.add(b)
     return blocks
 
@@ -104,7 +104,15 @@ def case(name, expect_block, mutate, ctx):
 
 def main():
     ctx = Restore()
-    inst = INSTALLER.read_text(encoding="utf-8-sig")
+    # 必须留**原始字节**：read_text("utf-8-sig") 会把 BOM 吃掉，写回时就"顺手摘掉 BOM"，
+    # 于是阴性对照自己变成一条真违规（本轮实测就是这样红的）。E 判据恰好依赖 BOM，
+    # 所以凡是"只改别处、不该动 BOM"的分支都必须从原字节出发。
+    inst_bytes = INSTALLER.read_bytes()
+    inst = inst_bytes.decode("utf-8-sig")
+    BLOB_PREFIX = b"\xef\xbb\xbf" if inst_bytes.startswith(b"\xef\xbb\xbf") else b""
+
+    def blob(text):
+        return BLOB_PREFIX + text.encode("utf-8")
     hj = HOST_JSON.read_bytes().decode("utf-8")
 
     # ── 阴性对照：写入发生在「生成目录的变量」上，模板一个字都不碰 ⇒ 必须绿 ──
@@ -115,7 +123,7 @@ def main():
         "# 下面这行落在生成物上，不是仓库模板：\n"
         "Set-Content -LiteralPath $GeneratedManifest -Value 'x'",
         1)
-    ctx.put(INSTALLER, neg)
+    ctx.put(INSTALLER, blob(neg))
     try:
         rc, out = run_gate()
         results.append(("N 阴性对照（写临时生成文件）",
@@ -126,10 +134,10 @@ def main():
 
     # ── M-A：改写受跟踪模板 ⇒ A 必须红 ──
     case("M-A 安装器改写仓库模板", "A",
-         lambda: (INSTALLER, inst.replace(
+         lambda: (INSTALLER, blob(inst.replace(
              "$ErrorActionPreference = \"Stop\"",
              "$ErrorActionPreference = \"Stop\"\n"
-             "$Json | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 $JsonPath", 1)),
+             "$Json | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 $JsonPath", 1))),
          ctx)
 
     # ── M-B：allowed_origins 里改一个字符 ⇒ B 必须红（判别式）──
@@ -141,6 +149,10 @@ def main():
     bad_path = hj.replace("\"path\":\"idm-next-host.exe\"", "\"path\":\"no-such-host.exe\"", 1)
     assert bad_path != hj, "夹具无效：path 替换没生效"
     case("M-C path 解析不到文件", "C", lambda: (HOST_JSON, bad_path), ctx)
+
+    # ── M-E：把 BOM 摘掉 ⇒ E 必须红（真实故障形态：PS5.1 按 GBK 解中文注释 ⇒ ParserError）──
+    nobom = inst.encode("utf-8")  # 故意不带前缀 ⇒ 等价于把 BOM 摘掉
+    case("M-E 安装器无 BOM 且含非 ASCII", "E", lambda: (INSTALLER, nobom), ctx)
 
     # ── M-D：加 BOM ⇒ D 必须红（这正是旧安装器会造出的形态）──
     bom = "\ufeff" + hj
