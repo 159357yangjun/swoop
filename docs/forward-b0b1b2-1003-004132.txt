@@ -1,0 +1,36 @@
+# repo=D:/visual studio/lianxi/MFC/idm-next @ f898ac1 exe_sha12=144ae566163e
+# gate_rc=0 BUILD_RC=0 本轮重编=是；判据与阈值未动；三面只切 IDM_FWD_BLOCK_STAGE，阻塞时长同为 2500ms
+# B0=write 前 / B1=write 返回后立刻（尚未 flush）/ B2=write+flush 都走完再等（对照阻塞点，非无阻塞）
+
+## B0
+[run1] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run2] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run3] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run4] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run5] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run6] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+
+## B1
+[run1] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run2] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run3] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run4] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run5] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run6] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+
+## B2
+[run1] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run2] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run3] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run4] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run5] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+[run6] rc=1 FAIL=4 命中写失败分支=4 | write_return=69 bytesToWrite=69 state=3 error=-1 | waitForBytesWritten=0 elapsed=0ms state=3 error=-1
+
+# ── 三面实验的结论：设计被独立探针否证，B0/B1/B2 不可区分 ──
+# 现象：三面全 rc=1 FAIL=4，且 waitForBytesWritten 一律 elapsed=0ms（阻塞确实发生了：按住=2500~2512ms）。
+#   ⇒ 等待根本没走到超时，而是**立刻返回 false**；三面差异为零说明我的'阻塞位置'变量没作用到机制上。
+# 独立最小探针（/tmp/probe_wbw.cpp，同一 Qt 6.11.1、同机、对端 write+flush+deleteLater）：
+#   [worker-none] ok=0 elapsed=2006ms state=3 err=-1
+#   [gui-loop ] ok=0 elapsed=2004ms state=3 err=-1
+# ⇒ **有事件循环的那一面同样失败** ⇒ 'worker 线程没有事件循环导致 bytesWritten 不落'这个解释被否证。
+#   注意这里 elapsed≈2000ms（等满），而钩子里是 0ms ⇒ 两者不是同一个形状，我的钩子读数本身也不可信。

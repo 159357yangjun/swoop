@@ -2762,3 +2762,37 @@ case1~4 **稳定全红（3/3、又 3/3）**。这不是被测代码的问题，�
 **落一条规矩**：留档必须当场带 `exe_sha12 + commit sha`，否则事后无法与任何复现对账 —— 这份旧档就是反面例子。
 两面输出各自留文件：`docs/forward-repro-n-1003-001505.txt`、`docs/forward-repro-block-1003-001645.txt`。
 复现用的注入代码（假服务 flush、产品侧阻塞钩子）**已全部逐字还原**：`git diff --stat src/ tools/ui_snapshot.cpp` 为空。
+
+### 2026-10-03 00:4x（第 37 条）— B0/B1/B2 三面实验：**否证了我上一轮写的机制**，并给出产品侧 call-site 证明
+
+主控指出我上一条结论里"复现机制"与注入位置不一致。做三面小实验（同一枚 exe_sha12=144ae566163e、repo `@f898ac1`、gate_rc=0、只切 `IDM_FWD_BLOCK_STAGE`、阻塞时长同为 2500ms）：
+
+| face | 注入点 | 结果 |
+|---|---|---|
+| B0 write 前 | 按住 2500ms | rc=1 FAIL=4，`waitForBytesWritten=0 elapsed=0ms` |
+| B1 write 返回后 | 按住 2500ms | **同上，逐字一致** |
+| B2 flush 之后 | 按住 2500ms | **同上，逐字一致** |
+
+三面差异为零 ⇒ "阻塞位置"这个变量根本没作用到机制上；而且 `elapsed=0ms`（等待没走到超时就直接 false）。
+**独立最小探针**（同 Qt 6.11.1、同机、对端 write+flush+deleteLater，两种线程形状各一次）给了反证：
+```
+[worker-none] ok=0 elapsed=2006ms state=3 err=-1
+[gui-loop ]   ok=0 elapsed=2004ms state=3 err=-1
+```
+⇒ **"有事件循环的那一面同样失败"** ⇒ 我上一轮写的「worker 没有事件循环导致 bytesWritten 不落」**被否证，撤回**。
+同时注意独立探针是 `elapsed≈2000ms`（等满），钩子里是 `0ms` ⇒ 两者不是同一个形状，**我的钩子读数本身也不可信**（它在 stderr 被 freopen 的窗口里插了 fprintf）。
+
+**产品侧 call-site 枚举（这才是把结论往上抬的那一步）**：`forwardToGui/waitForGui` 的全部调用点都在 `src/main.cpp`，且**四个全在 Application 对象构造之前**：
+| 行 | 调用 | 当时有没有 Q(Core)Application |
+|---|---|---|
+| 103 | `forwardToGui(cliArgs)` | 无（app 在 :125 才构造） |
+| 111 | `waitForGui(cliArgs,…)` | 无 |
+| 167 | `waitForGui(forwardArgs,…)` | 无（GUI 模式 app 在 :201） |
+| 188 | `forwardToGui(forwardArgs,false)` | 无 |
+全部在主线程、无线程切换。⇒ **正式产品路径本来就是"没有事件循环"的形状来调这个函数**，
+探针那个 worker 线程形状并不是测具独创。**所以不能再说"属于测具形状而非产品问题"** ——
+这句降级为：**未定性**。要判产品是否真会踩，得先看 `waitForBytesWritten` 在无 QCoreApplication 时返回 false 是 Qt 契约还是本机管道行为（这一步需要 Qt 文档/源码级证据，我没做）。
+
+**FORWARD 当前准确状态保持不变**：同分支机制已稳定复现（但复现注入的形状可疑）；原始红档同因性未证明；机制解释已撤回。
+钩子代码已全部撤销（`git diff src/` 为空），临时探针文件已删净。按主控指示，**停止再磨 FORWARD**，
+下一步转向 ACTIVATE 的 500ms 重标定与剩余 88%，以及给 K2 做 mutation。
