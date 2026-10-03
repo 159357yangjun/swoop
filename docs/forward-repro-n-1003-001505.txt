@@ -1,0 +1,8 @@
+# repo=D:/visual studio/lianxi/MFC/idm-next @ c52faf2 exe_sha12=8cdd81c64b23
+# 扰动 face=n ｜判据表达式与阈值未动｜gate_rc=0
+[face=n run1] rc=0 FAIL=0 命中写失败分支=0 无状态码读数
+[face=n run2] rc=0 FAIL=0 命中写失败分支=0 无状态码读数
+[face=n run3] rc=0 FAIL=0 命中写失败分支=0 无状态码读数
+[face=n run4] rc=0 FAIL=0 命中写失败分支=0 无状态码读数
+[face=n run5] rc=0 FAIL=0 命中写失败分支=0 无状态码读数
+[face=n run6] rc=0 FAIL=0 命中写失败分支=0 无状态码读数

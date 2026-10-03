@@ -1,0 +1,24 @@
+# repo=D:/visual studio/lianxi/MFC/idm-next @ c52faf2 exe_sha12=ce032f38d621
+# 扰动 face=block ｜判据表达式与阈值未动｜gate_rc=0
+[face=block run1] rc=1 FAIL=4 命中写失败分支=4 管道状态=3，错误码=-1
+[face=block run2] rc=1 FAIL=4 命中写失败分支=4 管道状态=3，错误码=-1
+[face=block run3] rc=1 FAIL=4 命中写失败分支=4 管道状态=3，错误码=-1
+[face=block run4] rc=1 FAIL=4 命中写失败分支=4 管道状态=3，错误码=-1
+[face=block run5] rc=1 FAIL=4 命中写失败分支=4 管道状态=3，错误码=-1
+[face=block run6] rc=1 FAIL=4 命中写失败分支=4 管道状态=3，错误码=-1
+
+# ── 候选一 face=n（假服务不再同步 flush）：6/6 未复现 ⇒ **假设被否证**：Qt 在 socket 析构时自己会 flush，摘掉显式 flush 造不出「写完不落」。
+# ── 候选二 face=block（worker 在 write 前被按住 2500ms）：6/6 稳定复现，rc=1 FAIL=4、命中写失败分支=4。
+#   一手读数（新加的状态码第一次就用上了）：
+#     「Unknown error；管道状态=3(Connected)，错误码=-1(NoError)，送出=69 字节」
+#     同轮另一条：「Remote closed；管道状态=0(Unconnected)，错误码=1，送出=50 字节」
+# ⇒ 定性：**状态=Connected + error=NoError + waitForBytesWritten(2000) 超时** 就是当时那次红的形状。
+#   机制：QLocalSocket 的字节确认靠**客户端自己的事件循环**派发；worker 线程没有循环在转 ⇒ 2s 内 bytesWritten 不落地 ⇒ 走写失败分支。
+# ⇒ 结论修正：那次红是**测具形状**（把被测函数放无事件循环的线程里跑）造成的，不是产品 IPC 缺陷。
+# ⚠ 但这只解释了「能稳定造出来的这一种」；原始那次红是在聚合 sweep 里出现的，两者是否同一原因仍未证明——见下条差分。
+
+# ── 与原始红档逐字段对账（docs/suite-flake-forward-red-1002-222144.txt）──
+# 形状一致：结果=2(NotConnected) 期望=1、服务端看到连接=1、stderr 同时含 [WARN] 与 QTextStream 两份「没写进去」⇒ **走的就是 waitForBytesWritten 超时那条分支**。
+# 两处不能等号：① 原档 stderr=113 字节 / 复现=67 字节；② 原档 errorString 只有「Unknown error」——**当时还没有状态码**，所以拿不到 state/error 去比。
+# ⇒ 定性上限：**机制已被证明可以稳定制造同一分支**（worker 线程没有事件循环在转），但「原始那次红是否同因」**仍未证明**，因为唯一能区分的读数（状态码）在事发时不存在。
+# ⚠ 这条教训要落进规矩：**留档必须当场带 exe_sha12 + commit sha**，否则事后无法与任何复现对账（这份 9-14 风格的旧档就是反面例子）。
