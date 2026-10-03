@@ -34,3 +34,11 @@
 #   [gui-loop ] ok=0 elapsed=2004ms state=3 err=-1
 # ⇒ **有事件循环的那一面同样失败** ⇒ 'worker 线程没有事件循环导致 bytesWritten 不落'这个解释被否证。
 #   注意这里 elapsed≈2000ms（等满），而钩子里是 0ms ⇒ 两者不是同一个形状，我的钩子读数本身也不可信。
+
+# ── 身份更正（重要，别拿这份档里前面的 hash 当基线）──
+# 本文开头写的 exe_sha12=144ae566163e 是**带 REPRO-HOOK 的那枚二进制**。
+# B0/B1/B2 跑完后我  撤钩子并重编 ⇒ 当前 HEAD 1ed129f 的无钩子产物实测：
+#   exe_sha12=6c2fe70732db（no-op 重编两次逐字相同 ⇒ hash 稳定）
+# ⇒ 结论：**1ed129f 这个 commit 从未被任何 ACTIVATE/FORWARD 读数实际测过**；
+#   那三次三面实验测的是含 fprintf(stderr) 注入的版本 —— 这正好解释了 elapsed=0ms 的形状异常。
+#   台账与 MEMORY.md 已同步这条更正。ACTIVATE 标定从下面的新 hash 起算。
