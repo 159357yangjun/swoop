@@ -39,6 +39,15 @@ jobs:
         run: python tools/lint_control_bytes.py --selftest && python tools/lint_control_bytes.py
         working-directory: ${{ github.workspace }}
 
+      # 配置例外说明（同上：仅新增一个测试入口，无新依赖、无版本变更）：浏览器扩展的 host manifest
+      # 是"装完能不能把网页下载交给桌面端"的第一道门，而它的三个值（path / allowed_origins / 编码）
+      # 过去靠人记。这条门用扩展 manifest.json 的 `key` 现算 ID 去对 allowed_origins，并禁止安装器
+      # 改写仓库里的模板（PowerShell 5.1 的 Set-Content -Encoding UTF8 会写 BOM ⇒ 浏览器读不了）。
+      # 牙由 tools/mutation_fixture_host_manifest.py 证明（A/B/C/D 四面 + 一条阴性对照，5/5）。
+      - name: Host-manifest gate (extension key == allowed_origins, installer must not rewrite the template)
+        run: python tools/host_manifest_gate.py
+        working-directory: ${{ github.workspace }}
+
       - name: Set up MSYS2 + Qt 6 toolchain
         uses: msys2/setup-msys2@v2
         with:

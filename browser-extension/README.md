@@ -56,14 +56,19 @@ MV3 扩展，嗅探网页中的视频/音频/文件下载链接，一键发送�
 
 #### Windows
 
-1. 确认 `com.tencent.idm_next.json` 的 `path` 指向 `idm-next-host.exe`（运行 `install_host.ps1` 会自动改为同目录的 host exe）
+1. 仓库里的 `com.tencent.idm_next.json` 是**模板**，`install_host.ps1` 不修改它：脚本把 manifest
+   **生成**到 `%LOCALAPPDATA%\IDMNext\NativeMessagingHosts\`（`-Scope Machine` 时是 ProgramData），
+   并在生成物里写 host exe 的绝对路径。
+   - Windows 允许相对 path（相对 manifest 所在目录），但生成物一旦离开扩展目录，相对值就指不到 exe ⇒ 一律解析成绝对路径。
+   - 生成用 `[IO.File]::WriteAllText` + `UTF8Encoding($false)`：**PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM**，浏览器按 JSON 读会直接失败。
+   - 这两件事由 `python tools/host_manifest_gate.py` 钉住（牙见 `tools/mutation_fixture_host_manifest.py`）。
    - 扩展 ID 已通过 manifest 的 `key` 固定为 `fmnehlhldcoknecihnlbbcmhpaaapmbp`，`allowed_origins` 已预填，**无需手动替换**
 2. **以管理员或当前用户打开 PowerShell**，进入 `native-messaging-host/` 目录，运行注册脚本：
    ```powershell
    cd "D:\visual studio\lianxi\MFC\idm-next\browser-extension\native-messaging-host"
    .\install_host.ps1
    ```
-   脚本会为 Chrome 与 Edge 写入注册表，指向本目录下的 manifest（HKCU，无需管理员）
+   脚本会为 Chrome 与 Edge **两份**注册表写入生成物的路径（HKCU，无需管理员）
 3. 到 `chrome://extensions` 找到「IDM Next 嗅探器」点击刷新图标，使注册生效
 
 > 若仍报 `Access to the specified native messaging host is forbidden`：

@@ -2862,3 +2862,38 @@ B 改成"单轮预算命中数"判据／C 先修量具（把空转窗口与采�
 **没有**证明"按下 Ctrl+N 会 fire 它" —— offscreen 合成按键进不了快捷键系统（canary 四种发法累计触发 0，
 本轮再次复现）。要证那一段只能靠真窗口人工按一次，或换 windows 平台跑探针。
 K2 那条 Tab 链断言依旧**未被变异证明**（摘掉 setTabOrder 读数逐位不变），保持"算读数不算证人"。
+
+### 2026-10-03 08:5x（第 40 条）— 浏览器扩展链路审计：**我上轮四条指控里三条是错的，改掉的只有一件**
+
+起因是问"插件能不能把网页视频交给桌面端下载"。第一轮我报了 F1–F4 + 工具总开关五条缺陷，
+主控按 Chromium/Edge 官方契约纠正后，本机逐条复算的结果是**连他的纠正前提也一起塌**：
+
+| 指控 | 一手证据 | 判定 |
+|---|---|---|
+| F1 host 漂移到旧仓 `MFC/stage_idm/…` | `ls` ⇒ **No such file**；HKCU Chrome+Edge 两键默认值都指本仓 manifest（`reg query` 实测） | 撤回：漂移在盘上不存在 |
+| F1 理由"相对 path 按 chrome.exe 解析" | Edge 官方原文：*"On Windows devices, you can use relative paths to the directory that contains the native messaging host manifest file"*；exe 与 json 同级 | **我对，且门也不该管它合法不合法——只管解析得到解析不到** |
+| F2 `allowed_origins` ID 不匹配 | `key`(RSA-2048 DER) → sha256 前 32 hex → a-p = `fmnehlhldcoknecihnlbbcmhpaaapmbp`，与 json 逐字相同；全仓 grep 那个 `dkdn…` ⇒ **0 命中** | 撤回：**那个号是我编的**，不是"CMake 注入的"（CMakeLists:208-218 只同步 exe+windeployqt） |
+| F3 只有 Chrome key ⇒ Edge 坏 | `install_host.ps1` 原本就 `foreach $browsers` 写 Chrome **和** Edge 两份 | 撤回，比"降级"更彻底 |
+| 「三工具都存在才启动」 | `main_window.cpp:332-353` 是三条**互相独立**的 `if (autoDownloadXxx() && componentMissing(...))`；`:1338-1365` 失败按后端给具名原因 | 撤回：按功能准备已是现状，没有总开关可拆 |
+
+⇒ **本轮唯一有靶子的改动**：安装器把仓库里受跟踪的模板当安装目标就地改写。两条后果——
+跑一次就弄脏开发树；而 PS 5.1 的 `Set-Content -Encoding UTF8` **会写 BOM**，浏览器按 JSON 读会当场报错。
+改成 `[IO.File]::WriteAllText(…, UTF8Encoding($false))` 生成到 `%LOCALAPPDATA%\IDMNext\NativeMessagingHosts`，模板不动。
+
+**新门 `tools/host_manifest_gate.py`（四判据 A/B/C/D）自己先红过**，原文：
+```
+[FAIL] A 安装器在改写受跟踪 manifest：install_host.ps1:34: $Json | ConvertTo-Json -Compress | Set-Content -Encoding UTF8 $JsonPath
+```
+牙由 `tools/mutation_fixture_host_manifest.py` 证明：**5/5**（A/B/C/D 各一条变异 + 一条阴性对照"写入落在生成目录变量上 ⇒ 必须绿"）。
+
+**过程中又踩了两个自家量具坑，都值得记**：
+1. **A 判据第一版扫到 0 处写入调用却报绿** —— 我要求"目标参数紧邻 cmdlet"，真实写法是
+   `… | Set-Content -Encoding UTF8 $JsonPath`（目标被 `-Encoding` 隔在后面）。修法：整行找目标。
+   教训形状：**"扫到 0 处"必须先当成量具失明的信号，不能当成通过**。
+2. **夹具用 `read_text/write_text` 往返，把 LF 写成 CRLF** —— 盘上多 1 字节、`git status` 却报干净
+   （smudge 看不见），等于夹具自己污染受跟踪文件；同一轮还因门用 `utf-8-sig` 解码**把 BOM 吞了**，
+   M-D 红了但归因表读出空集。修法：夹具全程字节级备份 + 还原后逐字节对账；门按**浏览器口径**读
+   （拒绝 BOM），并把「跳过没跑起来的判据」计入退码（`实际执行=4 跳过=0` 印在首行）。
+
+**仍未验的（不在本轮范围）**：真实 E2E 一次都没跑过（加载 unpacked → 视频站 → 发送 → host → `idm-next-ipc` → GUI 任务列表）；
+装载后 Chrome 实际分配的扩展 ID 未测；HKLM 若被安装包写过则搜索顺序谁赢未测；相对 path 真被解析成功无记录。
