@@ -1,0 +1,38 @@
+# 第 8 步依赖归因读数（2026-10-03 09:5x，仓根 D:/visual studio/lianxi/MFC/idm-next）
+
+## idm-next.exe 的直接 import（objdump -p）
+  DLL Name: Qt6Charts.dll
+  DLL Name: Qt6Core.dll
+  DLL Name: Qt6Gui.dll
+  DLL Name: Qt6Network.dll
+  DLL Name: Qt6Sql.dll
+  DLL Name: Qt6Widgets.dll
+  DLL Name: ADVAPI32.dll
+  DLL Name: libgcc_s_seh-1.dll
+  DLL Name: KERNEL32.dll
+  DLL Name: msvcrt.dll
+  DLL Name: libwinpthread-1.dll
+  DLL Name: SHELL32.dll
+  DLL Name: USER32.dll
+  DLL Name: WINMM.dll
+  DLL Name: libstdc++-6.dll
+  DLL Name: libcurl-x64.dll
+
+## libcurl-x64.dll 的 import（全部是 api-ms-win-crt-* / 系统 DLL）
+  枚数=21
+  非 api-ms/ext-ms 的：WLDAP32.dll, Normaliz.dll, bcrypt.dll, CRYPT32.dll, Secur32.dll, WS2_32.dll, IPHLPAPI.DLL, KERNEL32.dll, USER32.dll
+
+## build 有而第一次模拟目录没拷的 5 枚
+  D3Dcompiler_47.dll, opengl32sw.dll, Qt6OpenGL.dll, Qt6OpenGLWidgets.dll, Qt6Svg.dll
+## 插件子目录（第一次也没拷）
+  platforms/ styles/ iconengines/ imageformats/ tls/ generic/ networkinformation/
+
+## 判别结果（PATH 已摘掉 Git/msys/anaconda）
+  正例 build 目录            rc=0
+  模拟目录（只拷 10 枚直接依赖）rc=3221225781 STATUS_DLL_NOT_FOUND
+  模拟目录（补齐 15 枚 + 插件目录）rc=0
+
+## PATH 偷吃检查
+  PATH 上含 Qt 的目录=[]
+  libcurl-x64.dll / Qt6Svg.dll 在 PATH 上均找不到 ⇒ build 的正例没有偷偷吃开发环境
+  D3Dcompiler_47.dll 在 System32 有一份（Windows 自带），不构成开发环境污染

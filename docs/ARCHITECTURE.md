@@ -2947,3 +2947,43 @@ manifest 必须**没有** BOM，脚本必须**有**）。新门判据 E 先红�
 
 **恢复点**：`%TEMP%/idm-probes/e2e-*/00-restore-point.json`；注册表两键已逐值写回测试前的仓库模板路径
 （HKLM 本来不存在，未动）。生成目录 `%LOCALAPPDATA%\IDMNext\NativeMessagingHosts\` 保留（它是本轮验证过的产物）。
+
+### 2026-10-03 09:5x（第 42 条）— 第 8 步依赖归因：**「dll 就在旁边却加载不了」是模拟安装不完整，不是产品缺陷**；CLI fallback 端到端已通
+
+按主控定的五小步做，全程不改产品代码。读数档 `docs/deps-attribution-1003-0953.txt`。
+
+**① exe 声明依赖**：`objdump -p build/idm-next.exe` 列出 16 枚，其中非系统的是
+Qt6Charts/Core/Gui/Network/Sql/Widgets + libgcc_s_seh-1 + libwinpthread-1 + libstdc++-6 + **libcurl-x64**。
+**② 同一枚二进制两边 import 表一致**（同一个文件，逐字节相同）。
+**③ libcurl 往下**：它的 21 条 import **全是 `api-ms-win-crt-*` 与系统 DLL**（WLDAP32/bcrypt/CRYPT32/
+Secur32/WS2_32/IPHLPAPI…），没有 OpenSSL/zlib/nghttp2 之类第三方传递依赖 ⇒ 那条假设排除。
+**④ PATH 偷吃**：摘掉 Git/msys/anaconda 后跑三面对照——build 目录 rc=0；只拷 10 枚直接依赖的模拟目录
+rc=**3221225781（STATUS_DLL_NOT_FOUND）**；补齐后 rc=0。且 `libcurl-x64.dll`、`Qt6Svg.dll` 在 PATH 上
+**根本找不到** ⇒ build 的正例没有偷偷吃开发环境。
+
+**根因**：第一次模拟只按"exe 的直接 import"拷了 10 枚 dll，漏了 build 里另外 5 枚
+（`D3Dcompiler_47 / opengl32sw / Qt6OpenGL / Qt6OpenGLWidgets / Qt6Svg`）和六个插件子目录
+（platforms/styles/iconengines/imageformats/tls/generic/networkinformation）。
+⇒ **上一轮那句"连 Qt 与 platforms 一起拷也一样"不成立**：那三次我漏拷了 `Qt6Svg.dll`
+（`cp -r build/platforms …` 那次构建目录里根本没有 svg），错误信息也从具名 `libcurl-x64.dll`
+变成过 `?: cannot open shared object file`——形态不同就是没到同一根因的证据，当时我没核出来。
+
+**中途又造了一把半坏的量具（已作废其读数）**：我自己写的 C 探针 `dllprobe.exe` 对
+`C:\Windows\System32\KERNEL32.DLL` 都报 FAIL err=126 ⇒ 它连正例都判红，之前"10 枚全 BAD / build 15 枚全 BAD"
+两批读数全部不算数。**教训形状：探针必须先跑阴性对照（拿一个必定能加载的系统 DLL），红了就说明是量具瞎。**
+另一次污染：用 anaconda 的 python 做 `ctypes.WinDLL` 探测，宿主自己带 libcurl ⇒ 结果不可信。
+
+**⑤ 真实 package 形状**：`installer/package.ps1:147-200 Add-RuntimeDependencyClosure` 从 exe/host 出发
+递归取 PE import，`Test-SystemDll`（api-ms/ext-ms 或 System32/SysWOW64 存在）跳过，其余必须解析到实体否则
+`throw 未解析的运行时依赖`，并且 windeployqt 带 `--compiler-runtime`。⇒ **打包本来就把闭包带齐**，
+所以第 8 步失败只是我手工模拟不完整。
+
+**第 8 步结论（观测级）**：完整安装形状下 host → `resolveCli()` 命中同目录 → `cliAdd()` → CLI 起任务，
+回执 `{"message":"已添加下载","success":true}`，无 GUI 在场。**并用两个 URL 做了对照**：
+jsDelivr 那个真落盘 `package.json` 646 字节；thinkbroadband 那个停在 `64KB.zip.idmtmp` 0 字节
+（rc=0、无输出）⇒ **fallback 链可用已被正面证据钉住**；后者属网络侧形状，未归因、不算产品结论。
+
+**明确不提前下的判断**：`resolveCli()` 在开发树找不到 app exe **不算产品缺陷**——它服务的是已安装形状
+（host/app 同级），正式 package 形状下 fallback 已实测可用。只有 package 形状也断才值得动产品代码或打包规则。
+
+**证人边界照旧**：本轮证到"CLI 起了任务并落了盘"，没证"GUI 任务列表像素里出现那一行"；后者留给 UI/像素证人，不再用日志硬推。
