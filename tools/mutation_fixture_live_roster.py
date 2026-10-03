@@ -47,15 +47,24 @@ def snap(*paths):
 
 
 def put(path, text):
+    # ⚠ 写之前先把原件登记进 ORIG：上一版 m6 自己抛异常时 restore() 根本没跑，
+    #   task_detail_dialog.h 与 ARCHITECTURE.md 的变异留在盘上（git status 才被抓出来），
+    #   后面 M7~M11 全从残骸起跑 ⇒ 三条 SKIPPED-ANCHOR + 一条假 BAD。
+    #   登记放在 put 里而不是各 case 里，是为了让"忘了 snap"这件事结构上不可能发生。
+    if path not in ORIG:
+        ORIG[path] = read(path)
     with io.open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
     return True          # case() 用「返回值 is None」判「锚点没找到」，所以这里必须返回真值
 
 
+EXTRA_FILES = {}          # 代码类变异额外碰到的文件（同样逐字还原）
+
+
 def restore():
-    for p, text in ORIG.items():
+    for p, text in list(ORIG.items()) + list(EXTRA_FILES.items()):
         put(p, text)
-    bad = [p for p, text in ORIG.items() if read(p) != text]
+    bad = [p for p, text in list(ORIG.items()) + list(EXTRA_FILES.items()) if read(p) != text]
     return bad
 
 
@@ -74,6 +83,7 @@ def row_of(prefix):
 
 results = []
 EXTRA = {}
+NL = "\n"
 
 
 def case(name, expect_tag, expect_rc, mutate, note):
@@ -104,7 +114,9 @@ def _any_red(out):
 # ── 变异定义 ──────────────────────────────────────────────────────────────
 WINHDR = "`src/core/legacy/network_winhttp.c`"
 GLSHDR = "`src/gui/legacy/glass_effect.h`"
+GLSCPP_PATH = "src/gui/legacy/glass_effect.h"
 GLSCPP = "`src/gui/legacy/glass_effect.cpp`"
+MAINH = os.path.join(ROOT, "src", "gui", "main_window.h")
 
 
 def m1():
@@ -168,17 +180,64 @@ def m5():
     return True
 
 
+def m6a():
+    """面 A：登记一条**盘上真成立**的「仅声明型死头」（button_translator.h 无实现、声明经 src/main.cpp 进编译）
+    ⇒ 门必须绿。这一面是 M6 的前置：它若红，说明分支走不通，M6 的红就可能是别的原因蒙上的。"""
+    st = os.path.join(ROOT, "src", "gui", "task_detail_dialog.h")
+    body = read(st)
+    put(st, body.replace("#include", '#include "button_translator.h"' + NL + "#include", 1))
+    row_new = ("| `%s` | 仅声明型死头 | 被 `src/main.cpp` include ⇒ **声明进编译、实现不进**；"
+               "`ZhCnButtonTranslator::` 在去注释后的全 `src/` 调用点 = 0 |" + NL) % "src/gui/button_translator.h"
+    doc = read(DOC)
+    anchor_row = row_of(WINHDR)
+    if anchor_row is None:
+        return None
+    put(DOC, doc.replace(anchor_row + NL, anchor_row + NL + row_new, 1))
+    return True
+
+
 def m6():
-    """仅声明型死头行删掉符号名 ⇒ 调用点检查没有对象 ⇒ ROSTER-BASIS。
-    （这条判据是**先实测到绿**才补的：补之前同样的变异退 0，见 §7 台账。）"""
-    s = read(DOC)
-    row = row_of(GLSHDR)
-    if row is None or "Glass::" not in row:
+    """两面夹具：现场造一个「仅声明型死头」条目，验 ROSTER-BASIS 有牙、且还原后仍绿。
+
+    ⚠ 为什么不再用 glass_effect.h 那一行：2026-10-02 清掉最后一条 include 之后，那行的类别
+      从「仅声明型死头」变成「未编译」⇒ 直接改它只会命中别的判据（实测 M6 变 rc=0）。
+      判据本身没坏，是**夹具的锚点跟着产品漂了**。所以这里自己造两侧：
+        面 A：代码里真加一条 include + 表里登记同一条 ⇒ 门必须绿（分支走得通）；
+              然后删掉依据列的符号名 ⇒ ROSTER-BASIS 必须红。
+        面 B（同一 case 的第二读数）：面 A 若红，说明分支根本没走通，M6 不作数。
+    """
+    # ⚠ 夹具标的必须是**盘上真成立**的事实，否则面 A 拿到的红来自我自己编的依据列（第一、二版都这样错：
+    #   glass_effect.h 有未编译的 .cpp ⇒ 命中 ROSTER-LIVENESS；logger.h 的 `Log::` 真有调用点 ⇒ 命中
+    #   ROSTER-LIVENESS「有调用点」）。现成的真事实：`src/gui/button_translator.h` 无同名实现、
+    #   `ZhCnButtonTranslator::` 全 src 零命中、且已被编译 TU（src/main.cpp）include。
+    hdr_rel = "src/gui/button_translator.h"
+    if os.path.isfile(os.path.join(ROOT, "src", "gui", "button_translator.cpp")):
+        return None                      # 前提变了就别造第二把半坏的门
+    st = os.path.join(ROOT, "src", "gui", "task_detail_dialog.h")
+    body = read(st)
+    put(st, body.replace("#include", '#include "button_translator.h"' + NL + "#include", 1))
+
+    row_new = ("| `%s` | 仅声明型死头 | 被 `src/main.cpp` include ⇒ **声明进编译、实现不进**；"
+               "`ZhCnButtonTranslator::` 在去注释后的全 `src/` 调用点 = 0 |" + NL) % hdr_rel
+    doc = read(DOC)
+    anchor_row = row_of(WINHDR)
+    if anchor_row is None:
         return None
-    mut = row.replace("Glass::", "")
-    if mut == row:
-        return None
-    return put(DOC, s.replace(row, mut, 1))
+    put(DOC, doc.replace(anchor_row + NL, anchor_row + NL + row_new, 1))
+
+    rc_ok, out_ok = gate()
+    with io.open(LOG, "a", encoding="utf-8") as fh:
+        fh.write(("=== M6 面A（登记既有事实：button_translator.h 无实现、声明进编译）期望绿：rc=%d ===" + NL + "%s" + NL) % (rc_ok, out_ok))
+    # ⚠ 面 A 的红**不能塞进 EXTRA**：EXTRA 会一直挂到本 case 结束，而"面 A 红就提前返回"意味着
+    #   根本没做面 B —— 拿一个没做完的对照去判成败，等于把夹具自己的短路写进门的结果里。
+    #   所以面 A 单独成一道读数（下面 main 里的 M6a），M6 只负责"删符号名必须红"这一件事。
+    EXTRA["M6 依据列删符号名"] = True
+    if rc_ok != 0:
+        return True
+
+    d2 = read(DOC)
+    put(DOC, d2.replace(row_new, row_new.replace("ZhCnButtonTranslator::", ""), 1))
+    return True
 
 
 def m7():
@@ -222,6 +281,39 @@ def m9():
     return put(DOC, s.replace("\n| 文件 | 类别 |", "\n| 路径 | 活死 |", 1))
 
 
+
+def m10():
+    """表里把 include 点改成**真没有**的一条 ⇒ ROSTER-ZOMBIE-STALE。
+    今天真实状态是「main_window.h 确实 include 了死头」，所以这一面测的是反向那侧的牙。"""
+    s = read(DOC)
+    row = row_of(GLSHDR)
+    if row is None or "include" not in row:
+        return None
+    # ⚠ 不能"把 main_window.h 换成别的"：清掉 include 后那一行的依据列已经不含任何
+    #   src/**.h 路径（SRC_RE 也吃不下 `{h,cpp}` 这种花括号 token），replace 等于空操作。
+    #   这里反过来：**塞一条代码里并不存在的 include 点进依据列**，门必须认出它是瞎写的。
+    mut = row.replace("清掉了原先那条 include（曾写作 `main_window.h:10`）",
+                      "清掉了原先那条 include（曾写作 `main_window.h:10`），但仍被 `src/gui/settings_dialog.h` include")
+    if mut == row:
+        return None
+    return put(DOC, s.replace(row, mut, 1))
+
+
+def m11():
+    """代码侧新增一条僵尸 include（task_detail_dialog.h include 死头），表里没登记 ⇒ ROSTER-ZOMBIE。
+    ⚠ 这是**源码**变异不是文档变异：证明判据真在扫代码，而不是只比对文档自说自话。"""
+    st = os.path.join(ROOT, "src", "gui", "task_detail_dialog.h")
+    if st not in ORIG:
+        snap(st)
+    body = read(st)
+    if "legacy/glass_effect.h" in body:
+        return None                       # 已经存在 ⇒ 这条夹具的锚点没了，别做空变异
+    mutated = body.replace("#include", '#include "legacy/glass_effect.h"' + chr(10) + "#include", 1)
+    if mutated == body:
+        return None
+    return put(st, mutated)
+
+
 def main():
     snap(DOC, CML)
     rc, out = gate()
@@ -235,10 +327,17 @@ def main():
     case("M3 文件名不存在", "ROSTER-STALE", 1, m3, "名单过期 ⇒ 红")
     case("M4 类别没登记", "ROSTER-UNKNOWN-CATEGORY", 1, m4, "第三桶不能既不算过也不算败 ⇒ 红")
     case("M5 CMake 注释点名死文件", None, 0, m5, "两面：门仍绿 + naive 命令洗白该文件（对照印在日志）")
-    case("M6 依据列删符号名", "ROSTER-BASIS", 1, m6, "调用点检查失去对象 ⇒ 红（补判据前实测是绿）")
+    case("M6a 登记真事实（前置）", None, 0, m6a,
+         "面A：表+代码都成立 ⇒ 门必须绿；它若红，M6 的红就是蒙上的，不作数")
+    case("M6 依据列删符号名", "ROSTER-BASIS", 1, m6,
+         "调用点检查失去对象 ⇒ 红（第一版判据拿表里的字符串当搜索词，删掉后循环为空、照样绿）")
     case("M7 整表被 HTML 注释藏起", "ROSTER-ANCHOR", 1, m7, "藏表 ≠ 通过 ⇒ 红")
     case("M8 开关默认变 ON", "ROSTER-OPTION-STALE", 1, m8, "「开关才编译」失效 ⇒ 红")
     case("M9 表头列名被改", "ROSTER-ANCHOR", 1, m9, "取列假设失效 ⇒ 红")
+    case("M10 表里 include 点写成没有的", "ROSTER-ZOMBIE-STALE", 1, m10,
+         "登记与代码反向不符 ⇒ 红（清掉 include 后若忘了改表，就是这条拦）")
+    case("M11 代码新增僵尸 include", "ROSTER-ZOMBIE", 1, m11,
+         "源码变异：门真的在扫代码，不是只比文档")
 
     dirty = restore()
     rc_after, out_after = gate()

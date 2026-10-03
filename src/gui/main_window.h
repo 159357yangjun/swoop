@@ -7,7 +7,6 @@
 #include <QDateTime>
 
 #include "settings.h"
-#include "legacy/glass_effect.h"   // 玻璃拟态特效（已停用，留档；见 ARCHITECTURE.md）
 #include "idownloader.h"   // DownloadRequest：媒体任务延迟启动（队列调度）时缓存请求
 #include "task_controller.h"   // L2：任务控制（媒体后端实例表 + 任务 CRUD/分派）
 #include "notification_aggregator.h" // L2：下载完成/失败气泡聚合

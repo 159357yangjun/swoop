@@ -1,0 +1,10 @@
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02\_data
+[PASS] 没人监听 ⇒ NotConnected，且不往 stderr 吐任何字
+[PASS] 连上但不回话 ⇒ Failure，stderr 说得出「没有回话」
+[PASS] 对方回了失败 ⇒ stderr 用对方给的原因
+[FAIL] 对方回了成功 ⇒ Success 且 stderr 干净
+       结果=2 期望=1 服务端看到连接=1（期望 1）stderr=113 字节: [WARN] "IPC ת��ʧ��: �����������е�ʵ����������ûд��ȥ��Unknown error��"
+IDM Next: 已连上运行中的实例，但请求没写进去（Unknown error）
+
+[PASS] activate 第一次装不响 ⇒ 仍然只发一次（绝不重发）

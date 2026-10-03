@@ -226,6 +226,70 @@ def strip_c_comments(text):
     return re.sub(r"//[^\n]*", "", text, flags=re.M)
 
 
+# ── 3b. 僵尸 include：活着的编译单元 include 了「实现不编译」的头 ────────────
+"""为什么要单独判这一族（2026-10-02 实测出来的洞）：
+   `src/gui/main_window.h:10` 至今 `#include "legacy/glass_effect.h"`，而 glass_effect.cpp 一行不进编译。
+   原表把这件事写成一句**散文**（§1.2 末「唯一还开着的项」），门只建模「头是否可达」——
+   可达 ⇒ 报 info、永不红。于是"清掉了"和"没清"在退码上完全一样：**假绿**。
+   两侧都得拦：① 死头被活 TU include（今天真实存在的那一侧）；② 表里登记了 include 点却已不存在（反向）。
+   所以判据从**代码**现算 includer，登记表只作对照；两边集合必须逐字相等。"""
+
+
+def all_headers():
+    """src 下所有 .h/.hpp（相对路径）。"""
+    out = []
+    for dirpath, _d, files in os.walk(SRC):
+        rel_dir = os.path.relpath(dirpath, ROOT).replace("\\", "/")
+        if not rel_dir.startswith("src/"):
+            continue
+        for f in files:
+            if f.endswith((".h", ".hpp")):
+                out.append("%s/%s" % (rel_dir, f))
+    return set(out)
+
+
+def dead_headers():
+    """有同名实现、但那个实现不在编译集里的 src 头。"""
+    out = set()
+    for hdr in all_headers():
+        stem = hdr.rsplit(".", 1)[0]
+        impl_cpp, impl_c = stem + ".cpp", stem + ".c"
+        has_impl = (os.path.isfile(os.path.join(ROOT, impl_cpp.replace("/", os.sep)))
+                    or os.path.isfile(os.path.join(ROOT, impl_c.replace("/", os.sep))))
+        if has_impl and impl_cpp not in compiled_tus and impl_c not in compiled_tus:
+            out.add(hdr)
+    return out
+
+
+def resolve_include(from_rel, name):
+    """照编译器顺序解析一条 #include "..."：同目录 → 全 src 同名。返回相对路径或 None。"""
+    cand = os.path.normpath(os.path.join(os.path.dirname(from_rel), name)).replace("\\", "/")
+    if os.path.isfile(os.path.join(ROOT, cand.replace("/", os.sep))):
+        return cand
+    base = name.split("/")[-1]
+    for rel in sorted(HEADER_INDEX.get(base, [])):
+        if rel.startswith("src/"):
+            return rel
+    return None
+
+
+def direct_includers(header_rel):
+    """所有直接 #include 该头的文件（编译 TU **加上全部头**，去注释后按编译器顺序解析）。
+    ⚠ 必须含 .h：main_window.h 不是编译单元，但它 include 了死头——只扫 .c/.cpp 会漏掉今天这一条。"""
+    hits = []
+    for rel in sorted(compiled_tus | all_headers()):
+        full = os.path.join(ROOT, rel.replace("/", os.sep))
+        if not os.path.isfile(full):
+            continue
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            body = strip_c_comments(fh.read())
+        for n, line in enumerate(body.split("\n"), 1):
+            m = re.match(r'\s*#\s*include\s*"([^"]+)"', line)
+            if m and resolve_include(rel, m.group(1)) == header_rel:
+                hits.append((rel, n))
+    return hits
+
+
 # ── 4. 主判据 ─────────────────────────────────────────────────────────────
 t0 = time.time()
 for path, what in ((DOC, "docs/ARCHITECTURE.md"), (CML, "CMakeLists.txt"), (SRC, "src/")):
@@ -249,6 +313,7 @@ if err:
     sys.exit(1)
 
 listed_uncompiled = set()
+zombie_listed = {}          # 表里登记的「死头 ← 谁 include 它」：{死头: {includer, ...}}
 for paths, category, basis in rows:
     label = ", ".join(paths)
     if category not in CATS:
@@ -259,6 +324,25 @@ for paths, category, basis in rows:
 
     if category == UNCOMPILED_CAT:
         for p in paths:
+            if not os.path.isfile(os.path.join(ROOT, p.replace("/", os.sep))):
+                fail("ROSTER-STALE", "表里的 %s 在盘上不存在（改名/删除后名单没跟上）" % p)
+                continue
+            if p.endswith((".h", ".hpp")):
+                # 头文件不进 TU 恒等式：它是否"进编译"只看有没有编译 TU 走到它（直接或传递）。
+                reach, includer = header_reachable(p)
+                if reach:
+                    fail("ROSTER-LIVENESS", "%s：标了未编译，但仍被 %s 那条链 include ⇒ 声明还在进编译"
+                         % (p, includer))
+                else:
+                    info.append("    %s：无任何编译 TU 走到 ⇒ 整份不进编译（含声明）" % p)
+                # 「未编译」这一类也要贡献僵尸 include 的对照集（判据不靠类别标签，见 §3b 注释）
+                if re.search(r"\binclude\b", basis, re.I):
+                    stem = p.rsplit(".", 1)[0]
+                    for m in SRC_RE.finditer(basis):
+                        cand = m.group(0)
+                        if cand.endswith((".h", ".hpp")) and cand.rsplit(".", 1)[0] != stem:
+                            zombie_listed.setdefault(p, set()).add(cand)
+                continue
             if p not in all_tus:
                 fail("ROSTER-STALE", "表里的 %s 在盘上不存在（改名/删除后名单没跟上）" % p)
             elif p in compiled_tus:
@@ -293,7 +377,14 @@ for paths, category, basis in rows:
                 continue
             sib = re.sub(r"\.h$", ".cpp", p)
             sib2 = re.sub(r"\.h$", ".c", p)
-            if sib not in uncompiled_tus and sib2 not in uncompiled_tus:
+            # ⚠ 「仅声明型死头」有两种，判据不能只认一种：
+            #   ①有同名实现且实现不编译（glass_effect.h/.cpp 曾经那种）；
+            #   ②**根本没有同名实现**（button_translator.h 这种 header-only）。
+            #   第一版无条件要求实现落在未编译集 ⇒ ②被判成「仅声明不成立」而红——
+            #   红的是判据写窄了，不是名单写错。header-only 时这一条不该发言。
+            sib_exists = (os.path.isfile(os.path.join(ROOT, sib.replace("/", os.sep)))
+                          or os.path.isfile(os.path.join(ROOT, sib2.replace("/", os.sep))))
+            if sib_exists and sib not in uncompiled_tus and sib2 not in uncompiled_tus:
                 fail("ROSTER-LIVENESS", "%s：同名实现（%s/%s）不在未编译集 ⇒「仅声明」不成立" % (p, sib, sib2))
             reach, includer = header_reachable(p)
             if not reach:
@@ -301,7 +392,50 @@ for paths, category, basis in rows:
                      "应改标为未编译/死头（表里的说法要跟着改）" % p)
             else:
                 info.append("    %s 由 %s 引入；声明进编译、实现不编译" % (p, includer))
-        for sym in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*::", basis)):
+            # 依据列里点名的「还在 include 这个死头」的文件，进对照集。
+            # ⚠ 锚点必须是字面 `include`：这条行本来就写着"被 … include ⇒"。若哪天这句话被改写、
+            #   一个 include 都没点名，下面会报 ROSTER-BASIS（而不是静默拿到空集、把一侧的牙卸掉）。
+            # 依据列里点名的「还在 include 这个死头」的文件，进对照集。
+            # ⚠ 锚点必须是字面 `include`：这条行本来就写着"被 … include ⇒"。若哪天这句话被改写、
+            #   一个 include 都没点名，下面会报 ROSTER-BASIS（而不是静默拿到空集、把一侧的牙卸掉）。
+            if re.search(r"\binclude\b", basis, re.I):
+                stem = p.rsplit(".", 1)[0]
+                for m in SRC_RE.finditer(basis):
+                    cand = m.group(0)
+                    # 排除"死头自己那一行"：表里的路径**不带扩展名**（`src/gui/legacy/glass_effect.{h,cpp}`），
+                    # 所以不能拿 cand != p 比——那样永远不等，把该排的排不掉、该收的又因 .h 结尾判断而收进来。
+                    if cand.endswith((".h", ".hpp")) and cand.rsplit(".", 1)[0] != stem:
+                        zombie_listed.setdefault(p, set()).add(cand)
+        listed_syms = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*::", basis))
+        if not listed_syms:
+            fail("ROSTER-BASIS", "%s：依据列没点出符号名（形如 `Glass::`）⇒ 调用点检查没有对象，"
+                 "「无调用点」这句无法复算" % label)
+        # 判据**不拿表里的字符串当搜索词**（第一版就是 `for sym in basis` —— 把符号名删掉后循环直接变空，
+        # 门照样绿 ⇒ ROSTER-BASIS 那条红是我"以为有"而没有）。
+        # 真做法：从死头源码里抽它**自己声明**的限定名。⚠ 只认「定义点」而不是全文出现：
+        #   button_translator.h 里 `QString::fromUtf8(...)` 是**使用**别处的名字，
+        #   按全文抽会把 QString:: 当成它的导出符号（实测就是这样误红，且红得像是名单写错）。
+        code_syms = set()
+        for p in paths:
+            full = os.path.join(ROOT, p.replace("/", os.sep))
+            if not os.path.isfile(full):
+                continue
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                hsrc = strip_c_comments(fh.read())
+            code_syms |= {m + "::" for m in
+                          re.findall(r"\b(?:class|struct|enum|namespace)\s+([A-Za-z_][A-Za-z0-9_]*)", hsrc)}
+            code_syms |= {m + "::" for m in
+                          re.findall(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{", hsrc, re.M)}
+            # 头里定义的静态成员/自由函数不算限定名（`ZhCnButtonTranslator::translate` 这种在 .cpp 才有）
+        if not code_syms:
+            fail("ROSTER-BASIS", "%s：%s 里抽不出它自己声明的类/命名空间 ⇒「调用点=0」无从复算"
+                 % (label, ", ".join(paths)))
+        unknown = listed_syms - code_syms
+        if unknown:
+            fail("ROSTER-BASIS", "%s：表登记的符号 %s 不是该头声明的名字（该头声明的是 %s）⇒ "
+                 "调用点检查会去数别人家的符号" % (label, ", ".join(sorted(unknown)),
+                                                   ", ".join(sorted(code_syms)) or "(无)"))
+        for sym in sorted(listed_syms & code_syms):
             hits = []
             for dirpath, _d, files in os.walk(os.path.join(ROOT, "src")):
                 for f in files:
@@ -320,6 +454,7 @@ for paths, category, basis in rows:
                      "名单必须改标" % (sym, ", ".join(hits[:4])))
             else:
                 info.append("    %s 调用点=0（全 src 去注释后）" % sym)
+        continue
 
     if category == "并存分派，不是两版":
         missing = [p for p in paths if p not in compiled_tus]
@@ -357,6 +492,38 @@ for p in sorted(uncompiled_tus - listed_uncompiled):
 extra = sorted(listed_uncompiled - uncompiled_tus)
 if extra:
     fail("ROSTER-EXTRA", "表里标未编译但实际不在现算集合：%s" % ", ".join(extra))
+
+# 僵尸 include：实现不编译的死头，仍被谁 #include。两侧都要拦（见 §3b 的来历）。
+# ⚠ **不依赖表里的类别标签**：判据从代码现算"谁 include 了死头"，再从**任意行**的依据列收集
+#   点名的 includer。第一版只在 `category == "仅声明型死头"` 分支里收集，于是
+#   「未编译」行依据列里那句"仍被 src/gui/main_window.h:10 include"根本进不了对照集 ⇒
+#   反向那侧（清掉 include 却忘改表）静默绿。M10 变异把这点暴露出来了。
+zombie_actual = {}
+for hdr in sorted(dead_headers()):
+    inc = direct_includers(hdr)
+    if inc:
+        zombie_actual[hdr] = {rel for rel, _ln in inc}
+        info.append("    [僵尸 include] %s ← %s"
+                    % (hdr, ", ".join("%s:%d" % (r, n) for r, n in inc)))
+if not zombie_actual and not zombie_listed:
+    info.append("    [僵尸 include] 现算 0 条、表里也没登记 ⇒ 这一族今天不存在（两面夹具见 mutation_fixture_live_roster.py）")
+for hdr in sorted(zombie_actual):
+    if hdr not in zombie_listed:
+        fail("ROSTER-ZOMBIE", "%s 的实现不编译，却仍被 %s include；§1.3 表没有登记这条 ⇒ "
+             "「已完全断开」这类说法随时会重新变成假的" % (hdr, ", ".join(sorted(zombie_actual[hdr]))))
+    else:
+        missing = zombie_actual[hdr] - zombie_listed[hdr]
+        extra = zombie_listed[hdr] - zombie_actual[hdr]
+        if missing:
+            fail("ROSTER-ZOMBIE", "%s 还被 %s include，但表里没点名这几个"
+                 % (hdr, ", ".join(sorted(missing))))
+        if extra:
+            fail("ROSTER-ZOMBIE-STALE", "表里说 %s 被 %s include，实测已经没有这条 include 了 ⇒ "
+                 "要么清掉登记，要么把该文件重新纳入名单" % (hdr, ", ".join(sorted(extra))))
+for hdr in sorted(zombie_listed):
+    if hdr not in zombie_actual:
+        fail("ROSTER-ZOMBIE-STALE", "表里给 %s 登记了 include 点（%s），实测没有任何文件 include 它"
+             % (hdr, ", ".join(sorted(zombie_listed[hdr]))))
 
 for line in info:
     print(line)

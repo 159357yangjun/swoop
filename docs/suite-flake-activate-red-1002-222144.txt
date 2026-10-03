@@ -1,0 +1,142 @@
+warning: Environment variable QT_LOGGING_TO_CONSOLE is deprecated, use
+QT_ASSUME_STDERR_HAS_CONSOLE and/or QT_FORCE_STDERR_LOGGING instead.
+FT_New_Face failed with index 0 : 2
+QSystemTrayIcon::setVisible: No Icon set
+[INFO] "ÒÑ¼ÓÔØÖ÷Ìâ: light"
+[INFO] "Ö÷´°¿Ú³õÊ¼»¯Íê³É"
+[INFO] "HistoryStore ÒÑ´ò¿ª: C:/Users/yyyy/AppData/Local/Temp/idm-next-probes/2026-10-02/_data/history.db"
+[INFO] "IPC server ÒÑÆô¶¯£¬¼àÌı idm-next-ipc"
+[INFO] "IPC ÇëÇó:  ¡ú Ê§°Ü£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÒÑ×ß£©"
+This plugin does not support propagateSizeHints()
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 9ms£¬´¦Àí 2ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 12ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+[INFO] "IPC ÇëÇó:  ¡ú Ê§°Ü£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÒÑ×ß£©"
+[INFO] "IPC ÇëÇó:  ¡ú Ê§°Ü£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÒÑ×ß£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 8ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 8ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 9ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 13ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 8ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 10ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 10ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 11ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 9ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 10ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 19ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 9ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 16ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 14ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 15ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+[INFO] "IPC ÇëÇó:  ¡ú Ê§°Ü£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+[INFO] "IPC ÇëÇó:  ¡ú Ê§°Ü£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+This plugin does not support raise()
+[INFO] "IPC ÇëÇó: activate ¡ú ³É¹¦£¨ÅÅ¶Ó 217ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+QIODevice::read (QSslSocket): device not open
+[out] äº§ç‰©ç›®å½• = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02
+[iso] æ•°æ®ç›®å½• = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-02\_data
+[act] D æ®µå½’å› ï¼šæ’ç©ºé™é»˜=æˆ peakN=1 å–å°½è‡ªèº«å³°å€¼=217ms å•è½®æœ€é•¿=217ms IPCå æ¯”=100%
+[attr] å®šæ—¶å™¨ 5 ä¸ªï¼š
+     interval=100    active=1 å®¿ä¸»=DownloadManager[]
+     interval=1000   active=1 å®¿ä¸»=QueueScheduler[]
+     interval=0      active=0 å®¿ä¸»=QNetworkReplyHttpImpl[]
+     interval=250    active=1 å®¿ä¸»=MainWindow[]
+     interval=5000   active=1 å®¿ä¸»=ScheduleService[]
+[attr] æœ¬è½®æœªå¤ç°ï¼ˆD æ®µå•è½®æœ€é•¿=217ms < 500ï¼ŒIPC è‡ªèº«å³°å€¼=217msï¼‰â‡’ è·³è¿‡æ¶ˆèï¼›æ¶ˆèåªåœ¨å¤ç°çš„é‚£ä¸€è½®æ‰æœ‰æ„ä¹‰
+[act] A æ®µä¸¤æ¬¡ ack=1/1 æ¨¡å‹è¡Œæ•° 0â†’0 å¼•æ“ä»»åŠ¡æ•° 0â†’0 | B æ®µæ”¾å¼ƒåå¾€è¿”=14msï¼ˆéœ€ <1500ï¼‰ | C æ®µ ack 50/50 | D æ®µ äº‹ä»¶å¾ªç¯å•è½®æœ€é•¿=217msï¼ˆéœ€ <500ï¼‰
+[PASS] activate è¿æŠ•ä¸¤æ¬¡éƒ½è¢«æœåŠ¡ç«¯ç¡®è®¤å¤„ç†ï¼ˆsuccess=trueÃ—2ï¼Œå¦åˆ™ä¸‹æ¡ã€Œæ²¡åŒä»½å‰¯ä½œç”¨ã€å°±æ˜¯å‡çš„ï¼‰
+[PASS] é‡å¤æŠ•é€’ä¸äº§ç”Ÿç¬¬äºŒæ¬¡å‰¯ä½œç”¨ï¼ˆä»»åŠ¡åˆ—è¡¨è¡Œæ•°ä¸å¼•æ“ä»»åŠ¡æ•°éƒ½ä¸å˜ï¼‰
+[PASS] ç¬¬äºŒéæŠ•é€’æ²¡æœ‰æŠŠçª—å£æ”¹æˆåˆ«çš„çŠ¶æ€ï¼ˆä»å¯è§ã€æ­£å¸¸æ€ï¼‰
+[PASS] ä¸¤æ¬¡æŠ•é€’ä¹‹å IPC æœåŠ¡ä»å¯ç”¨ï¼ˆæ²¡æœ‰ç¬¬äºŒå¥—å®ä¾‹ã€æœåŠ¡æ²¡åï¼‰
+[PASS] æœ‰ä¸€æ¡ä¸ç­‰å›è¯çš„æ­»è¿æ¥åœ¨å‰ï¼Œåç»­è¯·æ±‚çš„å¾€è¿”ä» <1500msï¼ˆæœåŠ¡ç«¯æ²¡è¢«æ‹–ä½ï¼‰
+[PASS] è¿ç»­æŠ•é€’ 50 æ¬¡å…¨éƒ¨æ‹¿åˆ°å›è¯ï¼ˆ50/50ï¼›å›è¯è¢«ä¸¢æ‰å°±åœ¨è¿™é‡Œçº¢ï¼‰
+[PASS] ç©ºè½¬è¿æ¥å ç€ GUI çº¿ç¨‹æ—¶ï¼Œæœ€é•¿ä¸€æ¬¡äº‹ä»¶å¾ªç¯è½®æ¬¡ä» <500msï¼ˆé‡çš„æ˜¯ GUI çº¿ç¨‹è¢«ç‹¬å å¤šä¹…ï¼Œä¸æ˜¯è¯·æ±‚å»¶è¿Ÿï¼›å®æµ‹ 217msï¼‰
+[report] å‹åœ¨ç©ºè½¬è¿æ¥åé¢çš„é‚£æ¡çœŸè¯·æ±‚ï¼šå¾€è¿”=217ms ack=1ï¼ˆåŒçª—å£æœ€é•¿è½®æ¬¡=219ms å–å°½è¿æ¥æ•° peakN=1ï¼›æœ¬è½®é¦–æ¬¡æµ‹é‡ã€æ— åŸºçº¿â‡’ä¸è¿›åˆ¤æ®ã€ä¸é…é˜ˆå€¼ï¼‰

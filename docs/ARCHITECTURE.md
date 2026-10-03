@@ -98,7 +98,7 @@ src/gui/legacy/glass_effect.cpp
 |---|---|---|
 | `src/core/legacy/network_winhttp.c` | 未编译 | 874 行、不在任何 target；与活的 `src/core/network_curl.c` **对外符号同名 9 个**（`network_init`、`network_cleanup`、`network_set_http2_enabled`、`network_default_options`、`network_get_html`、`network_post`、`network_probe`、`network_download_range`、`network_download_range_fp`）⇒ 改网络行为只改 curl 那份，改这里不会生效也不会报错 |
 | `src/gui/legacy/glass_effect.cpp` | 未编译 | 140 行、不在任何 target；`grep -c glass_effect build/build.ninja` = 0 |
-| `src/gui/legacy/glass_effect.h` | 仅声明型死头 | 被 `src/gui/main_window.h:10` include ⇒ **声明进编译、实现不进**；`Glass::` 在去注释后的全 `src/` 调用点 = 0 ⇒ 谁去调 `Glass::` 就是链接错误。别把它读成"玻璃拟态还在用" |
+| `src/gui/legacy/glass_effect.h` | 未编译 | 2026-10-02 清掉了原先那条 include（曾写作 `main_window.h:10`）⇒ **现在没有任何编译 TU 走到它**，声明也不进编译；`Glass::` 在去注释后的全 `src/` 调用点 = 0。别把它读成"玻璃拟态还在用"。类别从「仅声明型死头」改成「未编译」是**代码变了**、不是我改了说法：由 `live_roster` 的 ROSTER-LIVENESS + ROSTER-ZOMBIE-STALE 两面盯着（清 include 却忘改表 ⇒ 红） |
 | `tools/ui_snapshot.cpp` | 开关才编译 | `option(IDM_BUILD_UI_SNAPSHOT "Build offscreen UI snapshot tool" OFF)` ⇒ 默认构建里没有它是正常的，探针/截图要 `-DIDM_BUILD_UI_SNAPSHOT=ON` |
 | `tools/engine_selftest.c` | 开关才编译 | `option(IDM_BUILD_ENGINE_SELFTEST "Build engine self-test (needs local auth HTTP server)" OFF)` |
 | `src/protocols/idownloader.cpp、src/protocols/*_downloader.cpp` | 并存分派，不是两版 | 同一个名字家族 5 份、**同时进编译**：`src/protocols/protocol_factory.cpp` 按 URL 谓词择一分派（HLS → Torrent → Video → Http 兜底）的是 4 份实现；第 5 份 `idownloader.cpp` 不是"第 5 种下载器"，全文只有 `#include "idownloader.h"`，是给 header-only 的 `IDownloader`（带 Q_OBJECT）喂 AUTOMOC 的占位 TU ⇒ 5 份之间没有"新旧版"关系，不许"合并去重" |
@@ -2613,3 +2613,31 @@ Enter 永远落不到它身上 ⇒ 台账那句描述本身不成立。于是我
   **这条旗子必须看**：`== 结果` 之前若出现 ★超时，整轮作废、不许引用任何计数。
 - 现值（本轮最后一条有效运行）：`服务端就绪检查：已响应 /_stats` + **`180 通过，0 失败`**，
   逐字档 `docs/engine-gate-green-*.txt`；红的那轮原文同批留档 `docs/engine-gate-red-13-residue-*.txt`。
+
+### 2026-10-02 22:1x（第 32 条）— 活/死名单门补上「僵尸 include」这一族；顺带量到套件自身的偶发红
+
+**做了什么**：`tools/live_roster.py` 以前只建模「死头是否可达」——可达就报 info、永不红。
+于是 §1.2 归位表里唯一未清的那项（`main_window.h:10` 仍 include `legacy/glass_effect.h`）
+只存在于**一句散文**里，"清掉了"和"没清"在退码上一模一样 ⇒ 假绿。现在判据从代码现算
+「谁 include 了实现不编译的头」，与表里依据列点名的 includer **双向比对**，两侧都能红。
+清掉那条 include 后，`glass_effect.h` 的类别由「仅声明型死头」改为「未编译」（代码变了，不是我改说法）。
+
+**夹具三次才配出牙（每次都暴露不同的真问题）**：
+| 变异 | 第一次结果 | 真原因 |
+|---|---|---|
+| M6 删依据列符号名 | **rc=0 假绿** | 判据拿**表里的字符串**当搜索词：删掉后 `for sym in …` 循环为空 ⇒ 静默跳过。改成从死头源码抽它自己声明的类/命名空间 |
+| M6a 登记一条真事实（前置面） | rc=1 | 抽符号时用了全文正则 ⇒ 把头里**使用**的 `QString::` 当成它声明的符号。只认 `class/struct/enum/namespace` 定义点 |
+| M10 表里塞一个不存在的 include 点 | **rc=0 假绿** | 对照集只在「仅声明型死头」分支收集，而那句话写在「未编译」行里 ⇒ 根本没进集合。收集不再依赖类别标签 |
+| M11 代码新增僵尸 include | rc=1 ✅ | —— |
+最终 `mutation_fixture_live_roster.py` **13/13 道按预期**（含还原逐字核对 + 还原后再跑门 rc=0）。
+
+**夹具自己漏过一次脏盘**：M6 抛异常那轮 `restore()` 根本没跑，`task_detail_dialog.h` 被加的 include
+和 ARCHITECTURE 里注入的那一行都留在盘上，后面 M7~M11 全从残骸起跑（三条 SKIPPED-ANCHOR + 一条假 BAD）。
+修法是**把登记放进 `put()` 里**（写之前先存原件），这样"忘了 snap"结构上不可能发生。
+
+**另一件必须记下的事：这套件的计时类断言本身会偶发红**。本轮连跑抓到两次、不同模式：
+`IDM_ACTIVATE_PROBE` 实测最长轮次 2510ms（阈值 500）、`IDM_FORWARD_PROBE` 的「对方回了成功」红一次。
+分开单跑 FORWARD 8/8 绿、随后聚合 3/3 全绿 ⇒ 复现率约 **2/9 ≈ 22%（分母就是这九轮，不外推）**。
+**没有把它当产品回归**：两份原文进仓（`docs/suite-flake-*-1002-222144.txt`），根因未归因。
+本机前台焦点抢不到、同机还有别的会话在跑 ⇒ 计时类读数天生不稳；这两条判据防的是"GUI 线程被独占"，
+不是"这台机器当时不忙"。要坐实得给它们配同机负载对照面，目前没做。
