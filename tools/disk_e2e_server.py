@@ -28,6 +28,7 @@ SHA = ""
 PORT = 8199
 PAGES = {}
 MEDIA = {}
+HLS = {}
 DOC_TEXT = b""
 
 
@@ -45,6 +46,40 @@ def build_media():
     head = bytes([0, 0, 0, 0x18]) + b"ftypmp42"
     return {"/media/network.mp4": head + bytes(200_000),
             "/media/dom.mp4": head + bytes([1] * 200_000)}
+
+
+def build_hls():
+    """最小本机 HLS fixture：master.m3u8 → media.m3u8 → seg0/1/2.ts。
+
+    分片是**确定性伪 TS**（以 0x47 开头、固定载荷），不是真 MPEG-TS：本轮要验的是
+    「扩展能不能识别 .m3u8」与「缺 ffmpeg 时产品给什么反应」，不是转码正确性——
+    那需要真 TS 流，属第 5 步之后的事。用 chr(10) 而不是字面 \\n，是为了让行尾在源码里
+    不被任何 shell/转义层吃掉（这条在本会话里踩过三次）。
+    """
+    NL = chr(10)
+    def seg(n):
+        return bytes([0x47]) + bytes(((i * 13 + n) & 0xFF) for i in range(187)) * 40
+
+    master = NL.join([
+        "#EXTM3U",
+        '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS="avc1.4d401d"',
+        "media.m3u8",
+        "",
+    ]).encode("utf-8")
+    media = NL.join([
+        "#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXTINF:2.0,", "seg0.ts",
+        "#EXTINF:2.0,", "seg1.ts",
+        "#EXTINF:2.0,", "seg2.ts",
+        "#EXT-X-ENDLIST", "",
+    ]).encode("utf-8")
+    return {
+        "/hls/master.m3u8": (master, "application/vnd.apple.mpegurl"),
+        "/hls/media.m3u8": (media, "application/vnd.apple.mpegurl"),
+        "/hls/seg0.ts": (seg(0), "video/mp2t"),
+        "/hls/seg1.ts": (seg(1), "video/mp2t"),
+        "/hls/seg2.ts": (seg(2), "video/mp2t"),
+    }
 
 
 def build_pages(port):
@@ -73,7 +108,17 @@ def build_pages(port):
         "window.__insertedAt=Date.now();"
         "},3000);</script>")
     return {"/network.html": network_html.encode("utf-8"),
-            "/dom.html": dom_html.encode("utf-8")}
+            "/dom.html": dom_html.encode("utf-8"),
+            # HLS 播放页：用 <video> 指向 master.m3u8（浏览器自己不播，但 DOM 里就有这个 URL）
+            "/hls.html": (
+                "<!doctype html><meta charset=utf-8><title>HLS page</title>"
+                "<h1>hls-later</h1><div id=host></div><script>"
+                "setTimeout(function(){"
+                "var v=document.createElement('video');"
+                "v.innerHTML='" + '<source src="/hls/master.m3u8" type="application/vnd.apple.mpegurl">' + "';"
+                "document.getElementById('host').appendChild(v);"
+                "window.__hlsAt=Date.now();"
+                "},1500);</script>").encode("utf-8")}
 
 
 class H(BaseHTTPRequestHandler):
@@ -95,6 +140,8 @@ class H(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/payload.bin":
             self._send(200, b"", {"Content-Length": str(SIZE)})
+        elif path in HLS:
+            self._send(200, b"", {"Content-Length": str(len(HLS[path][0]))})
         elif path in PAGES or path in MEDIA:
             body = PAGES.get(path) or MEDIA.get(path)
             self._send(200, b"", {"Content-Length": str(len(body))})
@@ -104,6 +151,10 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         rng = self.headers.get("Range")
+        if path in HLS:
+            blob, ctype = HLS[path]
+            self._send(200, blob, {"Content-Type": ctype})
+            return
         if path in PAGES:
             self._send(200, PAGES[path], {"Content-Type": "text/html; charset=utf-8"})
             return
@@ -153,9 +204,10 @@ def main():
     PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8199
     SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 512 * 1024
     ready = sys.argv[3] if len(sys.argv) > 3 else None
-    global PAGES, MEDIA, DOC_TEXT
+    global PAGES, MEDIA, HLS, DOC_TEXT
     PAYLOAD = make_payload(SIZE)
     MEDIA = build_media()
+    HLS = build_hls()
     PAGES = build_pages(PORT)
     DOC_TEXT = b"not a media resource -- negative control for webRequest sniffing" + bytes([10])
     SHA = hashlib.sha256(PAYLOAD).hexdigest()

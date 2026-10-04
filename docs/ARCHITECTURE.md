@@ -3124,3 +3124,99 @@ A 面偶发失败单独印「已知缺陷·复现一次」，不进 capstone 的
 
 **(c) 清理**：E2E 会在用户真实 `Downloads` 里留下 `dom.mp4`（这是取证路径本身）。
 每轮跑前删、跑后核，确认大小与服务器 media 逐字节相等才认定是我的产物；未动用户其它文件。
+
+### 2026-10-04 00:4x（第 46 条）— MV3 定性收口：**三个候选全部被否，真因是"扩展没在册"**；Gate 达成（有效轮 A 面缺失=0）
+
+按主控批准走"先定性后修"。插桩三点（SW 求值时刻 / 回调入口含 tabId+正则命中 / `storage.session.set` 前后读数），
+跑 10 遍，**跑完逐字还原**（`git status --porcelain browser-extension/` 空、`DIAG 残留=0`、与 HEAD 26796 字节相等）。
+
+**第一轮 10 遍（档 `docs/mv3-sniff-setup-invalid-1004.txt`）**
+```
+[汇总] 轮数=10 A面缺失次数=3
+[计数] 回调命中(cb)=7 其中 tabId<0=0 写入(write)=7
+第2遍 [通道未建立] …  storage.session 直读={}
+```
+⇒ **三候选逐一被否**：(a) `tabId<0` 出现 **0 次**；(c) 写了没落住 **0 次**（7 个 write 全 `afterHasMp4=true`、`lastErr=null`）；
+(b) "回调没被调用"看着成立，实为**量具假象**——那 3 遍连 SW target 都找不到。
+
+**加前置断言后重跑 10 遍**（`tools/mv3_diag.py` 现在每轮先验"扩展真在被浏览器注册"：
+探测 `chrome-extension://<key 现算 ID>/…` 的可连 target 并读 `getManifest().version`）：
+```
+[汇总] 轮数=10 有效轮=7 A面缺失=0 SETUP-INVALID=3
+[Gate] 只看有效轮：A面缺失必须为 0；SETUP-INVALID 属实验未成立，不得计入产品缺陷
+```
+⇒ **Gate 达成**。所以 §7 第 45 条里那句「MV3 SW 冷启动窗口内请求被 webRequest 永久漏掉」**根因写错了**：
+真实机制是**这 3 遍里扩展自身没起来**（不在册 ⇒ SW 从未注册 ⇒ 监听器从未存在 ⇒ `storage.session` 返回 `{}`），
+不是"SW 起来了但错过事件"。旁证：成功遍的 `swT`=131–317ms，页面请求确实发生在 SW 求值之后，
+MV3 的事件分发保证是生效的。**同时撤回我上一轮的措辞与主控转述的"页面在监听器注册之前加载"**——两者都不成立。
+
+**没有动产品代码**：修 `background.js` 治不了"扩展没被浏览器加载"，那是测具/环境前置条件。
+content script 回填这条修复路线因此**降级为待验证假设**（它针对的病还没被证明存在）。
+
+**失败成段出现（第 2/3/4 连续三遍）而非均匀散布** ⇒ 指向一次性环境状态（新 profile 首次启动时 Edge
+扩展注册尚未就绪）。这一条只到**强推断**：要证它需要"同一 profile 连续复用 vs 每轮新 profile"各跑 10 遍对照，本轮没做。
+
+**前置断言自己也被验过有牙**：把探测 ID 换成不存在的 32 位号 ⇒ 输出 `A面=SETUP-INVALID`
+（既不是"命中"也不是"缺失"），变异体用完逐字节还原。否则这条断言只是装饰。
+
+### 2026-10-04 12:1x（第 47 条）— SETUP-INVALID 达成 + HLS 前三步：**降级路径诚实，但「FFmpeg 自愈」在任务路径上根本没被触发**
+
+**(a) MV3 前置断言收口**（`tools/mv3_diag.py`，档 `docs/mv3-sniff-setup-invalid-1004.txt`）
+每轮先验"扩展真在被浏览器注册"，再跑 10 遍：
+```
+[汇总] 轮数=10 有效轮=7 A面缺失=0 SETUP-INVALID=3
+[Gate] 只看有效轮：A面缺失必须为 0；SETUP-INVALID 属实验未成立，不得计入产品缺陷
+```
+⇒ **Gate 达成**。三候选全否：`tabId<0` 出现 0 次、写了没落住 0 次、"回调没调用"是量具假象。
+真机制是**那 3 遍扩展自身没在册**。§7 第 45 条的"冷启动漏检"根因作废，content script 回填降级为待验证假设。
+前置断言自己也被验过有牙：把探测 ID 换成不存在的号 ⇒ 输出 `SETUP-INVALID`（不是命中也不是缺失）。
+
+**(b) HLS fixture 与识别（第 1–2 步，全本机）** —— `disk_e2e_server.py::build_hls()`
+生成 `master.m3u8 → media.m3u8 → seg0/1/2.ts`（伪 TS，0x47 开头、确定性字节）。分片用 `chr(10)` 拼行尾，
+因为字面 `\n` 在本会话里被 shell/转义层吃掉三次。
+```
+[网页] DOM 状态={"videos":1,"src":"http://127.0.0.1:8272/hls/master.m3u8"}
+[popup] 行=master.m3u8 …· M3U8 || seg2.ts …· TS || seg1.ts …· TS || seg0.ts …· TS || favicon.ico …· ICO
+[判据·第2步] popup 列出 master.m3u8 = True
+[扩展] storage.session=["…master.m3u8[video]","…seg2.ts[video]","…seg1.ts[video]","…seg0.ts[video]","…favicon.ico[file]"]
+```
+⇒ **扩展识别 .m3u8 成立**（DOM 通道），且 `.ts` 也一并被抓、`favicon.ico` 归到 `[file]` 而非视频。
+
+**(c) 第 3–4 步的真实答案：不是"自愈成功"，也不是"失败给具名错误"，而是"绕开自愈走降级"**
+GUI 数据根用 `IDM_DATA_DIR` 隔离，前置断言确认 `ffmpeg.exe 存在=False ｜ PATH 上的 ffmpeg=无`，然后真点击发送：
+```
+[GUI] 任务终态行='#2000000\t已完成\tmaster.m3u8\thttp://127.0.0.1:8272/hls/master.m3u8'
+[内容核对] 期望 22443 字节 ｜实际 22443 字节 ｜逐字节相等=True
+[磁盘] ffmpeg 是否被准备出来=False（dataDir 内）
+[HLS 日志链] HlsDownloader 选定变体（带宽 800000）→ media.m3u8
+             HlsDownloader 解析到 3 个分片（加密=0，时长≈6s）
+             HlsDownloader 拼接完成: C:/Users/yyyy/Downloads/master.m3u8.ts
+```
+对照源码 `hls_downloader.cpp:293-298` 的三分支——`isFfmpegAvailable()`→ffmpeg 出 `.mp4`；
+`m_encrypted` 且无 ffmpeg→`fetchKey()`；否则→`startManualDownload()`+`concatSegments()` 出 `.ts`（`:507`）。
+本轮走的是第三条，产物逐字节等于 seg0+seg1+seg2 ⇒ **降级路径诚实、没有伪成功**。
+
+**但这就是缺口本身**：`MainWindow` 只在**构造时**做一次 ffmpeg 自愈检查
+（`main_window.cpp:335-340`，`autoDownloadFfmpeg` 默认 true，`settings.cpp:49`），
+而 `HlsDownloader::beginDownload()` **不看这个设置、也不调 `ensureAvailable()`**——它只问"现在有没有"，
+没有就静默降级成 `.ts`。后果有两层：
+① 用户装了扩展、首启时那次下载又没成（我这三轮里 `ffmpeg/` 目录**从未被创建**，而同位置的
+   aria2c 自愈成功打了「已就绪（开箱即用）」），此后任何 HLS 任务都只会拿到 `.ts`，
+   **没有任何一次会再尝试准备 ffmpeg**；
+② 该次自愈传的是 `warnOnError=false`（`main_window.cpp:337`），失败分支只 `cb(false)`、
+   既不弹框也不写日志 ⇒ 三轮 GUI 日志里 ffmpeg 相关行数 = **0**。
+   对比同函数里的 aria2 分支成功时有 log、ffmpeg 分支失败时什么都不会留。
+⇒ 这是**可观测性 + 自愈触发时机**两条真缺陷，不是我先前一度想写的"产品没做 HLS"。
+
+**我在这一步读错过一次并当场改正**：第一版 VERDICT 见到"有产物 + 已完成"就印了
+「自愈成功面：ffmpeg 被准备、产物落盘」。错在两处——产物其实是 `.ts` 拼接而非 ffmpeg 合并的 `.mp4`，
+且 `dataDir` 下根本没有 `ffmpeg.exe`。改后的判据要求**三方同时成立**才许说自愈：
+终态已完成 ∧ 产物逐字节 == 分片拼接 ∧ `dataDir/ffmpeg/ffmpeg.exe` 存在；缺第三项就只能写"降级"。
+
+**(d) 隔离边界要说清**：`FfmpegBackend::FFMPEG_ZIP_URL` 是 gyan.dev 的公网 zip
+（`ffmpeg_backend.cpp:21-22`）。所以"完全不碰公网"与"验证自愈成功路径"**不能同时成立**——
+第 5 步（准备成功后验产物）必须在允许公网的前提下做，或改用本地 file:// 假源注入。
+本轮**没有**为了让某一面绿而去联网下载 ffmpeg。
+
+**仍未验**：加密 HLS（`fetchKey` 分支）、真 MPEG-TS 拼接后的可播放性、`.mp4` 转封装路径、
+公网下载下的自愈成败、真实视频站。A 面 content script 回填按主控排序仍排在 HLS 之后。

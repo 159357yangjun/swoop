@@ -1,0 +1,8 @@
+=== 第1遍 A面=SETUP-INVALID ===
+  storage.session 直读=None
+  [SETUP-INVALID] 扩展未在浏览器册内（找不到 chrome-extension://<id>/ 的可连 target） ⇒ 本轮不计入 A 面命中/缺失
+
+[汇总] 轮数=1 有效轮=0 A面缺失=0 SETUP-INVALID=1
+[Gate] 只看有效轮：A面缺失必须为 0；SETUP-INVALID 属实验未成立，不得计入产品缺陷
+[计数] sw-eval=0 回调命中(cb)=0 其中 tabId<0=0 写入(write)=0
+[判别] cb=0 ⇒ 候选(b)事件没送到；cb>0 且 tabId<0 ⇒ 候选(a)；cb>0 且 write>0 但 storage 没有 ⇒ 候选(c)
