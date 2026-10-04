@@ -3035,3 +3035,54 @@ Windows 命名管道只能走 Win32 `CreateFileW`+`WriteFile`/`ReadFile`；产�
 
 **仍未验**：任务列表那一格的像素证人（本轮证到状态字段是「已完成」，不是屏幕上看得见）；
 网页识别 → popup → sendNativeMessage 整层（下一层目标）；MP4/m3u8 真实媒体链。
+
+### 2026-10-03 10:4x（第 44 条）— 网页识别 → popup → 真点击：**A/B/阴性 三面全绿**，主路径打通到用户点那一下
+
+基线 `b1145d1` 已证明后半段（GUI 收单 → engine → 落盘 → SHA256），本轮不重复验 SHA256，
+只把前后两条已证链条接起来。工具 `tools/sniff_e2e.py`，逐字档 `docs/sniff-e2e-pass-1003.txt`。
+
+**A 面 webRequest 嗅探** —— `/network.html` 里**没有 `<video>`**，只有 JS `fetch('/media/network.mp4')`
+（Content-Type: video/mp4）：
+```
+[网页] 请求发生次数={"net":1,"doc":1}
+[popup] 行数=2 含 network.mp4 的行数=1     network.mp4 127.0.0.1:8252 · 195 KB · MP4
+[阴性] popup 把 document.txt 列成资源了吗=False
+```
+⇒ **网络嗅探通道已被运行态证明**，且同一页面请求的 `text/plain` `/document.txt` **没有**被吞进列表。
+
+**B 面 DOM 扫描 + MutationObserver** —— `/dom.html` 初始无媒体元素，3s 后动态插入 `<video><source>`：
+```
+[网页] 插入前 DOM 状态={"videos":0,"inserted":0}
+[popup] 插入前含 dom.mp4 的行数=0（必须 0）
+[网页] 动态插入完成={"videos":1,...}
+[popup] 插入后含 dom.mp4 的行数=1 ｜再等 4s 后行数=1（不无限增长）
+```
+⇒ 「源码里有 MutationObserver」升级为「动态媒体 DOM 运行时确实能被发现」。
+
+**第三步：真点击，不是 console 直调 API**
+```
+[popup] 勾选目标行={"ok":true,"usedCheckbox":true,"text":"dom.mp4 …MP4"}
+[popup] 发送按钮存在={"ok":true,"disabled":false,"label":"下载 (1)"}   ← 文案随勾选变化＝真的走了 popup 代码
+[popup] 实际 click 发送按钮={"ok":true}
+[GUI] 新增『IPC 请求: add』行数=1   [INFO] "IPC 请求: add → 成功（处理 62ms，送达=1）"
+[GUI] 任务列表含 dom.mp4 的行=['#1\t已完成\tdom.mp4\thttp://127.0.0.1:8252/media/dom.mp4']
+```
+连跑两遍结果一致。**措辞仍按主控收紧**：`extension runtime/native host → GUI → HTTP engine → disk`；
+本轮新证的是【网页识别 → popup → 点击】这一段，不写成"网页→Browser 全链"。
+
+**这一轮最贵的测具教训（红了三次才找到，全部是量具形状、非产品缺陷）**：
+popup 是在**自己加载时**用 `tabs.query({active:true,currentWindow:true})` 拉当前页资源的
+（`popup.js:615` → `background.js:634`）。而 CDP 新建的 popup target **本身就是活动标签** ⇒
+"先开 popup、后激活页面"永远读到空列表。正解顺序是 **`Target.activateTarget(页面)` → 再 reload popup**。
+自证读数写在输出里（对照实验的开关必须自证生效）：
+```
+[扩展] popup 眼里的 active tab=["chrome-extension://…/popup.html"]        ← 错顺序
+[扩展] 刷新 popup 后它眼里的 active tab=["http://127.0.0.1:8252/network.html"] ← 对顺序
+```
+期间我差点把两件事误判成产品缺陷并当场收回：① 「嗅探没抓到 mp4」——实测 `storage.session` 里
+`tab_<页面id>` 一直有货；② 「Edge flag 影响嗅探」——带不带 `--no-first-run/--no-default-browser-check`
+各跑一次，两次都写入 storage ⇒ 那次空是偶发，与 flag 无关。另有一次判据 bug：
+`wait_eval` 返回 JSON **字符串**，我却 `(ins or {}).get(...)` 当字典用 ⇒ AttributeError。
+
+**仍未验**：popup 的像素证人（本轮读的是 DOM innerText，不是屏幕截图）；右键菜单发送路径；
+`downloadWithOptions`（另存目录/画质选择卡片）；HLS/m3u8 与 ffmpeg 自愈；真视频站。
