@@ -2987,3 +2987,51 @@ jsDelivr 那个真落盘 `package.json` 646 字节；thinkbroadband 那个停在
 （host/app 同级），正式 package 形状下 fallback 已实测可用。只有 package 形状也断才值得动产品代码或打包规则。
 
 **证人边界照旧**：本轮证到"CLI 起了任务并落了盘"，没证"GUI 任务列表像素里出现那一行"；后者留给 UI/像素证人，不再用日志硬推。
+
+### 2026-10-03 10:1x（第 43 条）— GUI 真落盘 E2E：**四层证据全绿**，404 面不伪成功；thinkbroadband 继续冻结
+
+口径由主控锁定，本条只做这一项：localhost 两路源 + 四层证据。**没有**顺手测 popup / webRequest /
+DOM 扫描 / MP4 页面识别 / yt-dlp / ffmpeg / HLS / 公网 URL——任何一个混进来，红了都会重新扩大归因空间。
+
+**测试源是自己生成的**（`tools/disk_e2e_server.py`）：payload 由位置派生的确定性字节当场算出，
+启动即打印 `SERVER_READY port=… sha256=… size=…` ⇒ **源文件本身也是证人**，不依赖任何外部下载件。
+刻意不复用 `engine_selftest_server.py`：它带 Basic 认证、40ms 固定延迟与三十来条分支路由，
+那些多余行为会把"下载失败"的成因推到服务器上。这里只有 `/payload.bin`(200) 与 `/missing.bin`(404)，
+外加必要的 Range（产品对已知长度资源会分段并发取）。
+
+**正面 200 四层（512KiB 与 1MiB 各一轮，逐字档 `docs/disk-e2e-{512k,1mib}-pass-1003.txt`）**
+```
+[层① Native Host] success=True lastError=None msg='已添加下载: payload.bin'
+[层② GUI IPC]     出现『IPC 请求: add → 成功』=True
+                  [INFO] "IPC 请求: add → 成功（排队 -1ms，处理 54ms，送达=1，回话时客户端=在）"
+[层③ 磁盘]        最终文件存在=True .idmtmp 残留=无
+[层④ 内容]        size 524288 == 524288 : True ｜ sha256 前16 3dd34634f87b65cb == 同 : True
+[正面 200] 四层=OK/OK/OK/OK ⇒ 已观测级打通
+```
+1MiB 面同样四层 OK（sha256 前缀 `a3f086db33d8d232`）。任务行对照：`#1 已完成 payload.bin http://127.0.0.1:8241/payload.bin`。
+⇒ **Browser/host → GUI → HTTP engine → disk 已观测级打通**（这句话现在才有资格写）。
+按口径明确一句：`add → 成功` 只代表 **GUI 收单成功**，所以 ①② 单独都不算下载成功——本轮是 ③④ 把它补上的。
+
+**404 面（不伪成功）**
+```
+[404 轮询] 终态行=['#2\t失败\tmissing.bin\thttp://127.0.0.1:8241/missing.bin']
+[404 层③] 目录内容=['missing.bin.idmtmp']  missing.bin.idmtmp size=0
+[404 判定] 生成看似成功的最终文件=False｜任务被标『已完成』False
+[404 判定] 日志里的失败证据行数=2   [INFO] "任务 2 失败" ×2
+```
+⇒ 四条要求全部满足：没有假装成功的最终文件、没有误标完成、`.idmtmp` 的大小与终态都记了、
+有具名失败证据。**保留 `.idmtmp` 供重试本身不算缺陷**（本轮没把它写进判据）。
+一个测具细节：终态必须**轮询到收敛**。第一次我用固定 `sleep(12)` 读到的是 `#2 下载中`——
+引擎的重试是有界的（`retry_count` 递增到上限，`download_core.c:1095`），"下载中"只是中间态，
+睡固定秒数会把中间态当终态读。改成每秒查、最多 90s、见到终态词才退。
+
+**thinkbroadband 保持冻结**：解冻条件是"localhost 也出现 `.idmtmp=0`"，本轮 localhost 完整落盘
+（③④ 双绿、无残留），所以公网那次停在 0 字节仍是站点/网络侧问题，不与本地链共享机制。
+
+**新工具的两处形状，别改回去**（都栽过）：本机 anaconda 的 python **没有 `socket.AF_UNIX`** ⇒
+Windows 命名管道只能走 Win32 `CreateFileW`+`WriteFile`/`ReadFile`；产品 IPC 协议是**裸 JSON**
+（`ipc_server.cpp:108` 起），不是 native messaging 那种 4 字节长度前缀——按前缀读会拿到一坨不可解析字节。
+另：任务终态是从 GUI 自己的 `list` 命令读的，不去猜它的 SQLite schema。
+
+**仍未验**：任务列表那一格的像素证人（本轮证到状态字段是「已完成」，不是屏幕上看得见）；
+网页识别 → popup → sendNativeMessage 整层（下一层目标）；MP4/m3u8 真实媒体链。

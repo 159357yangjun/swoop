@@ -1,0 +1,26 @@
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HEAD=3e3a95b
+[身份] app_exe_sha12=8ef5f379685f host_exe_sha12=3dcb1c2cb61f
+[测试源] SERVER_READY port=8241 sha256=3dd34634f87b65cb18a825cecbe5ff8c0ee43d4ac9a5e3d8d5940a08cbea0786 size=524288
+[GUI] pid=9484 已监听 idm-next-ipc
+[浏览器] Edg/154.0.4258.53
+[扩展] 实际 ID=fmnehlhldcoknecihnlbbcmhpaaapmbp ｜与 key 派生一致=True
+[层① Native Host] success=True lastError=None msg='已添加下载: payload.bin'
+[层② GUI IPC] 出现『IPC 请求: add → 成功』=True
+        [INFO] "IPC 请求:  → 失败（排队 -1ms，处理 0ms，送达=1，回话时客户端=已走）"
+        [INFO] "IPC 请求: add → 成功（排队 -1ms，处理 51ms，送达=1，回话时客户端=在）"
+[层③ 磁盘] 最终文件存在=True .idmtmp 残留=无
+[层④ 内容] size 524288 == 524288 : True
+[层④ 内容] sha256 前16 3dd34634f87b65cb == 3dd34634f87b65cb : True
+[正面 200] 四层=OK/OK/OK/OK ⇒ 已观测级打通
+[404 层①] host 回执 success=True msg='已添加下载: missing.bin'
+[404 轮询] 终态行=['#2\t失败\tmissing.bin\thttp://127.0.0.1:8241/missing.bin'] err=None
+[404 层③] 目录内容=['missing.bin.idmtmp']
+          missing.bin.idmtmp size=0
+[正面 对照] payload 任务行=['#1\t已完成\tpayload.bin\thttp://127.0.0.1:8241/payload.bin']
+[404 判定] 生成看似成功的最终文件=False（必须 False）｜任务被标『已完成』=False（必须 False）
+[404 判定] 日志里的失败证据行数=2（0 不等于缺陷，只记录）
+          [INFO] "任务 2 失败"
+          [INFO] "任务 2 失败"
+
+[总结] 正面四层=全绿｜404 无伪成功=True
+[工作目录] C:\Users\yyyy\AppData\Local\Temp\idm-diske2e-c_63wee1
