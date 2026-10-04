@@ -30,6 +30,7 @@ PAGES = {}
 MEDIA = {}
 HLS = {}
 ENC_EXPECT = b""
+TS_EXPECT = b""
 DOC_TEXT = b""
 
 
@@ -133,6 +134,37 @@ def build_enc_hls():
         routes[f"/hls/eseg{i}.ts"] = (e, "video/mp2t")
     # 期望产物 = 三段明文按序拼接（独立于被测实现算出来的答案）
     return routes, b"".join(plain), key
+
+
+def build_real_ts_hls():
+    """真 MPEG-TS fixture（步骤 B）：PAT/PMT/连续视频包，分片长度是 188 的整数倍。
+
+    与伪 TS 的区别在于它**可被独立判读**（tools/ts_fixture.audit_ts），
+    于是能问一个更硬的问题：产品 concat 出来的文件还是不是合法 TS、
+    PCR 跨度是否等于 #EXTINF 声明的时长。伪 TS 只能验字节搬运。
+    """
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import ts_fixture
+    NL = chr(10)
+    segs = [ts_fixture.build_segment(60, i * 90000 * 2, i * 90000 * 2, i) for i in range(3)]
+    media = NL.join([
+        "#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXTINF:2.0,", "tseg0.ts",
+        "#EXTINF:2.0,", "tseg1.ts",
+        "#EXTINF:2.0,", "tseg2.ts",
+        "#EXT-X-ENDLIST", "",
+    ]).encode("utf-8")
+    master = NL.join([
+        "#EXTM3U",
+        '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360,CODECS="avc1.4d401d"',
+        "tmedia.m3u8",
+        "",
+    ]).encode("utf-8")
+    routes = {"/hls/tmaster.m3u8": (master, "application/vnd.apple.mpegurl"),
+              "/hls/tmedia.m3u8": (media, "application/vnd.apple.mpegurl")}
+    for i, sg in enumerate(segs):
+        routes[f"/hls/tseg{i}.ts"] = (sg, "video/mp2t")
+    return routes, b"".join(segs)
 
 
 def build_pages(port):
@@ -257,19 +289,23 @@ def main():
     PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8199
     SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 512 * 1024
     ready = sys.argv[3] if len(sys.argv) > 3 else None
-    global PAGES, MEDIA, HLS, ENC_EXPECT, DOC_TEXT
+    global PAGES, MEDIA, HLS, ENC_EXPECT, TS_EXPECT, DOC_TEXT
     PAYLOAD = make_payload(SIZE)
     MEDIA = build_media()
     HLS = build_hls()
     enc_routes, enc_expect, _k = build_enc_hls()
     HLS.update(enc_routes)
     ENC_EXPECT = enc_expect
+    ts_routes, ts_expect = build_real_ts_hls()
+    HLS.update(ts_routes)
+    TS_EXPECT = ts_expect
     PAGES = build_pages(PORT)
     DOC_TEXT = b"not a media resource -- negative control for webRequest sniffing" + bytes([10])
     SHA = hashlib.sha256(PAYLOAD).hexdigest()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     line = (f"SERVER_READY port={PORT} sha256={SHA} size={SIZE} "
-            f"enc_sha256={hashlib.sha256(ENC_EXPECT).hexdigest()} enc_size={len(ENC_EXPECT)}")
+            f"enc_sha256={hashlib.sha256(ENC_EXPECT).hexdigest()} enc_size={len(ENC_EXPECT)} "
+            f"ts_sha256={hashlib.sha256(TS_EXPECT).hexdigest()} ts_size={len(TS_EXPECT)}")
     print(line, flush=True)
     if ready:
         pathlib.Path(ready).write_text(line + "\n", encoding="utf-8")

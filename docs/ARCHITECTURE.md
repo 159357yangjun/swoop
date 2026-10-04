@@ -3252,3 +3252,41 @@ fixture 由 `disk_e2e_server.py::build_enc_hls()` 本机生成，三条设计决
 
 **步骤 6（真实视频站）没有执行**：它必然走公网第三方站点，与本项目一直遵守的隔离策略冲突，
 且我没有得到"访问外部站点"的授权。停在这里等指令，不擅自跑。
+
+### 2026-10-04 13:2x（第 49 条）— 步骤 B：真 MPEG-TS 载荷 ⇒ **产品 concat 后仍是合法 TS**（结构层），播放性明确不声称
+
+零公网。`tools/ts_fixture.py` 自己生成真 TS（PAT/PMT/H.262 流、PES 跨包、每片恰 60×188=11280 字节），
+并自带一个**独立判读器** `audit_ts()`。为什么不能沿用伪 TS：伪 TS 只能证"字节搬运对"，
+证不了"拼接点之后还是合法流"——TS 的 PES 可以跨包，所以只要任一分片长度不是 188 的整数倍，
+接缝之后的 sync 全部错位；这是个真实失败模式，必须能被测出来。
+
+**读数（档 `docs/hls-realts-stepB-pass-1004.txt`）**
+```
+[popup] 行=tmaster.m3u8 …· M3U8 || tseg2.ts …· 11 KB · TS || tseg1.ts … || tseg0.ts …
+[GUI] 真TS任务终态行='#2000002\t已完成\ttmaster.m3u8\thttp://127.0.0.1:8272/hls/tmaster.m3u8'
+[期望] size=33840 sha256 前16=328cc750e4c51626（fixture 侧独立算）
+[字节核对] 产物 == 三段真TS拼接 = True
+[结构判读] packets=180 residual=0 sync_ok=True PAT=True PMT=True vidPID=256 PCR跨度=4.0s errors=无
+```
+⇒ 拼接路径在真 TS 上正确：包边界对齐、PSI 可解析、视频 PID 提取到 256、PCR 跨度 4.0s
+与 `#EXTINF 2.0×3` 声明一致。
+
+**判读器先自证再当证人**（本会话反复踩的坑，这次前置做掉）：
+`python tools/ts_fixture.py --selftest` ⇒ 正例通过、两个负例（改坏某包 sync / 截掉 3 字节）都失败。
+再加一条针对本轮问题的反例：**中间分片少 5 字节** ⇒
+```
+对照：三片对齐拼接        packets=180 residual=0   sync_ok=True  PCR跨度=4.0s      errors=无
+注入：中间片少 5 字节     packets=179 residual=183 sync_ok=False PCR跨度=64776.965s errors=57 包 sync/afc 异常
+```
+⇒ 判读器确实能区分"接缝对齐"与"接缝错位"，所以上面那条 VERDICT 不是空断言。
+
+**明确不声称的部分**：本机没有 ffprobe/ffmpeg/解码库，且不装软件 ⇒ **"能不能真的播放"这一条不能由这套工具说**。
+这里证的是更窄的结构性合法（包对齐 + PSI 可解析 + PCR 单调）。要补播放性只有两条路：
+用户手动用播放器打开一次，或授权引入一个本地解码通道。
+
+**过程中我自己写坏的三处（都已修，逐条记）**：
+① TS header 位序错（AFC 写在 bit0-1 而非 bit4-5）⇒ 所有包 afc=0，正例全红；
+② PMT 判读漏了 `pointer_field` 那一层偏移，且字段索引按 section 起点重算错过一次 ⇒ `vidPID` 恒 None
+   ——典型的"看起来能跑但字段全空"的半坏自检；
+③ 服务器自报行加了 `ts_sha256/ts_size` 之后，旧代码 `split("enc_size=")[1]` 没接 `.split()[0]`
+   ⇒ 把后续字段整串吃进 int() 崩掉。已统一成 `field(name, cast)` 取值。

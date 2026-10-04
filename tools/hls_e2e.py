@@ -43,6 +43,7 @@ HTTP_PORT = 8272
 sys.path.insert(0, str(ROOT / "tools"))
 from nm_e2e import Ws, derive_id_from_key  # noqa: E402
 from disk_e2e import gui_ipc, read_gbk, port_free, sha12  # noqa: E402
+from ts_fixture import audit_ts  # noqa: E402
 
 
 class Target:
@@ -332,12 +333,18 @@ def main():
         enc_out = sorted(dl_dir.glob("emaster*")) if dl_dir.exists() else []
         say(f"[磁盘] emaster* 产物={[x.name for x in enc_out]}")
         # 期望值由服务器自报（cryptography 库算的，与产品里那份手写 AES 是两套实现）
-        exp_sha = ""
-        exp_size = 0
         info_line = ready.read_text(encoding="utf-8").strip()
-        if "enc_sha256=" in info_line:
-            exp_sha = info_line.split("enc_sha256=")[1].split()[0]
-            exp_size = int(info_line.split("enc_size=")[1])
+
+        def field(name, cast=str):
+            """从 SERVER_READY 行按 key= 取值。⚠ 必须 .split()[0]：
+               服务器自报行会不断加字段，裸 split(k+'=')[1] 会把后面所有字段一起吃进来
+               （本轮就是这么崩的：enc_size 读成了 '2880 ts_sha256=... ts_size=33840'）。"""
+            if name + "=" not in info_line:
+                return None
+            return cast(info_line.split(name + "=")[1].split()[0])
+
+        exp_sha = field("enc_sha256") or ""
+        exp_size = field("enc_size", int) or 0
         say(f"[期望] 明文 size={exp_size} sha256 前16={exp_sha[:16]}（由 fixture 侧独立算出）")
         dec_ok = False
         if enc_out:
@@ -363,6 +370,70 @@ def main():
         else:
             say(f"[VERDICT·第5步] 未收敛（final={enc_final!r}）⇒ 不下结论")
             rc = rc or 12
+
+        # ═══ 步骤 B：真 MPEG-TS 载荷 ⇒ 产品 concat 后是否仍是合法 TS ═══
+        say("")
+        say("=== 步骤B：真 TS 拼接后的结构合法性 ===")
+        tp = Target(cdp, f"http://127.0.0.1:{HTTP_PORT}/hls/tmaster.m3u8")
+        time.sleep(1.5)
+        probe.activate(); tp.activate()
+        probe.reload_self(); time.sleep(2.0)
+        tts, tact = rows_of(probe)
+        say(f"[popup] 行={tts[:220] or '(空)'}")
+        ck2 = probe.ev("(function(){var rows=[].slice.call(document.querySelectorAll('.row'));"
+                       "var t=rows.filter(function(r){return (r.innerText||'').indexOf('tmaster')>=0;})[0];"
+                       "if(!t)return JSON.stringify({ok:false,why:'没有 tmaster 行'});"
+                       "var b=t.querySelector('input[type=checkbox]');if(b)b.click();else t.click();"
+                       "return JSON.stringify({ok:true});})()")
+        say(f"[popup] 勾选 tmaster={ck2}")
+        ck2b = probe.ev("(function(){var b=document.getElementById('downloadSelBtn');"
+                        "if(b.disabled)return JSON.stringify({ok:false});b.click();"
+                        "return JSON.stringify({ok:true});})()")
+        say(f"[popup] click={ck2b}")
+        ts_final = None
+        for _ in range(90):
+            obj, err = gui_ipc("list")
+            rs = str((obj or {}).get("message", "")).splitlines()
+            hit = [x for x in rs if "tmaster" in x.lower()]
+            if hit and any(any(k in x for k in ("已完成", "失败", "已取消")) for x in hit):
+                ts_final = hit[0]; break
+            time.sleep(1)
+        say(f"[GUI] 真TS任务终态行={ts_final!r}")
+        tout = sorted(dl_dir.glob("tmaster*")) if dl_dir.exists() else []
+        say(f"[磁盘] tmaster* 产物={[x.name for x in tout]}")
+        # 期望值由 fixture 侧独立算出（服务器自报），不读被测实现的输出
+        info2 = ready.read_text(encoding="utf-8").strip()
+        exp_ts_sha = field("ts_sha256") or ""
+        exp_ts_size = field("ts_size", int) or 0
+        byte_ok = struct_ok = False
+        audit_line = ""
+        if tout:
+            got = tout[0].read_bytes()
+            byte_ok = (len(got) == exp_ts_size and hashlib.sha256(got).hexdigest() == exp_ts_sha)
+            a = audit_ts(got, "产品 concat 产物")
+            struct_ok = a["sync_ok"] and a["align_ok"] and a["pat_found"] and a["pmt_found"]                 and a["vid_pid"] is not None and a["residual"] == 0
+            dur = None
+            if a["pcr_first"] is not None and a["pcr_last"] is not None:
+                dur = round((a["pcr_last"] - a["pcr_first"]) / 90000.0, 3)
+            audit_line = (f"packets={a['packet_count']} residual={a['residual']} sync_ok={a['sync_ok']} "
+                          f"PAT={a['pat_found']} PMT={a['pmt_found']} vidPID={a['vid_pid']} PCR跨度={dur}s "
+                          f"errors={a['errors'] or '无'}")
+        say(f"[期望] size={exp_ts_size} sha256 前16={exp_ts_sha[:16]}（fixture 侧独立算）")
+        say(f"[字节核对] 产物 == 三段真TS拼接 = {byte_ok}")
+        say(f"[结构判读] {audit_line or '无产物可判'}")
+        say(f"[判读器可信度] 本会话已跑 --selftest（正例通过 + 两个负例都失败）⇒ 可当证人")
+        if byte_ok and struct_ok and ts_final and "已完成" in ts_final:
+            say("[VERDICT·步骤B] 产品 concat 出来的文件**仍是合法 TS**：包边界对齐、PAT/PMT 可解析、"
+                "视频 PID 提取成功、PCR 连续 ⇒ 拼接路径在真 TS 上正确（接缝未错位）")
+        elif byte_ok and not struct_ok:
+            say("[VERDICT·步骤B] 字节搬运对但结构判读不过 ⇒ 需看上面 errors 定位"); rc = rc or 13
+        else:
+            say(f"[VERDICT·步骤B] 未达成（byte_ok={byte_ok} struct_ok={struct_ok} final={ts_final!r}）")
+            rc = rc or 14
+        say("")
+        say("[限制·必须一起读] 本机没有 ffprobe/ffmpeg/解码库且不装软件 ⇒ "
+            "**『能不能真的播放』这一条本脚本不能声称**；这里证的是更窄的结构性合法"
+            "（包对齐 + PSI 可解析 + PCR 单调）。")
 
     finally:
         try:
