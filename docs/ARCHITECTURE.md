@@ -3086,3 +3086,41 @@ popup 是在**自己加载时**用 `tabs.query({active:true,currentWindow:true})
 
 **仍未验**：popup 的像素证人（本轮读的是 DOM innerText，不是屏幕截图）；右键菜单发送路径；
 `downloadWithOptions`（另存目录/画质选择卡片）；HLS/m3u8 与 ffmpeg 自愈；真视频站。
+
+### 2026-10-04 00:0x（第 45 条）— 单轮 capstone 闭合 **+ 一条真实产品缺陷被它逼出来**
+
+**(a) capstone 绿**（档 `docs/sniff-capstone-pass-1004.txt`）——同一轮里不再跨档案拼接：
+```
+[capstone] 任务进入『已完成』=True 行=['#1\t已完成\tdom.mp4\thttp://127.0.0.1:8252/media/dom.mp4']
+[capstone] 本轮落盘的 dom.mp4=1 个（本轮新建）；.idmtmp 残留=0
+[capstone] size 200012 == 源 200012 : True
+[capstone] sha256 前16 267989ec01812b90 == 源 267989ec01812b90 : True
+[CAPSTONE] 单轮闭合：网页识别 → popup → 点击 → host → GUI → engine → disk 且 size/SHA256 与服务器源一致
+```
+⇒ 现在可以严格写：**网页识别 → popup → Native Messaging → GUI → HTTP engine → disk 已完整观测级打通**。
+两处取证纪律值得记：① 源指纹是**当场向测试服务器取再算**，不是抄上一轮档案常量；
+② "本轮新落的"必须在**点击之前**采 mtime 基线——晚一步采会把本轮自己写的文件当成"点击前就在"，
+我第一版就是这么假红的（缺项 [1,3,4]）。另纠正一个测具假设：GUI 默认下载目录走
+`QStandardPaths::DownloadLocation`→注册表（`settings.cpp:16`），**不随 APPDATA 隔离**，
+所以证人目录是 `%USERPROFILE%\Downloads`，不在 work 之内；在 work 里找当然永远找不到。
+
+**(b) 真缺陷：MV3 service worker 冷启动窗口内的请求会被 webRequest 漏掉。**
+连跑 7 遍 A 面，3 遍 popup 里没有 `network.mp4`。加了判别式探针后才分得清成因：
+```
+第2遍 storage.session 直读={"keys":0,"urls":[]}                       ← SW 还没醒，什么都没写
+      归因探针（SW 内主动再 fetch 一次）={"status":200,"urls":["…network.mp4"]}  ← 立刻抓到
+第3遍 storage.session 直读={"keys":1,"urls":["…favicon.ico"]}          ← favicon 抓到了
+      归因探针=…{"urls":["…favicon.ico","…network.mp4"]}                ← 补一次就有
+```
+⇒ **不是 popup 显示竞态**（storage 里本来就没有），也不是 URL 正则问题（同一个 URL 补请求就命中）；
+是**页面加载初期扩展的 service worker 尚未注册好监听**，那一段时间里的请求永久缺席。
+`background.js:151` 的 `onBeforeRequest.addListener` 写在 SW 顶层，MV3 下 SW 空闲即被杀、
+下次事件才重新拉起——重新拉起的时机就是丢消息的窗口。
+**修法方向（未做，属产品改动，等点头）**：popup/content 打开时主动向 background 要一次
+"当前页资源的补扫"（用 `chrome.webRequest.search` 不存在，只能靠 content script 上报 +
+`performance.getEntriesByType('resource')` 回填），或按官方建议给 SW 保活/改用 `declarativeNetRequest`。
+**本轮没有为了让 capstone 绿而放宽 A 面判据**：`[总结]` 现在把两者拆开报，
+A 面偶发失败单独印「已知缺陷·复现一次」，不进 capstone 的通过条件。
+
+**(c) 清理**：E2E 会在用户真实 `Downloads` 里留下 `dom.mp4`（这是取证路径本身）。
+每轮跑前删、跑后核，确认大小与服务器 media 逐字节相等才认定是我的产物；未动用户其它文件。

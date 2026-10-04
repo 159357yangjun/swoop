@@ -50,7 +50,7 @@ HTTP_PORT = 8252
 
 sys.path.insert(0, str(ROOT / "tools"))
 from nm_e2e import Ws, derive_id_from_key  # noqa: E402
-from disk_e2e import gui_ipc, read_gbk, port_free, sha12  # noqa: E402
+from disk_e2e import gui_ipc, read_gbk, port_free, sha12, sha256_file  # noqa: E402
 
 
 def http_json(path, timeout=5):
@@ -149,7 +149,11 @@ def main():
         say(f"[测试源] {ready.read_text(encoding='utf-8').strip()}")
 
         # GUI 起在**默认数据根**（产品自己的 IPC 日志证人）
-        env = dict(os.environ, QT_FORCE_STDERR_LOGGING="1", QT_ASSUME_STDERR_HAS_CONSOLE="1")
+        # GUI 用**隔离数据根**跑：它的默认下载目录由 Settings 派生自 APPDATA/LOCALAPPDATA，
+        # 不隔离就只能去用户真实下载目录里找文件（跨轮污染 + capstone 无法界定"本轮落的"）。
+        gui_appdata = work / "gui-appdata"; (gui_appdata / "local").mkdir(parents=True)
+        env = dict(os.environ, APPDATA=str(gui_appdata), LOCALAPPDATA=str(gui_appdata / "local"),
+                   QT_FORCE_STDERR_LOGGING="1", QT_ASSUME_STDERR_HAS_CONSOLE="1")
         app = subprocess.Popen([str(APP_EXE)], cwd=str(ROOT / "build"), env=env,
                                stdout=open(guilog, "wb"), stderr=subprocess.STDOUT)
         started = False
@@ -220,8 +224,25 @@ def main():
         atab0 = pop_a.ev("(async()=>{const t=await chrome.tabs.query({active:true,currentWindow:true});"
                          "return JSON.stringify((t||[]).map(x=>String(x.url).slice(0,52)))})()", await_promise=True)
         say(f"[扩展] 刷新 popup 后它眼里的 active tab={atab0} ← 必须是被测页")
+        # 判别式：popup 空列表有两种成因——(a) webRequest 真没抓到；(b) SW 写 storage.session
+        #   与 popup 读取之间是竞态。直接读 extension storage 就能把两者分开（本轮实测偶发 1/3 空，
+        #   必须先定性是哪一种，否则"通过"里混着一次没跑出来的样本）。
+        stored_a = pop_a.ev("(async()=>{const v=await chrome.storage.session.get(null);"
+                            "const k=Object.keys(v);"
+                            "return JSON.stringify({keys:k.length,"
+                            "urls:k.reduce((a,x)=>a.concat((v[x]||[]).map(r=>String(r.url).slice(-30))),[])})})()",
+                            await_promise=True)
+        say(f"[扩展] storage.session 直读={str(stored_a)[:200]}")
+        # 归因探针（只印读数、不进退码）：SW 醒来后再主动请求一次同一个 URL。
+        probe = pop_a.ev("(async()=>{try{const r=await fetch('http://127.0.0.1:%d/media/network.mp4',{cache:'no-store'});"
+                         "await r.blob();"
+                         "const v=await chrome.storage.session.get(null);const k=Object.keys(v);"
+                         "return JSON.stringify({status:r.status,"
+                         "urls:k.reduce((a,x)=>a.concat((v[x]||[]).map(z=>String(z.url).slice(-30))),[])});"
+                         "}catch(e){return 'FETCH_ERR '+e}})()" % HTTP_PORT, await_promise=True)
+        say(f"[归因探针] SW 内主动再请求一次={str(probe)[:220]}")
         rows_a = None
-        for _ in range(24):
+        for _ in range(30):
             r = pop_a.ev("(function(){return JSON.stringify({rows:[].slice.call(document.querySelectorAll('.row'))"
                          ".map(function(x){return (x.innerText||'').replace(/\\s+/g,' ').trim().slice(0,120);}),"
                          "body:(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,400)});})()")
@@ -320,6 +341,13 @@ def main():
             say("[VERDICT] 没能定位到真实控件 ⇒ 不许退回手调 API，本轮判失败"); rc = rc or 9
         else:
             ipc_before = len([x for x in read_gbk(guilog).splitlines() if "IPC 请求: add" in x])
+            # ⚠ "本轮新落的"这个判据要在**点击之前**取基线：晚一步取就可能把本轮自己写的
+            #   文件当成"点击前就在"，于是 fresh 永远 False（上一轮的 capstone 就是这么假红的）。
+            dl_default = pathlib.Path(os.path.expanduser("~")) / "Downloads"
+            f_expected = dl_default / "dom.mp4"
+            pre_exists = f_expected.exists()
+            pre_mtime = f_expected.stat().st_mtime_ns if pre_exists else None
+            say(f"[capstone 基线] 点击前 {f_expected} 存在={pre_exists} mtime_ns={pre_mtime}")
             clk = pop_b.ev("(function(){var b=document.getElementById('downloadSelBtn');"
                            "if(b.disabled)return JSON.stringify({ok:false,why:'按钮是灰的'});"
                            "b.click();return JSON.stringify({ok:true});})()")
@@ -349,11 +377,79 @@ def main():
                 say("[VERDICT] popup→send 这一段没跑通（缺项见上）"); rc = rc or 10
             else:
                 say("[VERDICT] 链条接上：网页识别 → popup 显示 → 真点击 → host → GUI 收下")
+
+                # ════════ 单轮 capstone：同一轮里把后半段也证完 ════════
+                # 之前"网页→点击"与"落盘+SHA256"分别记在 491d747 / b1145d1 两份档案里，
+                # 要写"打开网页 → 识别 → 点下载 → 文件正确落盘"就得靠跨档案拼接。
+                # 这一段把两者闭成一条连续链：等终态 → 文件存在 → 无 .idmtmp → size/sha256 == 源。
+                done = []
+                for _ in range(90):
+                    rows3, _ = task_rows_guard()
+                    done = [x for x in rows3 if "dom.mp4" in x.lower() and "已完成" in x]
+                    if done:
+                        break
+                    time.sleep(1)
+                say(f"[capstone] 任务进入『已完成』={bool(done)} 行={done[:1]}")
+                # ⚠ 这里**不能**假设文件落在哪个目录：popup 的批量发送不带 saveDir
+                #   （background.js sendToIdmNext 的 saveDir 传空 ⇒ 桌面端用自己的默认目录）。
+                #   所以证人来源是 GUI 自己的任务行 + 只在**本轮工作目录内**找同名文件；
+                #   若默认目录不在 work 之下，这一项就该判"未闭合"而不是去全盘搜。
+                # ⚠ GUI 的默认下载目录来自用户 profile / 注册表，**不随 APPDATA 隔离**
+                #   （实测落到 %USERPROFILE%\Downloads）。所以"只在 work 里找"会永远找不到，
+                #   那是测具假设错了，不是产品没落盘。正确做法：向**GUI 自己**问这个任务的保存目录
+                #   （ipc_server 的 info 命令带路径），只在那一个目录里取证。
+                default_dl = dl_default
+                candidates = []
+                fresh_reason = ""
+                for _ in range(90):
+                    rows4, _ = task_rows_guard()
+                    done_now = [x for x in rows4 if "dom.mp4" in x.lower() and "已完成" in x]
+                    if done_now and f_expected.exists():
+                        st = f_expected.stat()
+                        fresh = (not pre_exists) or (st.st_mtime_ns != pre_mtime)
+                        if fresh:
+                            candidates = [f_expected]
+                            fresh_reason = ("本轮新建" if not pre_exists else "mtime 已变")
+                            break
+                    time.sleep(1)
+                tmps = list(default_dl.glob("dom.mp4.idmtmp"))
+                say(f"[capstone] 取证据目录={default_dl}（GUI 默认下载目录：QStandardPaths::DownloadLocation "
+                    f"走注册表，不随 APPDATA 隔离 ⇒ settings.cpp:16）")
+                say(f"[capstone] 本轮落盘的 dom.mp4={len(candidates)} 个（{fresh_reason or '未认定为本轮'}）；"
+                    f".idmtmp 残留={len(tmps)}")
+                caps = [bool(done), bool(candidates), not tmps]
+                if candidates:
+                    f = candidates[0]
+                    got_size, got_sha = f.stat().st_size, sha256_file(f)
+                    # 源指纹**当场向服务器取**（不是抄档案里的常量）：HEAD/GET 该路径后现算
+                    with urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT}/media/dom.mp4", timeout=15) as rr:
+                        blob = rr.read()
+                    src_size, src_sha = len(blob), hashlib.sha256(blob).hexdigest()
+                    ok_size = got_size == src_size
+                    ok_sha = got_sha == src_sha
+                    caps += [ok_size, ok_sha]
+                    say(f"[capstone] size {got_size} == 源 {src_size} : {ok_size}")
+                    say(f"[capstone] sha256 前16 {got_sha[:16]} == 源 {src_sha[:16]} : {ok_sha}")
+                else:
+                    say("[capstone] 没有最终文件可比对 ⇒ size/sha256 两项无从成立")
+                    caps += [False, False]
+                if all(caps):
+                    say("[CAPSTONE] 单轮闭合：网页识别 → popup → 点击 → host → GUI → engine → disk "
+                        "且 size/SHA256 与服务器源一致")
+                else:
+                    say(f"[CAPSTONE] 未闭合，缺项={[i for i, c in enumerate(caps) if not c]}"
+                        "（0=已完成 1=文件存在 2=无 idmtmp 3=size 4=sha256）")
+                    rc = rc or 12
                 say("")
-                say(f"[总结] A 面 popup 列出 network.mp4={bool(listed)}｜阴性未吞={not bool(neg)}｜"
-                    f"B 面动态发现={bool(post)}｜真点击送达={bool(add_lines)}")
-                say(f"[措辞] 只到 'extension runtime/native host → GUI → HTTP engine → disk'；"
-                    f"本轮新证的是【网页识别 → popup → 点击】这一段")
+                # A 面单独报，不并进 capstone 的通过条件：实测它是**偶发**的（SW 冷启动窗口内
+                #   页面自己发起的请求会漏掉 webRequest，见 §7 第45条）。把它和"这一轮闭合没闭合"
+                #   混成一个布尔，会把一条真实的产品缺陷洗成绿灯。
+                say(f"[总结] capstone(单轮闭合)={'全绿' if all(caps) else '有缺项'}｜"
+                    f"A 面本轮是否列出 network.mp4={bool(listed)}（偶发，另计）｜"
+                    f"阴性未吞={not bool(neg)}｜B 面动态发现={bool(post)}｜真点击送达={bool(add_lines)}")
+                if not listed:
+                    say("[已知缺陷·复现一次] MV3 SW 冷启动窗口内的请求未被 webRequest 捕获 ⇒ "
+                        "该标签页资源列表少一项；不影响本轮 capstone 结论，但它是产品行为，留档不掩盖。")
     finally:
         try:
             if cdp:
@@ -371,6 +467,14 @@ def main():
         print(f"[读数档] {out}")
         print(f"[工作目录] {work}")
     return rc
+
+
+def media_source_of(path):
+    """当场向测试服务器要那一份媒体，算它的 size/sha256 ⇒ 源指纹是**本轮实测**，不是抄档案。"""
+    import urllib.request as _u
+    with _u.urlopen(f"http://127.0.0.1:{HTTP_PORT}{path}", timeout=20) as r:
+        blob = r.read()
+    return len(blob), hashlib.sha256(blob).hexdigest()
 
 
 def task_rows_guard():

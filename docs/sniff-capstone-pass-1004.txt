@@ -1,0 +1,43 @@
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HEAD=491d747
+[身份] app_exe_sha12=8ef5f379685f
+[测试源] SERVER_READY port=8252 sha256=3dd34634f87b65cb18a825cecbe5ff8c0ee43d4ac9a5e3d8d5940a08cbea0786 size=524288
+[GUI] pid=21140 已监听
+[浏览器] Edg/154.0.4258.53 ｜[扩展] key 现算 ID=fmnehlhldcoknecihnlbbcmhpaaapmbp
+
+=== A 面：webRequest 嗅探 ===
+[网页] 请求发生次数={"net":1,"doc":1}  ← net=mp4 请求 doc=text/plain 请求
+[扩展] popup 内 chrome.runtime.id='fmnehlhldcoknecihnlbbcmhpaaapmbp' ｜与 key 派生一致=True
+[扩展] popup 眼里的 active tab=["chrome-extension://fmnehlhldcoknecihnlbbcmhpaaapmbp/"]  ← 必须是被测页而不是 popup 自己
+[扩展] 刷新 popup 后它眼里的 active tab=["http://127.0.0.1:8252/network.html"] ← 必须是被测页
+[扩展] storage.session 直读={"keys":1,"urls":["p://127.0.0.1:8252/favicon.ico"]}
+[归因探针] SW 内主动再请求一次={"status":200,"urls":["p://127.0.0.1:8252/favicon.ico","7.0.0.1:8252/media/network.mp4"]}
+[popup] 行数=1 含 network.mp4 的行数=0
+[阴性] popup 把 document.txt 列成资源了吗=False（必须 False）
+
+=== B 面：scanMediaElements + MutationObserver ===
+[网页] 插入前 DOM 状态={"videos":0,"inserted":0}（videos 必须为 0）
+[popup] 插入前含 dom.mp4 的行数=0（必须 0）
+[网页] 动态插入完成={"videos":1,"inserted":1791086779441}
+[popup] 插入后含 dom.mp4 的行数=1
+        dom.mp4 127.0.0.1:8252 · 195 KB · MP4
+[popup] 再等 4s 后行数=1（不无限增长：True）
+
+=== 第三步：真实 popup DOM 点击 → send ===
+[前置核对] popup 眼里的 active tab=["http://127.0.0.1:8252/dom.html"]
+[popup] 勾选目标行={"ok":true,"usedCheckbox":true,"text":"dom.mp4127.0.0.1:8252· 195 KB· MP4"}
+[popup] 发送按钮存在={"ok":true,"disabled":false,"label":"下载 (1)"}
+[capstone 基线] 点击前 C:\Users\yyyy\Downloads\dom.mp4 存在=False mtime_ns=None
+[popup] 实际 click 发送按钮={"ok":true}
+[popup] 点击后页面文案=IDM Next 已连接 127.0.0.1:8252 默认顺序 按类型 按大小 按名称 全部 1 视频 1 音频 0 图片 0 文件 0 dom.mp4 127.0.0.1:8252 · 195 KB · MP4 全选 已选 1 项 队列 (1) 下载 (1) 正在发送 1 个资源… 设置 自动接管浏览器下载 命中视频 / 音频 / 压
+[GUI] 新增『IPC 请求: add』行数=1
+        [INFO] "IPC 请求: add → 成功（排队 -1ms，处理 62ms，送达=1，回话时客户端=在）"
+[GUI] 任务列表含 dom.mp4 的行=['#1\t已完成\tdom.mp4\thttp://127.0.0.1:8252/media/dom.mp4']
+[VERDICT] 链条接上：网页识别 → popup 显示 → 真点击 → host → GUI 收下
+[capstone] 任务进入『已完成』=True 行=['#1\t已完成\tdom.mp4\thttp://127.0.0.1:8252/media/dom.mp4']
+[capstone] 取证据目录=C:\Users\yyyy\Downloads（GUI 默认下载目录：QStandardPaths::DownloadLocation 走注册表，不随 APPDATA 隔离 ⇒ settings.cpp:16）
+[capstone] 本轮落盘的 dom.mp4=1 个（本轮新建）；.idmtmp 残留=0
+[capstone] size 200012 == 源 200012 : True
+[capstone] sha256 前16 267989ec01812b90 == 源 267989ec01812b90 : True
+[CAPSTONE] 单轮闭合：网页识别 → popup → 点击 → host → GUI → engine → disk 且 size/SHA256 与服务器源一致
+
+[总结] A 面 popup 列出 network.mp4=False｜阴性未吞=True｜B 面动态发现=True｜真点击送达=True｜capstone=全绿
