@@ -3357,3 +3357,34 @@ content script 是**由扩展注入**的 ⇒ 扩展没在册时 content script �
 reuse 缺失 1/10、fresh 缺失 10/10。第一次跑的汇总数字与第二次逐字相同，所以这不是单次噪声。
 （顺记一次自己的顺序错误：我在写完整 §7 第 51 条**之前**就 `rm -rf` 了实验目录，
 导致要归档时发现原始读数已丢，只能重跑两面取回 ⇒ 落盘顺序应是"先归档、再清理"。）
+
+### 2026-10-04 13:1x（第 52 条）— A 面修复落地：**content script resource-timing 回填**，fresh 面 6/6 → 0 缺失
+
+先让验收门红（`tools/a_gate.py`，fresh 面）：
+```
+[A-GATE] 有效轮=6 A面缺失=6 SETUP-INVALID=0 退码=1      ← 修复前原文
+```
+改 `browser-extension/content.js`：新增 `scanResourceTiming()`，把"页面自己发起过、DOM 里没有对应元素"
+的媒体请求从 `performance.getEntriesByType('resource')` 补报进同一条 `reportMedia` 通道；
+并在首扫之后补两次延迟重扫（1.5s / 4s）——媒体 fetch 常在首扫之后发生且**不动 DOM**，
+没有这两次就仍然漏。修复后：
+```
+[A-GATE] 有效轮=6 A面缺失=0 SETUP-INVALID=0 退码=0
+```
+
+**过程中我的第一版修复引入了一条真噪音（被自己的另一面当场抓到）**：HLS 那几轮的
+`勾选 emaster={"ok":false,"why":"没有 emaster 行"}` —— 回填把 `emedia.m3u8`、`key.bin`、`seg*.ts`
+这些**流的内部构件**列进了资源列表，而顶层 `emaster.m3u8` 是直接导航的文档、不进 resource timing，
+于是列表里只剩噪音。⇒ 加过滤：排除 `.m3u8/.mpd/.key/.m3u`、`key.bin|/key/|?key=`、以及 `.ts/.m2ts`
+（`.ts` 按 HLS 分片处理，整条流交给桌面端 HLS 通道，不让用户下一堆碎片）。修完三面复算全绿。
+
+**没被这条修复覆盖的半个场景（明写，不含糊）**：URL 无扩展名的流媒体仍然补不到——
+resource timing 没有响应头，拿不到 `Content-Type`/`Content-Length`，那是 `onHeadersReceived` 独有的能力。
+所以回填治的是"首启窗口内可凭扩展名识别的资源"，不是全部嗅探。
+
+**顺带一个净收益**：回填带 `transferSize` ⇒ 列表里的体积不再是 `-1`。
+实测同一 URL：修复前 `network.mp4 …MP4`（无大小），修复后 `network.mp4 · 196 KB · MP4`。
+
+回归全套（都跑过）：sniff A/B/阴性 + 单轮 capstone（size/SHA256 与服务器源一致）全绿、
+HLS 未加密降级 + AES-128 `fetchKey` 承重 + 真 TS 结构合法 全绿、七道文本门 rc=0。
+`src/` 一行未动（改动只在 `browser-extension/content.js` 与 `tools/`）。

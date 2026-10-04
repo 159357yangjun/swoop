@@ -391,6 +391,55 @@
     }
 
     /**
+     * 回填：把**页面自己发起过、但 DOM 里没有对应元素**的媒体请求补报上去。
+     *
+     * 为什么需要它（§7 第 51 条实测）：扩展刚注册后的第一个会话里，background 的
+     * `webRequest.onBeforeRequest` 收不到事件（fresh profile 面 6/6 复现：请求确实发生、
+     * tabId 正常、API 存在，而 storage.session 为空）。DOM 通道是通的，所以用这条能通的通道
+     * 补上那条哑掉的通道。**URL 无扩展名的流媒体仍补不到**——resource timing 没有响应头，
+     * 拿不到 Content-Type；那半个场景只能等 webRequest 活过来（第二次导航起就正常）。
+     */
+    /* 回填的过滤判据：只补"用户会想单独下载的东西"，不补 HLS 的内部构件。
+       两条排除各有实据：
+         · 子播放列表 / 密钥 / 分片是**同一条流的组成部分**，列出来只会让用户在列表里
+           看到 emedia.m3u8、key.bin、seg0.ts 这种噪音（本轮实测就被这样淹过一次：
+           直接导航进的 emaster.m3u8 是顶层文档、不进 resource timing，于是列表里只剩内部件）。
+         · `.ts` 有两义：MPEG-TS 分片 vs MPEG 传输流文件。这里按"HLS 分片"处理并排除，
+           真要做整条流交给桌面端 HLS 通道（已证可用），而不是让用户下一堆碎片。 */
+    const BACKFILL_SKIP_RE = /\.(m3u8|mpd|key|m3u)(\?|$)/i;
+    const BACKFILL_INTERNAL_RE = /(key\.bin|\/key\/|[?&]key=)/i;
+
+    function scanResourceTiming() {
+        const items = [];
+        let entries = [];
+        try {
+            entries = performance.getEntriesByType('resource') || [];
+        } catch (e) {
+            return items;   // 老浏览器/受限上下文：静默跳过，不影响原有扫描
+        }
+        for (const e of entries) {
+            const url = e.name;
+            if (!url || foundUrls.has(url)) continue;
+            if (BACKFILL_SKIP_RE.test(url) || BACKFILL_INTERNAL_RE.test(url)) continue;
+            const type = inferType(url);
+            // 只补"按扩展名就该被抓到"的那类：与 background 的 FILE_PATTERNS 同一判据。
+            // image 与 ts 都排除 —— 前者是噪音，后者是 HLS 内部构件（见上注释）。
+            if (type === 'image' || type === 'file' && !looksLikeVideo(url)) continue;
+            if (/\.(ts|m2ts)(\?|$)/i.test(url)) continue;
+            foundUrls.add(url);
+            const size = (typeof e.transferSize === 'number' && e.transferSize > 0)
+                ? e.transferSize : -1;
+            items.push({
+                url,
+                type: looksLikeVideo(url) ? 'video' : type,
+                filename: inferFilename(url),
+                size
+            });
+        }
+        return items;
+    }
+
+    /**
      * 主扫描函数
      */
     function scanAll() {
@@ -399,7 +448,8 @@
             ...scanDownloadLinks(),
             ...scanDirectLinks(),
             ...scanImages(),
-            ...scanObjects()
+            ...scanObjects(),
+            ...scanResourceTiming()
         ];
         if (items.length > 0) {
             reportMedia(items);
@@ -411,6 +461,13 @@
 
     // 页面加载完成后首次扫描
     scanAll();
+
+    /* 再补两次延迟扫描：媒体请求常在首扫之后才发出去（fetch/XHR），而这类请求
+       不一定改动 DOM ⇒ 不会触发 MutationObserver。没有这两次，回填只能捞到
+       "比页面更早"的资源，A 面那种"点开后 fetch mp4"的形状仍然会漏。
+       代价是多两次 performance 条目遍历（无 DOM 读写、无网络）。 */
+    setTimeout(scanAll, 1500);
+    setTimeout(scanAll, 4000);
 
     // 使用 MutationObserver 监听 DOM 变化，动态加载的视频也能被抓到
     let debounceTimer = null;

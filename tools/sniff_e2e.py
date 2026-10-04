@@ -445,11 +445,13 @@ def main():
                 #   页面自己发起的请求会漏掉 webRequest，见 §7 第45条）。把它和"这一轮闭合没闭合"
                 #   混成一个布尔，会把一条真实的产品缺陷洗成绿灯。
                 say(f"[总结] capstone(单轮闭合)={'全绿' if all(caps) else '有缺项'}｜"
-                    f"A 面本轮是否列出 network.mp4={bool(listed)}（偶发，另计）｜"
+                    f"A 面本轮是否列出 network.mp4={bool(listed)}（回填后应恒为 True）｜"
                     f"阴性未吞={not bool(neg)}｜B 面动态发现={bool(post)}｜真点击送达={bool(add_lines)}")
                 if not listed:
-                    say("[已知缺陷·复现一次] MV3 SW 冷启动窗口内的请求未被 webRequest 捕获 ⇒ "
-                        "该标签页资源列表少一项；不影响本轮 capstone 结论，但它是产品行为，留档不掩盖。")
+                    # 修复（content.js scanResourceTiming 回填）之后这一项应当不再出现；
+                    # 若再出现说明回填被绕过或失效，是回归信号，不再是"已知缺陷"。
+                    say("[回归信号] A 面又漏了 ⇒ content script 回填失效或被绕过，"
+                        "用 tools/a_gate.py 复算 fresh 面。")
     finally:
         try:
             if cdp:
