@@ -1,0 +1,15 @@
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HEAD=f652488
+[实验面] fresh ｜轮数=10 ｜扩展 ID=fmnehlhldcoknecihnlbbcmhpaaapmbp
+  第 1遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 2遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 3遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 4遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 5遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 6遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 7遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 8遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第 9遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+  第10遍 [缺失] ver=0.3.0 active=["http://127.0.0.1:8296/network.html"] 行数=0
+
+[汇总·fresh] 轮数=10 SETUP-INVALID=0 有效轮里A面缺失=10
+[判别读法] 只有 fresh 面 INVALID 高 ⇒ 自动化时序问题（产品不用改）；两面都高 ⇒ 回头查扩展注册链路；两面都 0 ⇒ 之前的 3 次不是 profile 形状，需另找变量
