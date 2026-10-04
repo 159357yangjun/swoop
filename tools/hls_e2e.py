@@ -292,6 +292,78 @@ def main():
             rc = rc or 9
         if not has_m3u8:
             say("[VERDICT] 第2步未过：扩展没识别出 .m3u8 ⇒ 后面几步都无前提"); rc = rc or 10
+        # ═══ 第 5 步：加密 HLS（fetchKey 分支是否承重）═══
+        say("")
+        say("=== 第5步：AES-128 加密 HLS ===")
+        enc_page = Target(cdp, f"http://127.0.0.1:{HTTP_PORT}/hls/emaster.m3u8")
+        time.sleep(1.5)
+        probe.activate(); enc_page.activate()
+        probe.reload_self(); time.sleep(2.0)
+        etxt, eactive = rows_of(probe)
+        has_enc = "emaster.m3u8" in etxt
+        say(f"[popup] active={eactive[:90]} ｜行={etxt[:200] or '(空)'}")
+        say(f"[判据·识别] popup 列出 emaster.m3u8 = {has_enc}")
+        ck = probe.ev("(function(){var rows=[].slice.call(document.querySelectorAll('.row'));"
+                      "var t=rows.filter(function(r){return (r.innerText||'').indexOf('emaster')>=0;})[0];"
+                      "if(!t)return JSON.stringify({ok:false,why:'没有 emaster 行'});"
+                      "var b=t.querySelector('input[type=checkbox]');if(b)b.click();else t.click();"
+                      "return JSON.stringify({ok:true});})()")
+        say(f"[popup] 勾选 emaster={ck}")
+        eb = probe.ev("(function(){var b=document.getElementById('downloadSelBtn');"
+                      "if(b.disabled)return JSON.stringify({ok:false});b.click();"
+                      "return JSON.stringify({ok:true});})()")
+        say(f"[popup] click={eb}")
+        ipc_b2 = len([x for x in read_gbk(guilog).splitlines() if "IPC 请求: add" in x])
+        enc_final = None
+        enc_lines = []
+        for _ in range(90):
+            obj, err = gui_ipc("list")
+            rs = str((obj or {}).get("message", "")).splitlines()
+            enc_lines = [x for x in rs if "emaster" in x.lower()]
+            if enc_lines and any(any(k in x for k in ("已完成", "失败", "已取消")) for x in enc_lines):
+                enc_final = enc_lines[0]; break
+            time.sleep(1)
+        say(f"[GUI] 加密任务终态行={enc_final!r}")
+        txt3 = read_gbk(guilog)
+        keylog = [x.strip()[:170] for x in txt3.splitlines() if "密钥" in x or "解密" in x or "AES" in x]
+        say(f"[GUI] 密钥/解密相关日志行数={len(keylog)}")
+        for x in keylog[-4:]:
+            say(f"        {x}")
+        enc_out = sorted(dl_dir.glob("emaster*")) if dl_dir.exists() else []
+        say(f"[磁盘] emaster* 产物={[x.name for x in enc_out]}")
+        # 期望值由服务器自报（cryptography 库算的，与产品里那份手写 AES 是两套实现）
+        exp_sha = ""
+        exp_size = 0
+        info_line = ready.read_text(encoding="utf-8").strip()
+        if "enc_sha256=" in info_line:
+            exp_sha = info_line.split("enc_sha256=")[1].split()[0]
+            exp_size = int(info_line.split("enc_size=")[1])
+        say(f"[期望] 明文 size={exp_size} sha256 前16={exp_sha[:16]}（由 fixture 侧独立算出）")
+        dec_ok = False
+        if enc_out:
+            got = enc_out[0].read_bytes()
+            dec_ok = (len(got) == exp_size and hashlib.sha256(got).hexdigest() == exp_sha)
+            say(f"[内容核对] 实际 size={len(got)} ｜逐字节等于期望明文={dec_ok}")
+            if not dec_ok and len(got) == exp_size:
+                same_as_cipher = True
+                for nm in ("eseg0.ts", "eseg1.ts", "eseg2.ts"):
+                    with urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT}/hls/{nm}", timeout=15) as rr:
+                        if got[(("eseg0", "eseg1", "eseg2").index(nm[:5])) * 960:
+                               (("eseg0", "eseg1", "eseg2").index(nm[:5]) + 1) * 960] != rr.read():
+                            same_as_cipher = False
+                say(f"[对照] 产物==密文拼接（即根本没解密）={same_as_cipher}")
+        if enc_final and "已完成" in enc_final and dec_ok:
+            say("[VERDICT·第5步] fetchKey 分支**承重**：拉到 16 字节密钥、纯 C++ AES-128-CBC 解密，"
+                "产物逐字节等于期望明文 ⇒ 无 ffmpeg 也能正确下加密流")
+        elif enc_final and "已完成" in enc_final and not dec_ok:
+            say("[VERDICT·第5步] 标『已完成』但产物不是期望明文 ⇒ **伪成功或 IV/解密错误**，产品缺陷")
+            rc = rc or 11
+        elif enc_final and "失败" in enc_final:
+            say("[VERDICT·第5步] 加密面诚实失败（看上面具名日志判断卡在哪一步）")
+        else:
+            say(f"[VERDICT·第5步] 未收敛（final={enc_final!r}）⇒ 不下结论")
+            rc = rc or 12
+
     finally:
         try:
             if cdp:

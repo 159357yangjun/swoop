@@ -1,0 +1,43 @@
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HEAD=5f1291e app_exe_sha12=8ef5f379685f
+[测试源] SERVER_READY port=8272 sha256=3dd34634f87b65cb18a825cecbe5ff8c0ee43d4ac9a5e3d8d5940a08cbea0786 size=524288 enc_sha256=3bd318be82d3ad5edd04753038523e1674f16750859bcef4203c3296febefdd0 enc_size=2880
+[前置] IDM_DATA_DIR=C:\Users\yyyy\AppData\Local\Temp\idm-hls-9w437g_w\appdata
+[前置] dataDir 下 ffmpeg.exe 存在=False ｜ PATH 上的 ffmpeg=无
+[GUI] pid=7844 已监听
+[浏览器] Edg/154.0.4258.53 ｜[扩展] ID=fmnehlhldcoknecihnlbbcmhpaaapmbp
+[前置] 扩展在册（经 SW target 验证）manifest.version=0.3.0
+
+=== 第2步：识别 .m3u8 ===
+[网页] DOM 状态={"videos":1,"src":"http://127.0.0.1:8272/hls/master.m3u8"}
+[popup] active tab=[{"active":true,"audible":false,"autoDiscardable":true,"discarded":false,"frozen":false,"groupId":-1,"height":
+[popup] 行=master.m3u8 127.0.0.1:8272 · M3U8 || seg2.ts 127.0.0.1:8272 · 7 KB · TS || seg1.ts 127.0.0.1:8272 · 7 KB · TS || seg0.ts 127.0.0.1:8272 · 7 KB · TS || favicon.ico 127.0.0.1:8272 · ICO
+[判据·第2步] popup 列出 master.m3u8 = True
+[扩展] storage.session 内容=["p://127.0.0.1:8272/hls/master.m3u8[video]","http://127.0.0.1:8272/hls/seg2.ts[video]","http://127.0.0.1:8272/hls/seg1.ts[video]","http://127.0.0.1:8272/hls/seg0.ts[video]","http://127.0.0.1:8272/favicon.ico[file]"]
+
+=== 第3步：真点击发送（ffmpeg 缺失面）===
+[popup] 勾选 m3u8 行={"ok":true,"usedCheckbox":true}
+[popup] 按钮={"disabled":false,"label":"下载 (1)"}
+[popup] click={"ok":true}
+[GUI] 新增『IPC 请求: add』=['[INFO] "IPC 请求: add → 成功（排队 -1ms，处理 88ms，送达=1，回话时客户端=在）"']
+[GUI] 任务终态行='#2000000\t已完成\tmaster.m3u8\thttp://127.0.0.1:8272/hls/master.m3u8'
+[GUI] 全部 m3u8 相关行=['#2000000\t已完成\tmaster.m3u8\thttp://127.0.0.1:8272/hls/master.m3u8']
+[具名错误证据] 日志中含 ffmpeg/HLS 字样的行数=1
+        [INFO] "添加 HLS 任务 #2000000: http://127.0.0.1:8272/hls/master.m3u8"
+[磁盘] Downloads 里 master*=['master.m3u8.ts'] ｜ .idmtmp 残留=[]
+[内容核对] 期望 22443 字节 ｜实际 22443 字节 ｜逐字节相等=True
+[磁盘] ffmpeg 是否被准备出来=False（dataDir 内）
+
+[VERDICT] 无 ffmpeg 的降级路径成立且诚实：分片按序拼接成 .ts、内容逐字节正确、任务确为已完成 ⇒ **不是伪成功**。但这同时证明：**FFmpeg 自愈没有被触发**（产品在没有 ffmpeg 时不尝试准备它，直接降级）。
+
+=== 第5步：AES-128 加密 HLS ===
+[popup] active=[{"active":true,"audible":false,"autoDiscardable":true,"discarded":false,"frozen":false,"g ｜行=emaster.m3u8 127.0.0.1:8272 · M3U8 || eseg0.ts 127.0.0.1:8272 · 960 B · TS
+[判据·识别] popup 列出 emaster.m3u8 = True
+[popup] 勾选 emaster={"ok":true}
+[popup] click={"ok":true}
+[GUI] 加密任务终态行='#2000001\t已完成\temaster.m3u8\thttp://127.0.0.1:8272/hls/emaster.m3u8'
+[GUI] 密钥/解密相关日志行数=2
+        [INFO] "HlsDownloader 拉取 AES-128 密钥: http://127.0.0.1:8272/hls/key.bin"
+        [INFO] "HlsDownloader 已获取 16 字节密钥，开始纯 C++ AES-128 解密下载"
+[磁盘] emaster* 产物=['emaster.m3u8.ts']
+[期望] 明文 size=2880 sha256 前16=3bd318be82d3ad5e（由 fixture 侧独立算出）
+[内容核对] 实际 size=2880 ｜逐字节等于期望明文=True
+[VERDICT·第5步] fetchKey 分支**承重**：拉到 16 字节密钥、纯 C++ AES-128-CBC 解密，产物逐字节等于期望明文 ⇒ 无 ffmpeg 也能正确下加密流

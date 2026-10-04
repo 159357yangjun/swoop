@@ -3220,3 +3220,35 @@ GUI 数据根用 `IDM_DATA_DIR` 隔离，前置断言确认 `ffmpeg.exe 存在=F
 
 **仍未验**：加密 HLS（`fetchKey` 分支）、真 MPEG-TS 拼接后的可播放性、`.mp4` 转封装路径、
 公网下载下的自愈成败、真实视频站。A 面 content script 回填按主控排序仍排在 HLS 之后。
+
+### 2026-10-04 12:4x（第 48 条）— 步骤 5：AES-128 加密 HLS **fetchKey 分支承重**（含一条防自欺对照）
+
+fixture 由 `disk_e2e_server.py::build_enc_hls()` 本机生成，三条设计决定都是为了让结论不可伪造：
+· 明文分片长度取 **16 的整数倍**（960B），否则产品会走「跳过解密」分支（`hls_downloader.cpp:483`），测不到解密；
+· **故意不写 `IV=`** ⇒ 强制走产品最容易写错的那条：序号大端作 IV（`segmentIv()`，`:402-413`）；
+· 期望值用 `cryptography` 库现算 ⇒ 与产品里那份手写 AES 是**两套实现**，一致才算证据。
+
+**读数（档 `docs/hls-enc-step5-pass-1004.txt`）**
+```
+[popup] 行=emaster.m3u8 …· M3U8 || eseg0.ts …· 960 B · TS      [判据·识别] = True
+[GUI] 加密任务终态行='#2000001\t已完成\temaster.m3u8\thttp://127.0.0.1:8272/hls/emaster.m3u8'
+[GUI] "HlsDownloader 拉取 AES-128 密钥: http://127.0.0.1:8272/hls/key.bin"
+      "HlsDownloader 已获取 16 字节密钥，开始纯 C++ AES-128 解密下载"
+[内容核对] 实际 size=2880 ｜逐字节等于期望明文=True
+```
+⇒ **无 ffmpeg 时产品仍能正确下载并解密 AES-128 HLS**：`fetchKey()`→长度校验 16B→CBC 解密→拼接，全程有具名日志。
+
+**防自欺对照（这条比结论本身重要）**：若期望明文恰好等于密文，"解密成功"就是假的。实测——
+```
+期望明文 sha12 = 3bd318be82d3 ｜密文拼接 sha12 = 60b162780d70 ｜两者相同 = False
+用错 IV（小端）再加密 ⇒ 结果 ≠ 期望明文
+```
+⇒ 产物既不是原样落盘的密文，也对 IV 规则敏感 ⇒ 这条断言真的有牙。
+
+**(f) 待修项登记（主控已认可为产品缺口，本轮不修、不阻塞）**
+`ensureAvailable(warnOnError=false)` 在失败时既不弹框也不写日志；且 `beginDownload()` 不看
+`autoDownloadFfmpeg`、不调 `ensureAvailable()`，自愈只在 `main_window.cpp:335-340` 构造时查一次
+⇒ 首启那次没成就永不重试，用户以为有自愈实则没有。**记录为独立待修项。**
+
+**步骤 6（真实视频站）没有执行**：它必然走公网第三方站点，与本项目一直遵守的隔离策略冲突，
+且我没有得到"访问外部站点"的授权。停在这里等指令，不擅自跑。

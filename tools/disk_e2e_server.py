@@ -29,6 +29,7 @@ PORT = 8199
 PAGES = {}
 MEDIA = {}
 HLS = {}
+ENC_EXPECT = b""
 DOC_TEXT = b""
 
 
@@ -80,6 +81,58 @@ def build_hls():
         "/hls/seg1.ts": (seg(1), "video/mp2t"),
         "/hls/seg2.ts": (seg(2), "video/mp2t"),
     }
+
+
+def build_enc_hls():
+    """AES-128 加密 HLS fixture（步骤 5：验 fetchKey 分支是否承重）。
+
+    设计要点，都是为了「期望值能独立重算」而不是拿被测实现的输出当答案：
+      · 密钥固定 16 字节 ⇒ 产品 `onKeyFinished` 的长度校验会过（hls_downloader.cpp:390）。
+      · 明文分片长度是 **16 的整数倍** ⇒ 否则产品会打「跳过解密」并原样落盘（:476/:483），
+        那测的就不是解密路径了。
+      · **不写 IV=** ⇒ 强制走产品的"序号大端作 IV"分支（segmentIv()，:402-413），
+        这条最容易写错（大小端、从 0 还是 1 起）。显式 IV 反而把它绕过去了。
+      · 密文用 cryptography 库现算，与产品里那份手写 AES 是两套实现 ⇒ 二者一致才算证据。
+    """
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    NL = chr(10)
+    key = bytes(range(1, 17))                      # 0x01..0x10，固定可复算
+    plain = []
+    for n in range(3):
+        body = bytes(((i * 11 + n * 7) & 0xFF) for i in range(16 * 60))   # 960 字节 = 16×60
+        plain.append(body)
+
+    def iv_of(idx):                                # 与 HLS spec / 产品 segmentIv() 同规则：大端序号
+        return bytes(12) + bytes([(idx >> 24) & 0xFF, (idx >> 16) & 0xFF, (idx >> 8) & 0xFF, idx & 0xFF])
+
+    enc = []
+    for idx, p in enumerate(plain):
+        c = Cipher(algorithms.AES(key), modes.CBC(iv_of(idx))).encryptor()
+        enc.append(c.update(p) + c.finalize())
+
+    media = NL.join([
+        "#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0",
+        '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+        "#EXTINF:2.0,", "eseg0.ts",
+        "#EXTINF:2.0,", "eseg1.ts",
+        "#EXTINF:2.0,", "eseg2.ts",
+        "#EXT-X-ENDLIST", "",
+    ]).encode("utf-8")
+    master = NL.join([
+        "#EXTM3U",
+        '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,CODECS="avc1.4d401d"',
+        "emedia.m3u8",
+        "",
+    ]).encode("utf-8")
+    routes = {
+        "/hls/emaster.m3u8": (master, "application/vnd.apple.mpegurl"),
+        "/hls/emedia.m3u8": (media, "application/vnd.apple.mpegurl"),
+        "/hls/key.bin": (key, "application/octet-stream"),
+    }
+    for i, e in enumerate(enc):
+        routes[f"/hls/eseg{i}.ts"] = (e, "video/mp2t")
+    # 期望产物 = 三段明文按序拼接（独立于被测实现算出来的答案）
+    return routes, b"".join(plain), key
 
 
 def build_pages(port):
@@ -204,15 +257,19 @@ def main():
     PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8199
     SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 512 * 1024
     ready = sys.argv[3] if len(sys.argv) > 3 else None
-    global PAGES, MEDIA, HLS, DOC_TEXT
+    global PAGES, MEDIA, HLS, ENC_EXPECT, DOC_TEXT
     PAYLOAD = make_payload(SIZE)
     MEDIA = build_media()
     HLS = build_hls()
+    enc_routes, enc_expect, _k = build_enc_hls()
+    HLS.update(enc_routes)
+    ENC_EXPECT = enc_expect
     PAGES = build_pages(PORT)
     DOC_TEXT = b"not a media resource -- negative control for webRequest sniffing" + bytes([10])
     SHA = hashlib.sha256(PAYLOAD).hexdigest()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
-    line = f"SERVER_READY port={PORT} sha256={SHA} size={SIZE}"
+    line = (f"SERVER_READY port={PORT} sha256={SHA} size={SIZE} "
+            f"enc_sha256={hashlib.sha256(ENC_EXPECT).hexdigest()} enc_size={len(ENC_EXPECT)}")
     print(line, flush=True)
     if ready:
         pathlib.Path(ready).write_text(line + "\n", encoding="utf-8")
