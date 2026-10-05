@@ -64,7 +64,21 @@ const MEDIA_MIME_PREFIXES = ['video/', 'audio/'];
 // 嗅探到的资源上限（防止内存爆炸）
 const MAX_RESOURCES_PER_TAB = 200;
 
-// ── 资源存储 ──────────────────────────────────
+// ── HLS 分片抑制（缺陷 1）──────────────────────
+// .m3u8 播放列表**不走 webRequest**（FILE_PATTERNS 里没有 m3u8 规则），它由 content script
+// 扫 DOM 后经 reportMedia 进来；而 seg*.ts 是页面真实发出的网络请求，会经 onBeforeRequest /
+// onHeadersReceived 被当独立视频列出 ⇒ 用户在真站上看到一堆碎片 + 一条整流。修法：一旦某个标签页
+// 里出现过 HLS 播放列表，就把该页的裸 .ts 分片从"可下载资源列表"里去掉，整条流交给桌面端 HLS 通道。
+// **只隐藏列表条目，不碰 INTERCEPT_PATTERNS** ⇒ 用户主动点一个 .ts 链接仍会被 IDM 接管，没有能力损失。
+//
+// 为什么用"同源于已存播放列表"而不是只看一个 Set 标志位：直接导航进 m3u8（用户把播放列表当页面打开）时，
+// Edge 会把分片的 webRequest 事件在**冷启动的 service worker 收到 main_frame 事件之前**就投递过来
+// （实测事件顺序：main_frame 与 media 分片几乎同时、且分片可能先被处理完落库）⇒ 单靠"标记后再吞"会漏。
+// 于是抑制判据 = 标志位命中 **或** 当前待加的 .ts 与本标签页已存的某条播放列表同源（origin 相同）。
+// 后者在 addResource 内部对"此刻存储里已有的列表"求值，与事件到达顺序无关。
+const hlsSeenTabs = new Set();
+const HLS_PLAYLIST_RE = /\.(m3u8|m3u|mpd)(\?|$)/i;
+const TS_SEG_RE = /\.(ts|m2ts)(\?|$)/i;
 
 /**
  * 添加嗅探到的资源到标签页列表
@@ -74,8 +88,43 @@ async function addResource(tabId, resource) {
     const result = await chrome.storage.session.get(key);
     let list = result[key] || [];
 
+    // 同页已识别 HLS ⇒ 丢弃裸 MPEG-TS 分片（整条流由那条 .m3u8 代表）。
+    // 命中条件二选一：① 这页曾出现过播放列表（reportMedia / main_frame 任一通道标过）；
+    // ② 这条 .ts 与本存储列表中某条播放列表同源（覆盖"分片先于标记落库"的直接导航竞态）。
+    if (TS_SEG_RE.test(resource.url)) {
+        let sameOriginPlaylist = false;
+        try {
+            const segOrigin = new URL(resource.url).origin;
+            sameOriginPlaylist = list.some(r => {
+                try { return HLS_PLAYLIST_RE.test(r.url) && new URL(r.url).origin === segOrigin; }
+                catch { return false; }
+            });
+        } catch { /* 非法 URL：不做同源判定，走原有抑制标志 */ }
+        if (hlsSeenTabs.has(tabId) || sameOriginPlaylist) return;
+    }
+
+    // 记录"这页见过 HLS 播放列表"——放在抑制判断之后，保证播放列表自己永不被当分片吞掉。
+    if (HLS_PLAYLIST_RE.test(resource.url)) {
+        hlsSeenTabs.add(tabId);
+        // 直接导航竞态：分片的 webRequest 可能比播放列表先落库（冷启动 SW 里 Edge 先到 media 再到
+        // main_frame）。于是播放列表此刻入库时，反向把**同源、已在列表里的裸 .ts 分片**清出去，
+        // 让整条流只由这条播放列表代表。去重与顺序无关 ⇒ 无论谁先到，最终列表都收敛到"有 m3u8、无其分片"。
+        try {
+            const plOrigin = new URL(resource.url).origin;
+            list = list.filter(r => {
+                if (!TS_SEG_RE.test(r.url)) return true;
+                try { return new URL(r.url).origin !== plOrigin; } catch { return true; }
+            });
+        } catch { /* 非法 URL：不做清理 */ }
+    }
+
     // 去重：同一 URL 不重复添加
-    if (list.some(r => r.url === resource.url)) return;
+    if (list.some(r => r.url === resource.url)) {
+        // 即便这条播放列表本身已在册（例如 reportMedia 先到、main_frame 后到），上面那次"清同源分片"
+        // 也必须已生效 ⇒ 这里要把清理结果落库，不能因为去重就直接 return 丢掉过滤。
+        await chrome.storage.session.set({ [key]: list });
+        return;
+    }
 
     // 如果有新的大小信息，更新已有条目
     const existing = list.find(r => r.url === resource.url);
@@ -110,6 +159,7 @@ async function getResources(tabId) {
  */
 async function clearResources(tabId) {
     const key = `tab_${tabId}`;
+    hlsSeenTabs.delete(tabId);   // 与列表同生同灭：换页/关页后 HLS 上下文判定必须重来
     await chrome.storage.session.remove(key);
     await chrome.action.setBadgeText({ tabId, text: '' });
 }
@@ -153,6 +203,14 @@ chrome.webRequest.onBeforeRequest.addListener(
         if (details.tabId < 0) return;
 
         const url = details.url;
+
+        // 主框架直接导航进一条播放列表（用户把 m3u8 当页面打开）时，它不走 reportMedia
+        // （没有 DOM 元素可扫），而它的分片请求紧随其后 ⇒ 若只靠 addResource 里那条标记，
+        // 分片会先于标记到达、抑制失效。这里在 onBeforeRequest 最早处按"文档类型==主框架且
+        // 是播放列表"补标一次，保证同页后续 .ts 被吞。
+        if (details.type === 'main_frame' && HLS_PLAYLIST_RE.test(url))
+            hlsSeenTabs.add(details.tabId);
+
         const matched = FILE_PATTERNS.some(pattern => pattern.test(url));
         if (!matched) return;
 

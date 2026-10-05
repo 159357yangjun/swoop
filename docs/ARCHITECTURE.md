@@ -3429,3 +3429,51 @@ SHA256 `dca82b4374ee198b5a605dc03b0924152f6122e594df577a3e9ce8b63a9db0d3`；
 仍然没被这条覆盖的：master 自动选最佳档的**修复**（要加画质入参或 UI 选择，属产品决策，待批准）；
 `.ts` 分片仍经 webRequest 通道进列表、子播放列表被标成 `[audio]`（第 52 条遗留的两条登记项，本轮未动）。
 `src/` 一行未动（改动只在 `tools/hls_real240.py` 与本文档）。
+
+### 2026-10-05 06:3x（第 54 条）— webRequest 分片抑制落地（缺陷 1 真修 + 端到端证明）；缺陷 2「子播放列表标 [audio]」经核查**不存在**，按证据撤回其描述机制
+
+主控下发两条待修缺陷。逐条先读代码、写能红的测试，再决定动不动产品逻辑。
+
+**缺陷 1（`.ts` 分片经 webRequest 进资源列表）＝真缺陷，已修。**
+一手证据：`docs/hls-e2e-1004.txt` 里 popup 行是 `master.m3u8 || seg2.ts || seg1.ts || seg0.ts || favicon`，
+storage.session 印出 `seg*.ts[video]`——分片确实作为独立视频列出。根因在 `background.js`：
+FILE_PATTERNS 含 `.ts` ⇒ onBeforeRequest/onHeadersReceived 把每个分片当一条资源；而 `.m3u8` **不在** FILE_PATTERNS，
+播放列表只由 content script 扫 DOM 后经 reportMedia 进来（所以 m3u8 与 .ts 来自两个通道）。
+修法＝一旦某标签页出现过 HLS 播放列表，就把该页裸 `.ts` 从可下载列表去掉；**不碰 INTERCEPT_PATTERNS**
+⇒ 用户主动点一个 .ts 链接仍被 IDM 接管，零能力损失。
+
+**这条修复被真实浏览器逼出两次升级（不是纸上加层）：**
+1. 只做"reportMedia 命中后打 Set 标志"不够——步骤 B 是**直接导航**进 `tmaster.m3u8`，没有 DOM 可扫、
+   reportMedia 不会来标 tab ⇒ 补一条 main_frame 命中播放列表时就地标记。
+2. 仍漏：CDP 挂到真 service worker 实测事件顺序为
+   `main_frame tmaster.m3u8 → media tmaster.m3u8 → media tmedia.m3u8 → media tseg0/1/2.ts`，
+   但冷启动 SW 下分片的 addResource 会先于标记落库（判别式实测：预热+预标时 `hlsSeenTabs=true`、
+   seg0.ts 被吞、movie.mp4 保留 ⇒ 逻辑对，纯粹是到达顺序竞态）。最终正解＝**双向收敛**：
+   加 .ts 时若同源已有播放列表则丢弃；加播放列表时反向把同源、已入库的裸 .ts 清出去。
+   去重与顺序无关 ⇒ 无论谁先到，列表终态恒为"有 m3u8、无其分片"。
+
+新门 `tools/sniff_rules_test.mjs`（node:vm 加载**真实** background.js、抓它注册的监听回调喂合成 details）：
+9 条断言含 D1/D1b/D1c 三面 + 三条阴性对照（普通 mp4 仍列、无 m3u8 页的 .ts 仍列、响应头通道同规）+ D2A。
+变异都咬过：摘反向清理 ⇒ D1c 残留 0→3；摘正向标志 ⇒ D1b 泄漏 0→3；还原后 PASS=12 FAIL=0。
+端到端复算（真 Edge + 真扩展 + 本机 HLS fixture）三步全净：step2 `master.m3u8[video]+favicon`、
+step5 `emaster.m3u8`（连 key.bin 也一并不再淹列表）、stepB `tmaster.m3u8`（此前 3× tseg.ts 全消）；
+三条下载 VERDICT 不变（降级诚实 / fetchKey 承重 / 真 TS concat 合法）⇒ 改动只影响列表、不影响下载。
+
+**夹具自伤一条（留档）**：内存 storage 桩最初同步 resolve，令并发 addResource 的读-改-写互相覆盖
+（假丢更新，报成"两条 m3u8 只存一条"）。真 chrome.storage.session 对同扩展串行处理 ⇒ 改成
+per-tab 事务队列 + 宏任务 settle 后忠实。教训：**测异步读改写的夹具必须复刻被测平台的串行化保证，
+否则会把桩的竞态误报成产品的缺陷**（本轮差点据此去给产品加锁）。
+
+**缺陷 2（子播放列表被标 [audio]）＝按现有证据不成立，未据此改产品代码。**
+穷查所有定性路径：① content.js `scanMediaElements` 把 `<video>`/`<source>` 一律标 `'video'`；
+② background `inferType('.m3u8')='file'`，且 `.m3u8` 不走 webRequest（不在 FILE_PATTERNS）；
+③ onHeadersReceived 的 audio 分支要求 Content-Type 以 `audio/` 开头，而 mpegurl 是
+`application/vnd.apple.mpegurl`（既非 video/* 也非 audio/*，且不在 MEDIA_MIME_TYPES）⇒ 走不到 audio；
+④ popup.js 只把未知 type 归 `'file'`，从不归 audio。仓内**每一处**观测（hls-e2e/enc/realts/240p）都把
+`.m3u8` 印成 `[video]`，全仓 grep `.m3u8[audio]` = 0 命中。⇒ 主控描述的机制在本代码里不可达；
+若真站确有此现象需带具体 URL 复现，本轮不为一个证不出来的假设改分类逻辑（见 [[verify-dont-trust-docs]]：
+查不到写"已查，不是缺陷"）。D2A/D2B 两条测试把"永不为 audio"钉成回归护栏（D2B 记录 mpegurl 未被
+webRequest 抓到这一事实，将来若有人扩 MIME 集合让它进来，type 必须是 video）。
+
+`src/` 一行未动（改动只在 `browser-extension/background.js`、`tools/sniff_rules_test.mjs`、文档与 NOTICE）。
+NOTICE 复签 `408=398+10`（新增 tools/sniff_rules_test.mjs、background.js 字节变化）。

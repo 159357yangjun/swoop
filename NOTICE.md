@@ -11,15 +11,15 @@
 | 路径 | 文件数 | 字节数 | 是否在开源交付范围内 |
 |---|---|---|---|
 | `src/` | 114 | 931638 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
-| `tools/` | 48 | 831147 | ✅ 在——自测与门禁脚本 |
-| `docs/` | 69 | 592499 | ✅ 在 |
+| `tools/` | 49 | 845494 | ✅ 在——自测与门禁脚本 |
+| `docs/` | 69 | 597137 | ✅ 在 |
 | `resources/` | 18 | 35001 | ✅ 在 |
 | `installer/` | 2 | 17674 | ✅ 在 |
 | `.github/` | 2 | 37113 | ✅ 在 |
 | `third_party/` | 125 | 20168154 | ⚠️ 在范围内但**不是本项目的原创代码**，见 §3 |
-| `browser-extension/` | 19 | 661587 | ❌ **不在**——浏览器扩展不属开源交付物（所有者口头指示）；处置见 §2 |
+| `browser-extension/` | 19 | 665792 | ❌ **不在**——浏览器扩展不属开源交付物（所有者口头指示）；处置见 §2 |
 | 仓根散装文件 | 10 | — | ✅ 在（`CMakeLists.txt`、`README.md`、`NOTICE.md`、`vcpkg.json`、`REFACTOR_PLAN.md`、`开发文档.md`、`.gitignore`、`.gitattributes`、`.editorconfig`、`.clang-format`） |
-| **合计（`git ls-files`）** | **407** | | 恒等式 `397 + 10 = 407`，由 `--verify` 当场断言 |
+| **合计（`git ls-files`）** | **408** | | 恒等式 `398 + 10 = 408`，由 `--verify` 当场断言 |
 
 复算命令（在仓库根跑；注意 `bc` 在本机**没有**，所以求和走 `awk`，别抄成 `| bc`）：
 
@@ -69,7 +69,7 @@ git ls-files | wc -l               # 合计
 `networkinformation/qnetworklistmanager.dll`、`tls/qcertonlybackend.dll`、`tls/qschannelbackend.dll`。
 同目录另有 **6 个**构建产物（`Qt6Core.dll` 11.3MB、`libstdc++-6.dll` 2.2MB、`Qt6Network.dll` 2.0MB、
 `libgcc_s_seh-1.dll`、`libwinpthread-1.dll`、`idm-next-host.exe`）**未入库**。
-整个目录在盘上是 25 个文件 / 16478097 字节，被跟踪的是 19 个文件 / 入库数 661587 字节——
+整个目录在盘上是 25 个文件 / 16482302 字节，被跟踪的是 19 个文件 / 入库数 665792 字节——
 两个数都印在这里并由 `--verify` 各自核对，**不许用"约 16MB"冒充公开暴露的量**：
 公开暴露的是入库数，磁盘数只是本机残留。
 
