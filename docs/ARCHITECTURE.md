@@ -3388,3 +3388,44 @@ resource timing 没有响应头，拿不到 `Content-Type`/`Content-Length`，�
 回归全套（都跑过）：sniff A/B/阴性 + 单轮 capstone（size/SHA256 与服务器源一致）全绿、
 HLS 未加密降级 + AES-128 `fetchKey` 承重 + 真 TS 结构合法 全绿、七道文本门 rc=0。
 `src/` 一行未动（改动只在 `browser-extension/content.js` 与 `tools/`）。
+
+### 2026-10-05 05:4x（第 53 条）— 真站 HLS E2E（240p 变体）：**三方同立拿到完整产物**，并钉死「产品没有画质选择入口」这条真实缺陷
+
+用户选定的公网教学流 `test-streams.mux.dev/x36xhzz` 是自适应 master（8 档 240p~1080p）。
+上一轮定性「停滞＝吞吐非挂起」后，本轮按授权用 **240p 变体**重跑真站端到端，拿完整产物 + SHA256。
+
+下单走产品自己的命名管道（`command=add`），但 URL 用的是**子播放列表**而非 master——理由不是偷懒，
+是一条被源码证实的产品缺陷（见下）。三方同立才算成功：
+```
+[层①] 拼接完成日志=True ｜终态=#2000000 已完成
+[层②] 工作目录已清空=True   （concatSegments 自己删了 idm_hls_2000000）
+[层③] 逐字节一致=True       （独立 HTTPS 重取 64 片拼接 == 产物）
+[VERDICT] 三方同立：真站 HLS 产物已验证
+```
+读数：产物 `193039199_mp4_h264_aac_ld_7.ts` **22,418,060 B**，
+SHA256 `dca82b4374ee198b5a605dc03b0924152f6122e594df577a3e9ce8b63a9db0d3`；
+下单→终态 **110.3s**（≈203 KB/s）；路径＝无 ffmpeg 的纯 C++ 手动下载
+（`startManualDownload → concatSegments`，输出 `.ts`）。前置断言 dataDir/build/PATH 三处 ffmpeg 均无。
+
+**独立重取的哈希不是孤证**：额外加了两道前缀/后缀对照——首片 272412 B 逐字节等于产物开头、
+末片 100580 B 逐字节等于产物结尾 ⇒ 排除"顺序错位也能凑出同长"。PMT 解析确认产物是合法单 program TS
+（program 1 → H.264 PID 258 + AAC PID 257），与我手搓扫描器先前的乱码读数无关。
+
+**这一轮逼出的真实产品缺陷（不是测具问题）**：`parseMasterPlaylist`（`hls_downloader.cpp:199-207`）
+对自适应流**无条件挑 BANDWIDTH 最大**，而 `m_forcedVariant` 只从 `req.extra["hlsVariant"]` 读（`:73`），
+全仓没有任何调用点写这个 key（grep：只有 `task_controller.cpp:169/:226` 写 `"format"`，且那是 yt-dlp 的 `-f` 串）
+⇒ **产品根本没有画质选择入口**。后果：普通用户从扩展点一条 master.m3u8，会被静默拉去下最高档
+（此流 1080p ≈ 570 MB @ ~36 KB/s ≈ 85 分钟），且界面上既没有画质可选、也没有 ETA。
+本轮为了拿"完整产物"只能由测试夹具直接指定 240p 子列表——这恰好是这个缺陷的反证。
+
+**两条量具自伤（当场改正，留档）**：
+1. 第一版探针把 `gui_ipc("list")` 回执的 `message` **第一行**当任务行判终态，但那行是表头
+   「当前 N 个任务」⇒ 状态词永远匹配不到，整轮空转到上限（下载其实 110s 就完了）。改成先按
+   文件名过滤出真正的任务行再判。
+2. 手搓的 TS PAT/PMT 字节扫描器连续几轮偏移算错（先 `pid` 取在 byte4 而非 byte1-2、
+   再把 `program_number` 读在 entry 的第 3-4 字节而非第 1-2 字节），一度印出 300+ 个假 PID 的乱码分布。
+   ⇒ 临时手搓解析器不可信；承重判据始终是"独立重取逐字节全等"，结构核对以正确偏移的单次解析为准。
+
+仍然没被这条覆盖的：master 自动选最佳档的**修复**（要加画质入参或 UI 选择，属产品决策，待批准）；
+`.ts` 分片仍经 webRequest 通道进列表、子播放列表被标成 `[audio]`（第 52 条遗留的两条登记项，本轮未动）。
+`src/` 一行未动（改动只在 `tools/hls_real240.py` 与本文档）。

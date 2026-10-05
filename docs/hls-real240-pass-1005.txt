@@ -1,0 +1,94 @@
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HEAD=b6849ec app_exe_sha12=8ef5f379685f
+[目标] https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8
+[前置] dataDir ffmpeg.exe=False ｜ build/ffmpeg/ffmpeg.exe=False ｜ PATH ffmpeg=无
+[下单] 0.0s resp={'message': '已添加下载: https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8', 'success': True} err=None
+[下单后目录] []
+[GUI+   5.0s] [INFO] "HlsDownloader 启动: https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8"
+[GUI+   5.0s] [INFO] "添加 HLS 任务 #2000000: https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8"
+[GUI+   5.0s] [INFO] "IPC 请求: add → 成功（排队 -1ms，处理 57ms，送达=1，回话时客户端=在）"
+[GUI+   5.0s] [INFO] "HlsDownloader 解析到 64 个分片（加密=0，时长≈634s）"
+[  20.0s] 在途分片文件=25 目录字节=0 | GUI行=#2000000	下载中	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2
+[  40.1s] 在途分片文件=32 目录字节=0 | GUI行=#2000000	下载中	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2
+[  60.2s] 在途分片文件=40 目录字节=0 | GUI行=#2000000	下载中	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2
+[  80.2s] 在途分片文件=53 目录字节=0 | GUI行=#2000000	下载中	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2
+[ 100.3s] 在途分片文件=59 目录字节=0 | GUI行=#2000000	下载中	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2
+[GUI+ 110.3s] [INFO] "HlsDownloader 拼接完成: C:\\Users\\yyyy\\AppData\\Local\\Temp\\hls240-054506\\downloads/193039199_mp4_h264_aac_ld_7.ts"
+[GUI+ 110.3s] [INFO] "HlsDownloader 下载完成: https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8"
+[终态] #2000000	已完成	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8
+
+[计时] 下单→终态 = 110.3s
+[产物清单] [('193039199_mp4_h264_aac_ld_7.ts', 22418060)]
+[层②] 工作目录残留=[]
+[层③-a] 产物 C:\Users\yyyy\AppData\Local\Temp\hls240-054506\downloads\193039199_mp4_h264_aac_ld_7.ts size=22418060 sha256=dca82b4374ee198b5a605dc03b0924152f6122e594df577a3e9ce8b63a9db0d3
+[独立重取] 分片数=64
+    [1/64] 272412 B  2.2s  2/url_526/193039199_mp4_h264_aac_ld_7.ts
+    [2/64] 416608 B  2.6s  2/url_527/193039199_mp4_h264_aac_ld_7.ts
+    [3/64] 284820 B  1.7s  2/url_528/193039199_mp4_h264_aac_ld_7.ts
+    [4/64] 397996 B  2.8s  2/url_529/193039199_mp4_h264_aac_ld_7.ts
+    [5/64] 314524 B  2.0s  2/url_530/193039199_mp4_h264_aac_ld_7.ts
+    [6/64] 354192 B  3.1s  2/url_531/193039199_mp4_h264_aac_ld_7.ts
+    [7/64] 252296 B  2.4s  2/url_532/193039199_mp4_h264_aac_ld_7.ts
+    [8/64] 338776 B  2.4s  2/url_533/193039199_mp4_h264_aac_ld_7.ts
+    [9/64] 391416 B  1.6s  2/url_534/193039199_mp4_h264_aac_ld_7.ts
+    [10/64] 220524 B  1.5s  2/url_535/193039199_mp4_h264_aac_ld_7.ts
+    [11/64] 253048 B  1.6s  2/url_536/193039199_mp4_h264_aac_ld_7.ts
+    [12/64] 297416 B  1.4s  2/url_537/193039199_mp4_h264_aac_ld_7.ts
+    [13/64] 367164 B  2.0s  2/url_538/193039199_mp4_h264_aac_ld_7.ts
+    [14/64] 284632 B  1.7s  2/url_539/193039199_mp4_h264_aac_ld_7.ts
+    [15/64] 313584 B  2.2s  2/url_540/193039199_mp4_h264_aac_ld_7.ts
+    [16/64] 316028 B  3.2s  2/url_541/193039199_mp4_h264_aac_ld_7.ts
+    [17/64] 294220 B  2.5s  2/url_542/193039199_mp4_h264_aac_ld_7.ts
+    [18/64] 267336 B  2.0s  2/url_543/193039199_mp4_h264_aac_ld_7.ts
+    [19/64] 395552 B  2.1s  2/url_544/193039199_mp4_h264_aac_ld_7.ts
+    [20/64] 362276 B  1.9s  2/url_545/193039199_mp4_h264_aac_ld_7.ts
+    [21/64] 291588 B  1.9s  2/url_546/193039199_mp4_h264_aac_ld_7.ts
+    [22/64] 457592 B  1.8s  2/url_547/193039199_mp4_h264_aac_ld_7.ts
+    [23/64] 275044 B  1.9s  2/url_548/193039199_mp4_h264_aac_ld_7.ts
+    [24/64] 303432 B  3.4s  2/url_549/193039199_mp4_h264_aac_ld_7.ts
+    [25/64] 323360 B  1.8s  2/url_550/193039199_mp4_h264_aac_ld_7.ts
+    [26/64] 403448 B  1.5s  2/url_551/193039199_mp4_h264_aac_ld_7.ts
+    [27/64] 318848 B  2.3s  2/url_552/193039199_mp4_h264_aac_ld_7.ts
+    [28/64] 377316 B  1.7s  2/url_553/193039199_mp4_h264_aac_ld_7.ts
+    [29/64] 350244 B  1.8s  2/url_554/193039199_mp4_h264_aac_ld_7.ts
+    [30/64] 271096 B  1.6s  2/url_555/193039199_mp4_h264_aac_ld_7.ts
+    [31/64] 480152 B  3.4s  2/url_556/193039199_mp4_h264_aac_ld_7.ts
+    [32/64] 398560 B  1.7s  2/url_557/193039199_mp4_h264_aac_ld_7.ts
+    [33/64] 430520 B  1.8s  2/url_558/193039199_mp4_h264_aac_ld_7.ts
+    [34/64] 405516 B  1.8s  2/url_559/193039199_mp4_h264_aac_ld_7.ts
+    [35/64] 333888 B  3.1s  2/url_560/193039199_mp4_h264_aac_ld_7.ts
+    [36/64] 464172 B  1.9s  2/url_561/193039199_mp4_h264_aac_ld_7.ts
+    [37/64] 433716 B  1.8s  2/url_562/193039199_mp4_h264_aac_ld_7.ts
+    [38/64] 334076 B  1.8s  2/url_563/193039199_mp4_h264_aac_ld_7.ts
+    [39/64] 241392 B  2.8s  2/url_564/193039199_mp4_h264_aac_ld_7.ts
+    [40/64] 246280 B  1.6s  2/url_565/193039199_mp4_h264_aac_ld_7.ts
+    [41/64] 307944 B  2.9s  2/url_566/193039199_mp4_h264_aac_ld_7.ts
+    [42/64] 317532 B  1.8s  2/url_567/193039199_mp4_h264_aac_ld_7.ts
+    [43/64] 542756 B  3.3s  2/url_568/193039199_mp4_h264_aac_ld_7.ts
+    [44/64] 564188 B  2.4s  2/url_569/193039199_mp4_h264_aac_ld_7.ts
+    [45/64] 579792 B  3.5s  2/url_570/193039199_mp4_h264_aac_ld_7.ts
+    [46/64] 313396 B  1.9s  2/url_571/193039199_mp4_h264_aac_ld_7.ts
+    [47/64] 423752 B  3.3s  2/url_572/193039199_mp4_h264_aac_ld_7.ts
+    [48/64] 350620 B  2.3s  2/url_573/193039199_mp4_h264_aac_ld_7.ts
+    [49/64] 236692 B  1.7s  2/url_574/193039199_mp4_h264_aac_ld_7.ts
+    [50/64] 267524 B  1.4s  2/url_575/193039199_mp4_h264_aac_ld_7.ts
+    [51/64] 233872 B  1.6s  2/url_576/193039199_mp4_h264_aac_ld_7.ts
+    [52/64] 286324 B  1.7s  2/url_577/193039199_mp4_h264_aac_ld_7.ts
+    [53/64] 291776 B  1.6s  2/url_578/193039199_mp4_h264_aac_ld_7.ts
+    [54/64] 328436 B  1.8s  2/url_579/193039199_mp4_h264_aac_ld_7.ts
+    [55/64] 583928 B  1.7s  2/url_580/193039199_mp4_h264_aac_ld_7.ts
+    [56/64] 612880 B  1.8s  2/url_581/193039199_mp4_h264_aac_ld_7.ts
+    [57/64] 447628 B  2.0s  2/url_582/193039199_mp4_h264_aac_ld_7.ts
+    [58/64] 313960 B  1.8s  2/url_583/193039199_mp4_h264_aac_ld_7.ts
+    [59/64] 487484 B  2.0s  2/url_584/193039199_mp4_h264_aac_ld_7.ts
+    [60/64] 564940 B  5.1s  2/url_585/193039199_mp4_h264_aac_ld_7.ts
+    [61/64] 374684 B  2.0s  2/url_586/193039199_mp4_h264_aac_ld_7.ts
+    [62/64] 155100 B  1.8s  2/url_587/193039199_mp4_h264_aac_ld_7.ts
+    [63/64] 197212 B  1.6s  2/url_588/193039199_mp4_h264_aac_ld_7.ts
+    [64/64] 100580 B  1.9s  2/url_589/193039199_mp4_h264_aac_ld_7.ts
+[层③-b] 参考拼接 size=22418060 sha256=dca82b4374ee198b5a605dc03b0924152f6122e594df577a3e9ce8b63a9db0d3
+
+[层①] 拼接完成日志=True ｜终态=#2000000	已完成	193039199_mp4_h264_aac_ld_7.m3u8	https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8
+[层②] 工作目录已清空=True
+[层③] 逐字节一致=True
+[VERDICT] 三方同立：真站 HLS 产物已验证
+[路径] 分支=无 ffmpeg 的纯 C++ 手动下载（startManualDownload→concatSegments），输出扩展名 .ts；变体由测试夹具指定（产品侧无画质入口）
