@@ -4006,11 +4006,14 @@ M-⑩d 摘读侧扩展名守卫 `if (!extOk) return;` → exe `2ab8dafdcbd0` →
 顺带修了夹具自身的一处口径错误：它原来用"[RED] 字样"当"期望绿"的判据，会把与本门无关的红（NOTICE 没复签到定点）
 误判成夹具 BAD ⇒ 改成本门末行的机器事实（`live_roster OK` / `[PROBE_ROSTER] OK`）。
 
-**六、门禁现值**：build/host_manifest/live_roster/probe_roster/a_gate/sniff/notice_verify **rc=0**（七道门全绿，
-PATHGUARD 不再让 roster 红，因为它已被合法登记为待修型）；freshness rc=0（不合格=0）；
-套件 24 模式 PASS=92 FAIL=2 零断言=0，问题模式只有 `IDM_PATHGUARD_PROBE(F=2,rc=1)`＝**按设计红**（A1 未修，见 §7-63）；
-引擎自测当场复算见下条。NOTICE 复签到定点：`427 = 417 + 10`，
-`tools/=1003379`、`docs/=693399`、`.github/=37222`（三轮迭代到 FAIL=0，notice_sha12 `290ed39e38dd`，工具号 `16f38fd0dd63/242行`）。
+**六、门禁现值（全部在提交后的树上复跑，不是变异中间态）**：build/host_manifest/live_roster/probe_roster/lint_layering/a_gate/sniff/notice_verify/freshness **九道 rc=0**
+（PATHGUARD 不再让 roster 红，因为它已被合法登记为待修型）；
+套件 24 模式 PASS=92 FAIL=2 零断言=0，问题模式只有 `IDM_PATHGUARD_PROBE(F=2,rc=1)`＝**按设计红**（A1 未修，见 §7-63），`ui_snapshot.exe sha12=d9565a213d45`；
+引擎自测当场复算 **182 通过 / 1 失败**（唯一红＝`[37②]` dir 面 state 恢复，同属按设计红），`engine_selftest.exe sha12=d5936975a14a`；
+NOTICE 复签到定点：`436 = 426 + 10`（⑩ 的证据目录 `docs/clipboard-a3/` 入库后，
+`docs/` 行从 85/699960 变成 **94/716729**、合计从 427 变 **436**；`tools/=1003379`、`.github/=37222`；
+恒等式里那个 10 是**仓根散装文件数**，与 `browser-extension/` 自身的 19 个文件是两个不同的数，别混——上一版 NOTICE 把它写成 `417+10=427` 时这个歧义就存在了，本轮顺手把话说死），
+两轮迭代后 FAIL=0，`notice_sha12` 以 `notice_verify` 当场输出为准（工具号 `16f38fd0dd63/242行`）。
 
 **仍然没验证的东西**：① offscreen 下 `QClipboard::dataChanged` 由真实系统输入（Ctrl+C）触发的链路仍未证——
 C3/C4 是用 `QMetaObject::invokeMethod` 直接驱动 handler 证的，**信号连接面（`main_window.cpp:444-445`）只有静态证人**；

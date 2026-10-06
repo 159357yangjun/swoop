@@ -12,14 +12,14 @@
 |---|---|---|---|
 | `src/` | 114 | 947112 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
 | `tools/` | 52 | 1003379 | ✅ 在——自测与门禁脚本 |
-| `docs/` | 94 | 716729 | ✅ 在 |
+| `docs/` | 94 | 717319 | ✅ 在 |
 | `resources/` | 18 | 35001 | ✅ 在 |
 | `installer/` | 2 | 17674 | ✅ 在 |
 | `.github/` | 2 | 37222 | ✅ 在 |
 | `third_party/` | 125 | 20168154 | ⚠️ 在范围内但**不是本项目的原创代码**，见 §3 |
 | `browser-extension/` | 19 | 666798 | ❌ **不在**——浏览器扩展不属开源交付物（所有者口头指示）；处置见 §2 |
 | 仓根散装文件 | 10 | — | ✅ 在（`CMakeLists.txt`、`README.md`、`NOTICE.md`、`vcpkg.json`、`REFACTOR_PLAN.md`、`开发文档.md`、`.gitignore`、`.gitattributes`、`.editorconfig`、`.clang-format`） |
-| **合计（`git ls-files`）** | **436** | | 恒等式 `426 + 10 = 436`，由 `--verify` 当场断言 |
+| **合计（`git ls-files`）** | **436** | | 恒等式 `开源侧 426 + browser-extension 10 = 436`；其中 `browser-extension/` 目录自身有 19 个文件（见上一行"不在交付范围"），**这个 10 是仓根散装文件数、不是扩展文件数**。由 `--verify` 当场断言 |
 
 复算命令（在仓库根跑；注意 `bc` 在本机**没有**，所以求和走 `awk`，别抄成 `| bc`）：
 
