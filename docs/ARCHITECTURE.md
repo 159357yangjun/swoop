@@ -4006,7 +4006,7 @@ M-⑩d 摘读侧扩展名守卫 `if (!extOk) return;` → exe `2ab8dafdcbd0` →
 顺带修了夹具自身的一处口径错误：它原来用"[RED] 字样"当"期望绿"的判据，会把与本门无关的红（NOTICE 没复签到定点）
 误判成夹具 BAD ⇒ 改成本门末行的机器事实（`live_roster OK` / `[PROBE_ROSTER] OK`）。
 
-**六、门禁现值（全部在提交后的树上复跑，不是变异中间态）**：build/host_manifest/live_roster/probe_roster/lint_layering/a_gate/sniff/notice_verify/freshness **九道 rc=0**
+**六、门禁现值（全部在提交后的树上复跑，不是变异中间态）**：build/host_manifest/live_roster/probe_roster/lint_layering/a_gate/sniff/notice_verify/freshness **九道 rc=0**（sniff 那一道本轮改测具后已转绿，见本节第七项）
 （PATHGUARD 不再让 roster 红，因为它已被合法登记为待修型）；
 套件 24 模式 PASS=92 FAIL=2 零断言=0，问题模式只有 `IDM_PATHGUARD_PROBE(F=2,rc=1)`＝**按设计红**（A1 未修，见 §7-63），`ui_snapshot.exe sha12=d9565a213d45`；
 引擎自测当场复算 **182 通过 / 1 失败**（唯一红＝`[37②]` dir 面 state 恢复，同属按设计红），`engine_selftest.exe sha12=d5936975a14a`；
@@ -4048,3 +4048,8 @@ capstone 红并报"不是本轮的"（证明它不会拿"名字碰巧对上"蒙�
 已从源码删除（不留永久后门）。原文三面归档 `docs/clipboard-a3/sniff-{capstone-green,capstone-red,mut-gui-bogus-name,mut-forged-baseline}-*.txt`。
 夹具残留 `~/Downloads/dom*.mp4` 共 7 份经逐份 sha256 核对为本轮产物后按指示清除（清点档
 `sniff-dom-artifacts-before-delete.md`），用户其他文件未触碰。
+
+最终读数（提交后的树）：sniff **rc=0**、capstone 单轮闭合，`app_exe_sha12=e1f62f7d3b7e`；套件 24 模式
+PASS=92 FAIL=2（唯一红＝IDM_PATHGUARD_PROBE，按设计），`ui_snapshot.exe sha12=ea506238e63d`；
+引擎自测 182/1（唯一红＝[37②]，按设计），`engine_selftest.exe sha12=56fa9e75f292`。
+清残留时又发现一次运行落的 `dom.mp4`（同 sha256 `267989ec0181…`、200012 B），一并删除 ⇒ Downloads 内 `dom*` 计数=0。
