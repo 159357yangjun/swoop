@@ -3712,7 +3712,7 @@ CI 从未在 runner 执行；像素证人受本机焦点约束；采集卡真浏
 - freshness_gate 在 `97c51ec`（产品代码那笔）**落地后复跑 rc=0、不合格=0** ⇒ "产品 exe == 当前源码"这句话本轮成立。
 - 引擎自测 **180/0**（带认证服务器 18092，`engine_selftest.exe a254689c17f5`，落盘 `/tmp/est_run1.log`）。
 - NOTICE 由 `notice_verify.py` 自己的口径重签：`src/=945872`、`tools/=941109(51 个)`、`docs/=624301`，
-  合计 `402 + 10 = 412`（本轮新增被跟踪文件只有 `tools/capture_e2e.py`）⇒ FAIL=0（⑤ 后重签：src=946490 tools=946543 docs=76/642939，合计 407+10=417），`notice_sha12=8efdf6b55662`；⑥ 后随盘上真值提交后按新跟踪集合再签：`064de3a9f823`（tools=52/961779、docs=82/656908、合计 414+10=424；⑥ 的 py 与六份变异日志已入库）。
+  合计 `402 + 10 = 412`（本轮新增被跟踪文件只有 `tools/capture_e2e.py`）⇒ FAIL=0（⑤ 后重签：src=946490 tools=946543 docs=76/642939，合计 407+10=417），`notice_sha12=8efdf6b55662`；⑥ 后随盘上真值提交后按新跟踪集合再签：`e4f6167caa4c`（tools=52/961779、docs=82/657312、合计 414+10=424；⑥ 的 py 与六份变异日志已入库）。
 
 **仍然没验证的东西**：卡片在**非默认窗口尺寸/缩放下**是否仍不截断（只量了 746×483 这一档）；
 「取消」按钮与 ESC 的关闭语义没有判据；多标签页并发弹卡（同名去重、焦点归属）未测；
@@ -3830,3 +3830,10 @@ probe_roster/a_gate/sniff(12/0) rc=0；freshness 提交前 DIRTY_INPUT×3（就�
 （引擎取首个命中，UI 显示两条同值选项这件事没人拦）；host 8s 超时分支与网络错误文案；
 yt-dlp 格式列表一侧（非 .m3u8）不在本条范围；L2c 只演示"反序"一种重排形态（按 height 排序未必红 L1b）；
 CI 从未执行；`IDM_HOST_LIST_JSON`/`IDM_PROBE_CASE_VARIANT` 两个测具面的存在性靠读码，未入闸门名单。
+
+**补录（提交后终态与一次我自己的读数错误）**：提交 `a7760bd` 后复跑——freshness rc=0（不合格=0）、
+build/host_manifest/live_roster/probe_roster/a_gate/sniff(12/0)/notice_verify(FAIL=0) 全 rc=0、
+套件 PASS=79 FAIL=0（`ui_snapshot b8e4fc20be1e`）、引擎 **180/0**（engine_selftest `a254689c17f5`）、
+logic 测试在 HEAD `a7760bd` 上连跑 4 次 13/13。⚠ 期间我报过一次"logic rc=2"——查一手日志是
+**我的调用命令 cwd 被重置回会话工作区**（python 找不到 tools/ 下的脚本），不是产品或测具 flake；
+台账规矩照旧：异常读数先读它自己的一手输出再定性。
