@@ -1,0 +1,10 @@
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06\_data
+[PASS] [D1] 正例对照：正常 URL 拖入 ⇒ 恰好弹出一个新建任务对话框且预填逐字==该 URL
+    [D1 读数] 对话框峰值=1 已关=1 预填=「https://ex.test/dd-ok.zip」期望=「https://ex.test/dd-ok.zip」｜enterAccepted=1 dropAccepted=1 peak=1 closed=1 accepted=1
+[PASS] [D2] R2：3MiB 文本拖入 ⇒ 不得整串交给编辑器，须有界并留可区分告警
+    [D2 读数] 输入长度=3145743 交给对话框的长度=0 对话框峰值=0 有界或拒=1 告警含「拖放」=1｜enterAccepted=1 dropAccepted=1 peak=0 closed=0 accepted=-1
+[FAIL] [D3] R3：新增任务失败那一支 ⇒ 必须有一条 warn（对齐 IPC 侧形状）
+    [D3 读数] 引擎灌入=127 首个拒绝下标=127 dlmgr_list=128(>=100 才算满额前置成立) 对话框峰值=1 预填=「http://ex.test/after-full.zip」warn 含「添加任务失败」=0 本轮 warn 行数=1｜enterAccepted=1 dropAccepted=1 peak=1 closed=1 accepted=1
+    [DRAGDROP 身份] exe_sha12=05cac1c3dc53
+[FAIL] [DRAGDROP 汇总] d1=1 d2=1 d3=0

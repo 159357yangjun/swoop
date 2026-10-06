@@ -975,6 +975,20 @@ void MainWindow::dropEvent(QDropEvent* event)
     if (url.isEmpty())
         return;
 
+    // R2（⑪ A4 审计）：拖进来的文本没有上限 ⇒ 一篇长文档会整串进单行编辑器与 URL 解析。
+    // 上限取引擎自己的 URL 缓冲大小（download_core.h:67 `char url[2048]`）——超过它的输入
+    // 本来就会被 strncpy 截成另一个 URL，与其静默截半，不如在这里明确拒掉并留下可读原因。
+    // DownloadTask 是 C 里的匿名 struct typedef（download_core.h:65-148），没有成员指针类型可写，
+    // 所以取一个实例字段算 sizeof：编译期常量、且跟着引擎缓冲一起变。
+    static const DownloadTask kUrlProbe{};
+    static const int kMaxDropUrlLen = static_cast<int>(sizeof(kUrlProbe.url));
+    if (url.length() >= kMaxDropUrlLen) {
+        Log::warn(QStringLiteral("拖放内容过长（%1 字符），已忽略；请改用「新建任务」粘贴实际链接")
+                      .arg(url.length()));
+        event->acceptProposedAction();   // 事件吃掉，避免拖放悬停在窗口上不放
+        return;
+    }
+
     // 弹出新建任务对话框预填链接
     NewTaskDialog dlg(this, m_settings.defaultSaveDir(), m_settings.maxThreads());
     dlg.setUrl(url);
@@ -985,6 +999,10 @@ void MainWindow::dropEvent(QDropEvent* event)
                                  QString());
         if (id > 0)
             Log::info(QStringLiteral("拖放添加任务 #%1: %2").arg(id).arg(inp.url));
+        else
+            // R3（⑪ A4 审计）：这条入口原先只有成功分支 ⇒ 点完确定什么都没发生、
+            // 日志也区分不出"被拒"与"失败"。对齐 addTaskFromUrl 里 IPC/web 侧的形状。
+            Log::warn(QStringLiteral("拖放添加任务失败: %1").arg(inp.url));
     }
     event->acceptProposedAction();
 }

@@ -1710,6 +1710,7 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 | IDM_PATHGUARD_PROBE | 待修型（刻意不进闸门名单） | 否 | 3 |
 | IDM_HASHVERIFY_PROBE | 断言型 | 是 | 7 |
 | IDM_CLIPBOARD_PROBE | 断言型 | 是 | 5 |
+| IDM_DRAGDROP_PROBE | 断言型 | 是 | 3 |
 <!-- PROBE-ROSTER-END -->
 
 「待修型」这一类的存在理由：**红门不许进 CI 闸门名单**（否则 CI 永远红、真回归被淹没），
@@ -4087,3 +4088,49 @@ PASS=92 FAIL=2（唯一红＝IDM_PATHGUARD_PROBE，按设计），`ui_snapshot.e
 "拖放能弹出预填好链接的对话框"目前是推断不是观测；② `file://` 被拒依赖那段代码被执行，未实测拖真实文件；
 ③ R2 未测出"多少字节开始卡"；④ 未跑"连拖 100 次"的稳定性，只证明了代码层面一次 drop 至多建 1 个任务；
 ⑤ CI 仍未执行过。
+
+### 2026-10-06 12:4x（第 67 条）— ⑫ A4 R2/R3 修复：`IDM_DRAGDROP_PROBE` 先红后绿 + 四面变异各咬一条合取项
+
+仓根同上，起点 HEAD `1b767c6`。产品改动**只有 `src/gui/main_window.cpp`、+18 行 0 删除**（`git diff --stat -- src/` 当场复算），
+探针在 `tools/ui_snapshot.cpp`，证据目录 `docs/drag-a4/`。
+
+**一、改了什么**：
+- **R2** dropEvent 取到 url 后、开对话框前加长度上限 ⇒ `Log::warn("拖放内容过长（N 字符），已忽略…")` + `acceptProposedAction()` + return。
+  **上限没有新造常量**：取引擎自己的 URL 缓冲 `sizeof(DownloadTask.url)`（`download_core.h:67 char url[2048]`）——
+  超过它的输入本来就会被 `strncpy` 截成另一个 URL，静默截半不如明确拒掉；且 `DownloadTask` 是匿名 struct typedef，
+  没有成员指针类型可写 ⇒ 用一个实例字段算 sizeof（编译期常量，跟着引擎缓冲一起变）。
+- **R3** 成功分支后补 `else Log::warn("拖放添加任务失败: %1")`，措辞对齐 `addTaskFromUrl` 里既有的 `"IPC 添加任务失败: %1"`。
+
+**二、TDD 顺序（先红归档再修）**：`docs/drag-a4/red-baseline-1006.txt`＝修复前的原文，D1 PASS / D2 FAIL / D3 FAIL。
+三条断言里 **D1 是期望非 0 的正例对照**（正常 URL 必须真弹出对话框且预填逐字==URL、并被点确定 accept）——
+没有它，"drop 一律什么都不做"也能让 D2/D3 蒙成绿。D3 的满额前置**现场制造且可复算**：
+`dlmgr_add` 灌到拒绝（实测 `首个拒绝下标=127`、`dlmgr_list=128` == `MAX_TASKS`），跑完逐个 `dlmgr_cancel` 收摊。
+
+**三、四面变异（各咬一条合取项，互不重叠；每面都 grep 确认标记串已在盘上才重编）**：
+| 面 | 做法 | exe_sha12 | 红的判据 |
+|---|---|---|---|
+| M-⑫A | `if (false && url.length() >= kMaxDropUrlLen)` | `bd2f47f626b7` | 只 D2 红，读数回到 `交给对话框的长度=32767` |
+| M-⑫B | 保留 return、删掉那条 warn | `33bed21725d5` | 只 D2 红，`有界或拒=1 但 告警=0` ⇒ 证明 D2 是两个合取项、不是一层皮 |
+| M-⑫C | 失败支 `Log::warn` → `Log::info` | `3f9aeab16488` | 只 D3 红 |
+| M-⑫D | `if (id > 0)` → `if (true)` | `05cac1c3dc53` | 只 D3 红（失败被当成功记 info） |
+还原复绿 exe `57568c3f8423`、RC=0。**四面全部如实登记，无一"没咬到"**。
+
+**四、四条被实测驳回的测具假设**（都是我的错，不是产品的错；每条都换了真证据才改期望）：
+① 直接 `sendEvent(drop)` **挂死**——`dlg.exec()` 阻塞，控制权进不到采样器（第一版卡十分钟）⇒ 改 K3 同款
+   queued 触发 + 外层 `QEventLoop` + qApp 守卫；② **不发 `dragEnterEvent` 就没有 drop 语义**（真实拖放里 drop
+   之所以送达是因为 enter 被 accept 过）⇒ D1 当时也红，是我没敲对门；③ 守卫用 `reject()` 关对话框 ⇒
+   `exec()` 返回 Rejected ⇒ `internalAddTask` 根本不执行 ⇒ D3 永远看不到失败支，必须**点 OK** 走 `onAccepted`
+   （顺带踩到 `NewTaskDialog::result()` 把 `QDialog::result()` 覆盖成返回 `NewTaskInput`，取状态得走基类）；
+   ④ `w.findChild<TaskListModel*>()` **恒为 nullptr**（模型是成员不是子 QObject），且"立即开始"的任务占并发槽、
+   并不都进引擎队列计数 ⇒ 靠 GUI 灌不满 128，改为按引擎口径 `dlmgr_add`/`dlmgr_list` 制造满额。
+
+**五、一个新加的仪器卫生规矩：探针把自己的 sha12 印进输出**。第一轮 M-⑫C 与 M-⑫D 两份归档**字节完全相同**
+（同为 `65af65b70fd5`）——两面红的是同一个判据、读数一字不差，光看日志分不出是哪枚二进制跑的，归档就失去证人。
+现在 `[DRAGDROP 身份] exe_sha12=` 由探针自己算（与外部 `sha256sum < … | cut -c1-12` 当场对得上，同一算法），
+每面原文独立指向一枚产物。另记两次工具性错误：heredoc 里的反斜杠-n 序列会被字符串转义吃掉，
+在 C++ 源码里造出裸换行的字符串字面量（**本会话第三次同类**，已进长期记忆）；以及 `timeout 120 env …`
+给出 **RC=0 且零输出**——`timeout` 在这套 MSYS 工具链上的退码不可信，判"跑过了"必须看有没有断言行。
+
+**六、名单与门禁**：`IDM_DRAGDROP_PROBE` 进 §1.4 表与 CI 闸门名单（模式 24→25、CI 名单 21→22），
+`TOTAL_PASS` 钉到 ≥70（本机 22 个闸门模式现算 **95** 条，余量 25；套件总数 96 里含红门 PATHGUARD 自己那条 G3，
+所以两个号分别是 95/96，别混）。roster 夹具仍 16/16。

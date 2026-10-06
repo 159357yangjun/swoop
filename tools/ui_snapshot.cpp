@@ -85,6 +85,11 @@
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QPushButton>
+#include <QMimeData>
+#include <QDropEvent>
+#include <QDragEnterEvent>
+#include <QPoint>
+#include <QUrlQuery>
 #include <QNetworkProxy>
 #include <QIcon>
 #include <functional>
@@ -2280,6 +2285,235 @@ int main(int argc, char** argv) {
                okAll ? "[PASS]" : "[FAIL]", c1, c1b, c2, c3, c4);
         QDir(dir).removeRecursively();
         return okAll ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_DRAGDROP_PROBE=1（⑫ A4 R2/R3，TDD：修复落地前恒红）──
+     * ⑪ 审计出的两条 A 类风险此前**零证人**（U1：全仓 tools/ 里 dragEnter|dropEvent|QMimeData = 0 命中），
+     * 所以本轮先写必红的夹具，再改产品——顺序不许倒。
+     *   R2 main_window.cpp:972 `url = mime->text().trimmed()` 之后没有任何长度上限 ⇒
+     *      MB 级字符串一路进单行编辑器与 URL 解析；
+     *   R3 :985-988 只有成功分支（`if (id > 0) Log::info(...)`），失败静默 ⇒
+     *      用户点完确定什么都没发生、日志无从区分。IPC/web 侧同类路径是有 warn 的
+     *      （addTaskFromUrl:1754-1757），这里对齐它的措辞形状。
+     * 判据三条各印自己的读数：
+     *   D1 正例对照：正常短 URL 拖进来 ⇒ 必须弹出预填该 URL 的新建任务对话框
+     *      （期望非 0 的牙；没有它，"drop 一律什么都不做"也能让 D2/D3 蒙过）。
+     *   D2 R2：超长文本（3 MiB）拖进来 ⇒ 不得把整串交给对话框，且必须留一条可区分的告警。
+     *   D3 R3：走到 internalAddTask 真失败的那一支（空 URL ⇒ dlmgr_add 在 download_core.c:1529
+     *      `if (!g_initialized || !url || *url=='\00') return -1`，这条失败支在健康树上可达，
+     *      不是"和自己比"的不可达变异）⇒ 必须有一条 warn。
+     * ⚠ 模态拦截沿用 K3/⑩ 的形状：queued 触发 + 内层轮询 + qApp 全局守卫收尸，绝不留 exec 无人关。
+     * ⚠ 数据目录与管道都按 pid 隔离（IDM_TEST_PIPE 扩面），零落盘零触网：只建任务不 start。 */
+    if (qEnvironmentVariableIsSet("IDM_DRAGDROP_PROBE")) {
+        qputenv("IDM_TEST_PIPE",
+                QStringLiteral("idm-dd-%1").arg(QCoreApplication::applicationPid()).toUtf8());
+        const QString dirPg = QDir::tempPath() + QStringLiteral("/idm-dragdrop-probe-")
+                              + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(dirPg);
+        qputenv("IDM_DATA_DIR", dirPg.toUtf8());
+
+        // 日志捕获：Log::warn 走 qWarning ⇒ 装一个 handler 就能数到，不需要产品加计数器
+        static QStringList g_warns;
+        auto* oldHandler = qInstallMessageHandler([](QtMsgType t, const QMessageLogContext&, const QString& m) {
+            if (t == QtWarningMsg) g_warns << m;
+        });
+
+        bool d1 = false, d2 = false, d3 = false;
+        QString dd1, dd2, dd3;
+
+        MainWindow w;
+        w.move(-32000, -32000);
+        w.show();
+        QCoreApplication::processEvents();
+
+        /* 发一次 drop（K3 同款形状，原因也一模一样）：
+         *   dropEvent 里那句 dlg.exec() 是**阻塞**的 ⇒ 若直接 sendEvent，控制权永远进不到
+         *   我们的采样器，探针当场挂死（第一版就是这么 rc=124 卡十分钟，不是产品慢）。
+         *   正解：把"发事件"排进队列，由外层 QEventLoop 驱动；exec 起来后挂在 qApp 上的
+         *   守卫定时器才会 fire ⇒ 采样、抓预填文本、替它收尸都在 exec 之内完成。
+         * ⚠ mime 必须在 outer.exec() 期间保持存活 ⇒ 调用方持有，这里只借指针。 */
+        struct DropRun { int peak = 0; int closed = 0; int accepted = -1; QString prefill; QString diag; QString wrongDlg; };
+        auto sendDrop = [&](const QMimeData* mime, DropRun& out) -> void {
+            out = DropRun{};
+            const QPointF at(w.geometry().center());
+            auto countDlg = []() {
+                int n = 0;
+                for (QWidget* x : QApplication::topLevelWidgets())
+                    if (qobject_cast<NewTaskDialog*>(x) && x->isVisible()) ++n;
+                return n;
+            };
+            /* 守卫拿到对话框时**必须点「确定」而不是 reject()**：
+             *   reject() 会让 exec() 返回 Rejected ⇒ dropEvent 里那段 internalAddTask 根本不执行
+             *   ⇒ D3 永远看不到失败支（第一版 D3 恒红就是这个原因，不是产品没 warn）。
+             *   点 OK 走的是 onAccepted → accept()，与真用户按回车同一条路。 */
+            auto grabAndClose = [&]() {
+                for (QWidget* x : QApplication::topLevelWidgets()) {
+                    if (auto* d = qobject_cast<NewTaskDialog*>(x)) {
+                        if (out.prefill.isEmpty()) {
+                            const QList<QLineEdit*> edits = d->findChildren<QLineEdit*>();
+                            if (!edits.isEmpty()) out.prefill = edits.first()->text();
+                        }
+                        ++out.closed;
+                        bool clicked = false;
+                        if (auto* bb = d->findChild<QDialogButtonBox*>()) {
+                            if (QAbstractButton* ok = bb->button(QDialogButtonBox::Ok)) {
+                                ok->click();
+                                clicked = true;
+                            }
+                        }
+                        if (!clicked) d->reject();      // 找不到 OK 才退回 reject（会在 diag 里显出 accepted=0）
+                        // ⚠ NewTaskDialog 把 result() 覆盖成返回 NewTaskInput（不是 QDialog 的 int），
+                        //    所以这里必须走基类取对话框状态。
+                        out.accepted = (static_cast<QDialog*>(d)->result() == QDialog::Accepted) ? 1 : 0;
+                        return true;
+                    }
+                    // 挡在路上的别的模态窗（⑩/K3 教训：不点名就会把挂死误读成产品慢）
+                    if (x->isModal() && x->isVisible() && !qobject_cast<MainWindow*>(x)) {
+                        out.wrongDlg = x->metaObject()->className();
+                        x->close();
+                    }
+                }
+                return false;
+            };
+
+            QEventLoop outer;
+            QTimer hardStop; hardStop.setSingleShot(true);
+            QObject::connect(&hardStop, &QTimer::timeout, &outer, [&]() {
+                for (int g = 0; g < 50 && countDlg() > 0; ++g) { grabAndClose(); QCoreApplication::processEvents(QEventLoop::AllEvents, 20); }
+                out.diag += QStringLiteral(" HARDSTOP");
+                outer.quit();
+            });
+            QTimer spy;
+            QObject::connect(&spy, &QTimer::timeout, qApp, [&]() {
+                const int n = countDlg();
+                if (n > out.peak) out.peak = n;
+                if (n > 0) { grabAndClose(); return; }
+                if (out.closed >= 1) outer.quit();
+            });
+            spy.start(5);
+            hardStop.start(8000);
+
+            // 触发排在队列里：enter+drop 都由 outer.exec() 驱动（sendEvent 直调会内联进 exec ⇒ 守卫够不着）
+            QDragEnterEvent ent(at.toPoint(), Qt::CopyAction | Qt::MoveAction, mime,
+                                Qt::LeftButton, Qt::NoModifier);
+            QDropEvent ev(at, Qt::CopyAction | Qt::MoveAction, mime,
+                          Qt::LeftButton, Qt::NoModifier);
+            bool enterAccepted = false;
+            QMetaObject::invokeMethod(&w, [&]() {
+                QApplication::sendEvent(&w, &ent);
+                enterAccepted = ent.isAccepted();
+                QApplication::sendEvent(&w, &ev);
+            }, Qt::QueuedConnection);
+            outer.exec();
+            spy.stop(); hardStop.stop();
+            for (int i = 0; i < 60 && countDlg() > 0; ++i) QCoreApplication::processEvents();
+            out.diag = QStringLiteral("enterAccepted=%1 dropAccepted=%2 peak=%3 closed=%4 accepted=%5")
+                           .arg(enterAccepted ? 1 : 0).arg(ev.isAccepted() ? 1 : 0)
+                           .arg(out.peak).arg(out.closed).arg(out.accepted)
+                         + (out.wrongDlg.isEmpty() ? QString() : QStringLiteral(" 冒名窗=%1").arg(out.wrongDlg));
+        };
+
+        // ── D1 正例对照 ──
+        {
+            QMimeData mime;
+            mime.setUrls({QUrl(QStringLiteral("https://ex.test/dd-ok.zip"))});
+            DropRun r; sendDrop(&mime, r);
+            const QString pre = r.prefill;
+            d1 = (r.peak == 1) && (r.closed >= 1) && pre == QStringLiteral("https://ex.test/dd-ok.zip");
+            dd1 = QStringLiteral("对话框峰值=%1 已关=%2 预填=「%3」期望=「https://ex.test/dd-ok.zip」｜%4")
+                      .arg(r.peak).arg(r.closed).arg(pre.left(60)).arg(r.diag);
+        }
+
+        // ── D2 R2：超长文本 ──
+        {
+            const int huge = 3 * 1024 * 1024;
+            QMimeData mime;
+            mime.setText(QStringLiteral("http://ex.test/") + QString(huge, QLatin1Char('a')));
+            g_warns.clear();
+            DropRun r; sendDrop(&mime, r);
+            const QString pre = r.prefill;
+            const bool handedOverWhole = (pre.length() >= huge);   // 整串塞给单行编辑器＝R2 原状
+            bool warned = false;
+            for (const QString& x : g_warns)
+                if (x.contains(QStringLiteral("拖放"))) { warned = true; break; }
+            // 判据：要么**根本没开对话框**（直接拒这条 drop），要么开的时候文本有界。
+            // 两种都算修好；只有"整串交出去"才算没修。
+            const bool refusedOrBounded = (r.peak == 0) || (!pre.isEmpty() && pre.length() <= 8192);
+            d2 = !handedOverWhole && refusedOrBounded && warned;
+            dd2 = QStringLiteral("输入长度=%1 交给对话框的长度=%2 对话框峰值=%3 有界或拒=%4 告警含「拖放」=%5｜%6")
+                      .arg(huge + 15).arg(pre.length()).arg(r.peak)
+                      .arg(refusedOrBounded ? 1 : 0).arg(warned ? 1 : 0).arg(r.diag);
+        }
+
+        // ── D3 R3：internalAddTask 真失败那一支必须有 warn ──
+        // 失败条件必须**本轮现场制造且可复算**，不靠"大概会失败"。引擎 dlmgr_add 的可达失败支两条：
+        //   ① download_core.c:1529 空串 url ⇒ 对话框 onAccepted 要求 url 非空（new_task_dialog.cpp:339），走不到；
+        //   ② download_core.c:1532 `g_task_count >= MAX_TASKS`（download_core.h:25 = **128**）⇒ 可复算。
+        // ⚠ 上一版这里用「GUI addTaskFromUrl 灌到模型不再增长」当满额判据，实测满额=0——
+        //    两个错叠在一起：(a) `w.findChild<TaskListModel*>()` 永远返回 nullptr（模型是成员不是子 QObject）；
+        //    (b) 更要紧的是**立即开始**的任务会占并发槽、并不都进引擎队列计数，光靠 GUI 灌不满 128。
+        //    所以改为直接按引擎自己的口径灌：dlmgr_add 填到返回 -1，再用 dlmgr_list 现读条数当证人。
+        {
+            // 满额前置必须**与前面几段留下的槽位无关**：D1 自己就成功建过 1 个任务，
+            // 所以"灌到拒绝"时 filled 会少 1（实测 127/128）。这里不猜容量，
+            // 一直灌到 dlmgr_add 拒绝为止，再用 dlmgr_list 现读真实占用当证人。
+            int filled = 0, firstRejectAt = -1;
+            for (int i = 0; i < 400; ++i) {
+                const QString u = QStringLiteral("http://127.0.0.1:1/fill%1.bin").arg(i);
+                const int id = dlmgr_add(u.toUtf8().constData(), dirPg.toUtf8().constData(),
+                                         nullptr, 0, nullptr, nullptr, nullptr, nullptr);
+                if (id > 0) ++filled;
+                else { firstRejectAt = i; break; }
+            }
+            int listed[256];
+            const int nListed = dlmgr_list(listed, 256);
+            g_warns.clear();
+            QMimeData mime;
+            mime.setText(QStringLiteral("http://ex.test/after-full.zip"));
+            DropRun r; sendDrop(&mime, r);
+            bool warnedFail = false;
+            for (const QString& x : g_warns)
+                if (x.contains(QStringLiteral("添加任务失败"))) { warnedFail = true; break; }
+            // 前置成立才让 d3 说话：引擎确实被灌到拒绝（否则这条断言是哑的，如实登记）
+            d3 = (firstRejectAt >= 0 && nListed >= 100) && (r.peak == 1) && warnedFail;
+            dd3 = QStringLiteral("引擎灌入=%1 首个拒绝下标=%2 dlmgr_list=%3(>=100 才算满额前置成立) "
+                                 "对话框峰值=%4 预填=「%5」warn 含「添加任务失败」=%6 本轮 warn 行数=%7｜%8")
+                      .arg(filled).arg(firstRejectAt).arg(nListed).arg(r.peak)
+                      .arg(r.prefill.left(40)).arg(warnedFail ? 1 : 0).arg(g_warns.size()).arg(r.diag);
+            for (int i = 0; i < nListed; ++i) dlmgr_cancel(listed[i]);   // 收摊：别把槽位留给下一段
+        }
+
+        w.hide();
+        qInstallMessageHandler(oldHandler);
+
+        printf("%s [D1] 正例对照：正常 URL 拖入 ⇒ 恰好弹出一个新建任务对话框且预填逐字==该 URL\n",
+               d1 ? "[PASS]" : "[FAIL]");
+        printf("    [D1 读数] %s\n", dd1.toUtf8().constData());
+        printf("%s [D2] R2：3MiB 文本拖入 ⇒ 不得整串交给编辑器，须有界并留可区分告警\n",
+               d2 ? "[PASS]" : "[FAIL]");
+        printf("    [D2 读数] %s\n", dd2.toUtf8().constData());
+        printf("%s [D3] R3：新增任务失败那一支 ⇒ 必须有一条 warn（对齐 IPC 侧形状）\n",
+               d3 ? "[PASS]" : "[FAIL]");
+        printf("    [D3 读数] %s\n", dd3.toUtf8().constData());
+
+        // exe 身份印进探针自己的输出：⑫ 实测 M-C 与 M-D 两面**红的是同一个判据、读数逐字相同**，
+        // 两份归档文件因此字节一致——光看日志分不出是哪枚二进制跑的。带上自身哈希后，
+        // 每面原文都能独立指向一枚产物（算法与台账一致：sha256 前 12）。
+        {
+            QFile self(QCoreApplication::applicationFilePath());
+            QString h = QStringLiteral("-");
+            if (self.open(QIODevice::ReadOnly)) {
+                QCryptographicHash sha(QCryptographicHash::Sha256);
+                if (sha.addData(&self)) h = QString::fromLatin1(sha.result().toHex().left(12));
+                self.close();
+            }
+            printf("    [DRAGDROP 身份] exe_sha12=%s\n", h.toUtf8().constData());
+        }
+        const bool okDd = d1 && d2 && d3;
+        printf("%s [DRAGDROP 汇总] d1=%d d2=%d d3=%d\n",
+               okDd ? "[PASS]" : "[FAIL]", d1, d2, d3);
+        QDir(dirPg).removeRecursively();
+        return okDd ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──
