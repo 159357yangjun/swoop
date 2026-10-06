@@ -3640,3 +3640,86 @@ build/freshness/host_manifest/live_roster/probe_roster/sniff(12/0) 全 rc=0；�
 **仍然没验证的东西**：K2 的 a)/b) 只被 M-B 一种形态证明过（换个别的破坏方式未必红）；
 K1 仍是静态属性证人（offscreen 合成按键到不了快捷键系统，canary 四种发法累计 0）；
 CI 从未在 runner 执行；像素证人受本机焦点约束；采集卡真浏览器 E2E 与画质下拉的真实点击面仍未跑。
+
+---
+
+### 2026-10-06 04:3x（第 59 条）— ④ capture 卡片**真浏览器 E2E**：13 条判据全绿，并当场承认「卡片里没有『浏览...』按钮」
+
+**测的是什么形状的问题**：此前所有采集卡证人都是 offscreen 合成（`ui_snapshot` 直接构造 DOM 字符串 /
+`tools/ext_shot*.py` 用注入的 stub 页面）。它们能证明"卡片存在、字段齐全"，**不能证明"用户点得到、
+字打得进、提交真的走到 GUI"**。④ 的要求就是把这条链在真实环境里跑通。
+
+**测试方法（驱动方式，逐项写实）**：
+- 浏览器：**本机已装的 Microsoft Edge Edg/154.0.4258.53**，`--headless=new` 但**不是 mock**——
+  真实渲染引擎、真实扩展宿主、真实 native messaging 通道。
+- 驱动：**手搓的最小 CDP WebSocket 客户端**（`tools/capture_e2e.py` 内 `class Ws`，与 `nm_e2e.py` 同形），
+  只用 `Target.createTarget` / `attachToTarget(flatten)` / `Runtime.evaluate(returnByValue,awaitPromise)` /
+  **`Input.dispatchMouseEvent`（真鼠标事件，不是 `.click()`）** / `Input.insertText` / `Page.captureScreenshot`。
+  **零新增依赖**（标准库 + 已有栈）。
+- 扩展：真实解包加载 `browser-extension/`，ID 由 manifest `key` 推导 = `fmnehlhldcoknecihnlbbcmhpaaapmbp`。
+- 主机：真实 `build/idm-next-host.exe`（sha12 `b2a6741688b8`）+ 真实命名管道 + 真实 GUI `idm-next.exe`
+  （HEAD `2fbd8ad`；本轮三次运行的 app sha12 见下文 M-C 一节，逐档记录在案）。
+  GUI 侧可达性由该脚本自身断言⑦⑧承担（toast + `IPC add 参数:` 行），不再另起 `nm_e2e.py`。
+- 视频源：本地夹具 HTTP 服务（127.0.0.1:8251）发 `/hls/master.m3u8`，两条 variant
+  BANDWIDTH=6239287（高）/246440（低），**分片内容按档位不同** ⇒ 落盘字节本身标识选了哪档。
+
+**13 条判据（本轮全部为绿，读数档 `%TEMP%/idm-capture-e2e-261006-041940`）**：
+| # | 判据 | 一手证据 |
+|---|---|---|
+| ① | 悬停后悬浮按钮出现 | `.idm-next-float-btn.show` |
+| ② | **真鼠标点击**弹出卡片且含 name/dir/fmt | `[卡片] {"w":348,"h":241,...,"btns":["立即下载","加入队列","取消"]}` |
+| ③ | 卡片完整落在视口内（不截断） | right 547 ≤ vw 746，bottom 251 ≤ vh 483 |
+| ③b | 9 个部件两两不重叠、不越出卡片 | `重叠对=[] 越界=[]` |
+| ④ | 画质下拉由**真 host** 填出两条 BANDWIDTH | `vals=["","6239287","246440"]` 文案含 `1080x1920 · 6.2 Mbps` / `96x540 · 0.2 Mbps` |
+| ⑤ | 文件名输入框可聚焦且**真键入** | `activeElement="idm-cap-name"` → `value='clicked_name.bin'` |
+| ⑥ | 低档位可选中 | select 后 value=246440 |
+| ⑦ | 提交后成功回执且卡片自摘 | `toast={"text":"已添加下载: clicked_name.bin","cls":"… success show"} 卡片已关=True` |
+| ⑧ | GUI 收到我选的档位 | 日志行 `IPC add 参数: … hlsVariant=246440` |
+| ⑨ | GUI 收到我键入的文件名 | 同一行 `file=clicked_name.bin` |
+| ⑩ | **反向对照**：不选画质时该字段必须为空 | 走产品自己的 `showCaptureDialogFor`，该行 `hlsVariant=` 空 |
+| ⑪ | dir 字段端到端到达 GUI | 显式把保存目录打字进卡片，制品落在时间戳 logdir 而非 Downloads |
+| ⑫ | 落盘字节 == 所选低档拼接、且 != 高档 | `文件=master.ts 大小=12288 sha256=7fd14f4740c6 等于低档=True 等于高档=False` |
+| — | 自检：低/高档期望值不得相等 | `LO_EXPECT != HI_EXPECT` 打印为 True |
+
+**为这条链新增的产品侧代码（唯一一处，7 行）**：`src/app/ipc_server.cpp` 的 `add` 分支在 `m_addTask(...)`
+之后打印一行参数证人 `IPC add 参数: url=… file=… dir=… threads=… queue=… format=… hlsVariant=…`。
+没有它，⑧⑨⑩⑪ 只能靠"下载结果长得像不像"间接推断 ⇒ 那是弱证人。兼容性核对：既有测具匹配的子串
+`IPC 请求: add → 成功` 未改，套件照旧绿。
+
+**变异 M-C（证明 ⑧ 有牙，不是恒真）——本轮三次运行，逐次带 app sha12**：
+| 面 | app_exe sha12 | 判据结果 | 读数档 |
+|---|---|---|---|
+| 基线（源码原样） | `586b0fac4a6d` | 13 条全绿 | `%TEMP%/idm-capture-e2e-261006-043150` |
+| **M-C**：`.arg(queue, format, hlsVar)` → `.arg(queue, QString(), QString())`（witness 的 format/hlsVariant 置空） | `63d42131c5fa` | **恰好一条红**：`⑧ GUI 收到的 hlsVariant == 我在下拉里选的低档位`，其余 12 条绿，rc=1 | `…/idm-capture-e2e-261006-043218` |
+| 还原重编 | `591bbd2a374f` | 13 条全绿，rc=0 | `…/idm-capture-e2e-261006-043244` |
+
+⚠ 这一节是**重跑的**：上一轮我口头说过"M-C 跑过、恰好一条红"，但当时没有留下对应读数档
+（盘上只有全绿档与两条红的开发期失败档）⇒ 那句话按台账规矩属于"没证据的结论"，本轮补齐。
+⑩ 的反向对照是同一判据的另一面：如果 witness 恒印同一个值，⑩ 会先红。
+
+**必须诚实说出的三件事**：
+1. **「浏览...」按钮不在这张卡片上。** 它是 `NewTaskDialog`（Ctrl+N 那个桌面对话框）的控件，
+   已由 ③ 的 K2 两次变异（M-A 摘 accepted 接线 / M-B 关 autoDefault）证明可点、可开、handler 真跑。
+   采集卡 DOM 里没有这个按钮 ⇒ 我没有为它编造通过项，也没有把它算作失败。
+2. **`tools/ext_shot*` 那套 stub 测具证明不了提交**：它注入假页面、不发真消息到 host，
+   所以历史上"卡片截图 OK"从来不包含 ⑦⑧⑫ 这一段。本轮起才有端到端证人。
+3. **像素证人仍受本机焦点约束**：截图是 headless 渲染帧，不等于前台窗口实测；
+   ③/③b 用的是几何读数（rect/viewport），不是视觉比对。
+
+**门禁（本轮在 M-C 还原后的二进制上复跑，app sha12=`591bbd2a374f`）**：
+- 套件 19 模式 PASS=79 FAIL=0 零断言=0（日志 `/tmp/idm-probes/ui-1006-042602`；跑在 `ui_snapshot.exe d5bd121f37b5` 上）。
+- build_gate / host_manifest_gate / live_roster / probe_roster / a_gate(有效轮=6 A面缺失=0) / sniff_rules(12/0) 全 rc=0。
+- freshness_gate 在 `97c51ec`（产品代码那笔）**落地后复跑 rc=0、不合格=0** ⇒ "产品 exe == 当前源码"这句话本轮成立。
+- 引擎自测 **180/0**（带认证服务器 18092，`engine_selftest.exe a254689c17f5`，落盘 `/tmp/est_run1.log`）。
+- NOTICE 由 `notice_verify.py` 自己的口径重签：`src/=945872`、`tools/=941109(51 个)`、`docs/=624301`，
+  合计 `402 + 10 = 412`（本轮新增被跟踪文件只有 `tools/capture_e2e.py`）⇒ FAIL=0，`notice_sha12=eb4dc046f108`。
+
+**仍然没验证的东西**：卡片在**非默认窗口尺寸/缩放下**是否仍不截断（只量了 746×483 这一档）；
+「取消」按钮与 ESC 的关闭语义没有判据；多标签页并发弹卡（同名去重、焦点归属）未测；
+Edge 版本号升级后 CDP `Input.*` 行为是否不变；CI 从未在 runner 执行过这套 py（它只在本地跑，
+且 `capture_e2e.py` **不在任何闸门名单里**——`.github/workflows/ci.yml` 里没有对它的调用，probe_roster 也不管 py）；
+M-C 只演示了一种破坏形态（置空），换成语义错位（如档位取反）未必被同一判据抓到；
+**真 GUI 与 offscreen 探针共用字面量产品管道名 `idm-next-ipc`**（`IDM_TEST_PIPE` 只在 ACTIVATE 面生效，
+`capture_e2e.py` 起的 app 不设它）⇒ `IpcServer::start()` 的 `removeServer()` 会摘掉对方正在监听的 endpoint，
+本轮三次 E2E 与套件是**串行**跑的所以没撞上；并行或残留实例下两侧都可能"连到别人家/没人监听"。这是已知形状，
+不是本轮新发现（§7-57 记过半边），彻底解法（app 侧 pid 作用域管道）仍未做。
