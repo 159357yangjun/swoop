@@ -1950,10 +1950,10 @@ int main(int argc, char** argv) {
             QString result, match;
             for (QLabel* l : labels) {
                 const QString t = l->text();
-                if (t.size() == 32 || t.size() == 40 || t.size() == 64) {
+                if ((t.size() == 32 || t.size() == 40 || t.size() == 64) && result.isEmpty()) {
                     bool hex = true;
                     for (const QChar& c : t) if (!QStringLiteral("0123456789abcdefABCDEF").contains(c)) { hex = false; break; }
-                    if (hex && result.isEmpty()) result = t;
+                    if (hex) result = t;
                 } else if ((t.contains(QStringLiteral("校验通过")) || t.contains(QStringLiteral("校验失败")))
                            && match.isEmpty()) {
                     match = t.left(24);
@@ -1963,7 +1963,7 @@ int main(int argc, char** argv) {
             return {result, match, QString()};
         };
 
-        bool h0 = false, h1 = false, h2a = false, h2b = false, h3 = false, h3b = false;
+        bool h0 = false, h1 = false, h2a = false, h2b = false, h2c = false, h3 = false, h3b = false;
         QString d0, d2a, d2b, d3;
         {
             const auto r = runVerify(QStringLiteral("SHA-256"), QString());
@@ -1989,13 +1989,22 @@ int main(int argc, char** argv) {
             printf("%s [H1] 对话框分块结果 == QCryptographicHash 独立重算（两种调用形状互印）\n",
                    h1 ? "[PASS]" : "[FAIL]");
         }
-        {   // H2：匹配与不匹配两分支
-            const auto good = runVerify(QStringLiteral("SHA-256"),
-                                        QStringLiteral("36BBE50ED96841D10443BCB670D6554F0A34B761BE67EC9C4A8AD2C0C44CA42C"));
+        {   // H2：匹配与不匹配两分支。⚠ 两侧都要**故意大写输入**——
+            // 计算侧 :159 toLower、预期侧 :158 toLower，摘掉任何一侧的归一都必须红（M-⑨a3/a4 实测）。
+            const QString lower = QStringLiteral("36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c");
+            // ⚠ 预期值喂**小写**：产品算出的串本来就是小写（toHex），摘掉"计算侧 toLower"在
+            //   小写输入下不可见 ⇒ 要让 M-⑨a3 有牙，证人必须换形状：
+            //   h2a 钉"通过 + 逐字等于小写向量"；h2c 钉"喂大写预期⇒必须判不匹配"
+            //   （产品对预期值做 toLower ⇒ 大写输入也须通过；摘掉任何一侧归一，这两条之一必红）。
+            const auto good = runVerify(QStringLiteral("SHA-256"), lower);
             const auto bad = runVerify(QStringLiteral("SHA-256"),
-                                       QStringLiteral("0000000000000000000000000000000000000000000000000000000000000000"));
-            h2a = good[1].contains(QStringLiteral("校验通过"));
+                                       QStringLiteral("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+            const auto upperCaseExpected = runVerify(QStringLiteral("SHA-256"),
+                                                     QStringLiteral("36BBE50ED96841D10443BCB670D6554F0A34B761BE67EC9C4A8AD2C0C44CA42C"));
+            h2a = good[1].contains(QStringLiteral("校验通过")) && (good[0] == lower);
             h2b = bad[1].contains(QStringLiteral("校验失败"));
+            // 第二证人：大小写归一本身——预期值给大写也必须"通过"（两侧各一次 toLower 的共同产物）
+            h2c = upperCaseExpected[1].contains(QStringLiteral("校验通过"));
             d2a = QStringLiteral("正=「%1」错=「%2」")
                       .arg(good[1].isEmpty() ? QStringLiteral("-") : good[1],
                            bad[1].isEmpty() ? QStringLiteral("-") : bad[1]);
@@ -2003,6 +2012,8 @@ int main(int argc, char** argv) {
                    (h2a && h2b) ? "[PASS]" : "[FAIL]");
             printf("    [H2 读数] %s（大写输入也须匹配=大小写归一在 :158 toLower）\n",
                    d2a.toUtf8().constData());
+            printf("%s [H2c] 大小写归一的逐字证人：对话框算出串必须是小写 hex（摘任一侧 toLower ⇒ 全等断言红）\n",
+                   h2c ? "[PASS]" : "[FAIL]");
         }
         {   // H3：入口链——真 DownloadManager + 详情对话框里的按钮存在且可用
             DownloadManager mgr;
@@ -2024,9 +2035,9 @@ int main(int argc, char** argv) {
             td.hide();
         }
         QDir(dir).removeRecursively();
-        const bool okAll = h0 && h1 && h2a && h2b && h3 && h3b;
-        printf("%s [HASHVERIFY 汇总] h0=%d h1=%d h2a=%d h2b=%d h3=%d h3b=%d\n",
-               okAll ? "[PASS]" : "[FAIL]", h0, h1, h2a, h2b, h3, h3b);
+        const bool okAll = h0 && h1 && h2a && h2b && h2c && h3 && h3b;
+        printf("%s [HASHVERIFY 汇总] h0=%d h1=%d h2a=%d h2b=%d h2c=%d h3=%d h3b=%d\n",
+               okAll ? "[PASS]" : "[FAIL]", h0, h1, h2a, h2b, h2c, h3, h3b);
         return okAll ? 0 : 1;
     }
 
