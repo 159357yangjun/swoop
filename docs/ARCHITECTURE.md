@@ -4053,3 +4053,37 @@ capstone 红并报"不是本轮的"（证明它不会拿"名字碰巧对上"蒙�
 PASS=92 FAIL=2（唯一红＝IDM_PATHGUARD_PROBE，按设计），`ui_snapshot.exe sha12=ea506238e63d`；
 引擎自测 182/1（唯一红＝[37②]，按设计），`engine_selftest.exe sha12=56fa9e75f292`。
 清残留时又发现一次运行落的 `dom.mp4`（同 sha256 `267989ec0181…`、200012 B），一并删除 ⇒ Downloads 内 `dom*` 计数=0。
+
+### 2026-10-06 11:4x（第 66 条）— ⑪ A4：拖拽回调只读审计，零代码改动
+
+仓根同上，起点 HEAD `cac4b32`。报告落 `docs/drag-audit-1006.md`；本轮 `src/` 一行未动
+（提交前后各查一次 `git diff --numstat cac4b32..HEAD -- src/` 为空）。
+
+**普查口径**：先跑正例对照证明 grep 没瞎（同套 `--include` 下 `clipboard()` 命中 5 行），再逐符号数
+`setAcceptDrops`=1、`dragEnterEvent`=定义 1、`dropEvent`=定义 1、`QMimeData`=2、
+`dragLeaveEvent`/`dragMoveEvent`/`startDrag`/`mime->data(...)` **全部 0**
+⇒ 全仓只有 **MainWindow 一个入向 drop 面**，无子控件重写、无外向拖出。中文侧"拖放/拖入"交叉核对
+另两处（`:549` 空状态插画不拦截、`:1901` 文案）均为说明文字，不构成第二入口。
+
+**结论：2 个回调 + 1 个下游执行体；安全/已查不是缺陷 3 条，A 类风险 3 条，B 类验证缺口 3 条。**
+- R1（B）`dragEnterEvent:957` 谓词只有 `hasText()||hasUrls()` ⇒ 门过宽，靠下游 StrictMode 兜底，属无人断言的口径。
+- R2（A）`dropEvent:972` 取文本后**无长度上限** ⇒ MB 级字符串进单行编辑器与 URL 解析。
+- R3（A）`:985-988` **失败静默**：IPC/web 侧有 `if (id<=0) Log.warn; return;`（`addTaskFromUrl:1754-1757`），
+  剪贴板分支至少记 info，拖放这条只有成功分支 ⇒ 用户点完确定什么都没发生且日志无从区分。
+- G1（A）dir 面零清洗＝**继承 ⑧ A1，不是新增缺陷**：拖本地文件得 `file:///…` 会被对话框拒
+  （scheme 白名单 http/https + ftp/ftps/magnet/.torrent，`new_task_dialog.cpp:348-359`、
+  `torrent_downloader.cpp:93-113`），但 `.torrent`/`localTorrent` 那支仍把 dir 原样交给未清洗的下游。
+- U1（B）**拖放路径零测试覆盖**：`grep -rn "dragEnter|dropEvent|QMimeData" tools/*.cpp tools/*.c` = 0 命中
+  ⇒ ⑦ 当时登记的 A4 建议至今未被做掉，本轮复核为真。
+- U2（B）一次拖 N 个只取第一个（`:967-970`）行为合理但从未断言；且拖放传 `queue=""` ⇒ 立即开下、
+  **绕过 `maxConcurrent`**（队列侧才有 `qMax(1, m_maxConcurrent())`，`queue_scheduler.cpp:42,71`，默认 4）。
+- C1/C2（已查不是缺陷）：无 `startDrag` ⇒ 不存在 MIME 外泄面；未实现 leave/move 是 Qt 默认忽略即可。
+
+**一处需要定夺的台账不一致（只报不自行改）**：`coverage-audit-1006.md:22` 把 A4 分类列写成 **A**，
+而 `:61` 的汇总行把「剪贴板监听 / 拖放 / 托盘」整体归到 **否**。我的判断：拖放的**覆盖缺口**是 B（U1），
+拖放的**行为缺陷**（R2/R3）才是 A——两个号不该共用一格。改哪一处属作者权，等点名。
+
+**仍然没验证的东西**：① 全程静态读码，`QDropEvent` 从未真的发给过 MainWindow ⇒
+"拖放能弹出预填好链接的对话框"目前是推断不是观测；② `file://` 被拒依赖那段代码被执行，未实测拖真实文件；
+③ R2 未测出"多少字节开始卡"；④ 未跑"连拖 100 次"的稳定性，只证明了代码层面一次 drop 至多建 1 个任务；
+⑤ CI 仍未执行过。
