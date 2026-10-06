@@ -231,6 +231,13 @@ if(IDM_BUILD_UI_SNAPSHOT)
         resources/resources.qrc
     )
     target_link_libraries(ui_snapshot PRIVATE idm_app_lib)
+
+    # HLS 变体选择回归（§7-54 之后）：直接对真实 HlsDownloader 跑「forcedVariant ⇒ 选定子列表」
+    # 判别式。挂在 ui_snapshot 同一个开关下 = 与套件同批构建、同批评判，不新增闸门。
+    qt_add_executable(hls_variant_probe
+        tools/hls_variant_probe.cpp
+    )
+    target_link_libraries(hls_variant_probe PRIVATE idm_app_lib)
 endif()
 
 # ── 可选下载引擎自测 ─────────────────────────────

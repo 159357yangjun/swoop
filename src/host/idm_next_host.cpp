@@ -26,6 +26,13 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QtEndian>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QRegularExpression>
+#include <QTimer>
+#include <QUrl>
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -343,7 +350,91 @@ static QJsonArray listYtDlpFormats(const QString& url)
     return result;
 }
 
+// 自建 HLS master 变体枚举（不依赖 yt-dlp）。正则与 HlsDownloader::parseMasterPlaylist
+// 同源同义：BANDWIDTH 是选择值的唯一真源——引擎侧 m_forcedVariant 按 BANDWIDTH 十进制串
+// 匹配（hls_downloader.cpp:205），所以这里 item["id"] 必须就是那个字符串，两端不能各造一套。
+static QJsonObject listHlsVariants(const QString& url)
+{
+    QJsonObject o;
+    QNetworkAccessManager nam;
+    QNetworkRequest req{QUrl(url)};
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::NoLessSafeRedirectPolicy);
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("IDM-Next/0.1"));
+    QNetworkReply* r = nam.get(req);
+    {   // host 主循环是阻塞式 stdin 读，没有跑事件循环 ⇒ 局部 loop + 8s 超时
+        QEventLoop loop;
+        QTimer to; to.setSingleShot(true);
+        QObject::connect(r, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
+        to.start(8000);
+        loop.exec();
+        if (r->error() != QNetworkReply::NoError || !r->isFinished()) {
+            const QString why = r->isFinished() ? r->errorString()
+                                               : QStringLiteral("拉取主播放列表超时");
+            r->deleteLater();
+            o["success"] = false;
+            o["message"] = QStringLiteral("无法获取 HLS 变体列表（%1）").arg(why);
+            return o;
+        }
+    }
+    const QString text = QString::fromUtf8(r->readAll())
+                             .replace(QStringLiteral("\r\n"), QStringLiteral("\n"))
+                             .replace(QStringLiteral("\r"), QStringLiteral("\n"));
+    r->deleteLater();
+
+    QJsonArray variants;
+    const QStringList lines = text.split(QStringLiteral("\n"), Qt::SkipEmptyParts);
+    static const QRegularExpression bwRe(QStringLiteral("BANDWIDTH=(\\d+)"));
+    static const QRegularExpression resRe(QStringLiteral("RESOLUTION=(\\d+x\\d+)"));
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString line = lines[i].trimmed();
+        if (!line.startsWith(QStringLiteral("#EXT-X-STREAM-INF:")))
+            continue;
+        auto bm = bwRe.match(line);
+        if (!bm.hasMatch())
+            continue;                       // 无 BANDWIDTH ⇒ 无法与引擎的匹配键对齐，跳过
+        const QString bw = bm.captured(1);
+        QString uri;
+        for (int j = i + 1; j < lines.size(); ++j) {
+            const QString l = lines[j].trimmed();
+            if (l.isEmpty() || l.startsWith('#'))
+                continue;
+            uri = l;
+            break;
+        }
+        if (uri.isEmpty())
+            continue;
+        double mbps = bw.toLongLong() / 1e6;
+        QString label = QStringLiteral("%1 Mbps").arg(mbps, 0, 'f', 1);
+        auto rm = resRe.match(line);
+        if (rm.hasMatch())
+            label = rm.captured(1) + QStringLiteral(" · ") + label;
+        QJsonObject item;
+        item["id"]       = bw;              // == 引擎 hlsVariant 的值域（BANDWIDTH 十进制串）
+        item["label"]    = label;
+        item["type"]     = QStringLiteral("hls");
+        item["ext"]      = QStringLiteral("m3u8");
+        item["filesize"] = -1;              // master 不含分片时长聚合，估算是下一步的事
+        item["height"]   = rm.hasMatch() ? rm.captured(1).split('x').at(1).toInt() : 0;
+        item["fmt"]      = bw;              // content.js 用 f.fmt 作 option.value ⇒ 同 id
+        variants.append(item);
+    }
+    if (variants.isEmpty()) {
+        o["success"] = false;
+        o["message"] = QStringLiteral("主播放列表里没有可选择的变体（缺少 EXT-X-STREAM-INF）");
+        return o;
+    }
+    o["success"] = true;
+    o["formats"] = variants;
+    return o;
+}
+
 // 处理 list_formats：查询某视频 URL 的可选画质/格式列表
+// HLS master（.m3u8）走**自建解析**（不依赖 yt-dlp）：HLS 下载引擎本来就是自建的，
+// 变体枚举与它共用同一事实源；yt-dlp 对裸 m3u8 直链给出的是分片级格式而非 master 变体，
+// 且会引入"工具缺失面"。master 拉取失败/超时(8s)/无 STREAM-INF ⇒ success=false，
+// 扩展侧把下拉降级为「最佳画质（默认）」单项，下载能力不受影响。
 static QJsonObject handleListFormats(const QString& url)
 {
     QJsonObject o;
@@ -358,6 +449,8 @@ static QJsonObject handleListFormats(const QString& url)
         o["message"] = QStringLiteral("仅支持 http(s) 视频链接");
         return o;
     }
+    if (url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive))
+        return listHlsVariants(url);
     QJsonArray formats = listYtDlpFormats(url);
     if (formats.isEmpty()) {
         o["success"] = false;
@@ -386,7 +479,8 @@ static QJsonObject handlePing()
 
 static QJsonObject handleAddDownload(const QString& url, const QString& filename,
                                      const QString& saveDir, const QString& queue,
-                                     const QString& format)
+                                     const QString& format,
+                                     const QString& hlsVariant = QString())
 {
     if (url.isEmpty())
         return {{QStringLiteral("success"), false},
@@ -402,6 +496,8 @@ static QJsonObject handleAddDownload(const QString& url, const QString& filename
         req["queue"] = queue;          // 浏览器端“加入队列”选择
     if (!format.isEmpty())
         req["format"] = format;        // 浏览器端选择的视频画质（yt-dlp -f 选择串）
+    if (!hlsVariant.isEmpty())
+        req["hls_variant"] = hlsVariant;  // HLS 变体 BANDWIDTH 串；CLI 回退通道不支持（保持默认最高档）
 
     bool connected = false;
     QJsonObject r = forwardToGui(req, &connected);
@@ -421,11 +517,12 @@ static QJsonObject handleBatchAdd(const QJsonArray& items)
         QString dir = it.value(QStringLiteral("dir")).toString();
         QString q = it.value(QStringLiteral("queue")).toString();
         QString fmt = it.value(QStringLiteral("format")).toString();
+        QString hv = it.value(QStringLiteral("hlsVariant")).toString();
         if (url.isEmpty()) {
             ++failed;
             continue;
         }
-        QJsonObject r = handleAddDownload(url, fn, dir, q, fmt);
+        QJsonObject r = handleAddDownload(url, fn, dir, q, fmt, hv);
         if (r.value(QStringLiteral("success")).toBool())
             ++added;
         else {
@@ -504,7 +601,8 @@ int main(int argc, char* argv[])
                 msg.value(QStringLiteral("filename")).toString(),
                 msg.value(QStringLiteral("saveDir")).toString(),
                 msg.value(QStringLiteral("queue")).toString(),
-                msg.value(QStringLiteral("format")).toString());
+                msg.value(QStringLiteral("format")).toString(),
+                msg.value(QStringLiteral("hlsVariant")).toString());
         } else if (action == QStringLiteral("list_formats")) {
             response = handleListFormats(msg.value(QStringLiteral("url")).toString());
         } else if (action == QStringLiteral("batch_add")) {

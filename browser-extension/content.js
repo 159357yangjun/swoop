@@ -711,11 +711,12 @@
         dirRow.appendChild(dirInput);
         card.appendChild(dirRow);
 
-        // 画质选择（仅视频站点查询 yt-dlp 格式列表）
+        // 画质选择（视频站点查询 yt-dlp 格式列表；.m3u8 由 host 自建解析 master 变体）
+        const isHlsMaster = /\.m3u8(\?|$)/i.test(resource.url);
         const fmtRow = document.createElement('div');
         fmtRow.className = 'idm-cap-row';
         const fmtLabel = document.createElement('label');
-        fmtLabel.textContent = '画质';
+        fmtLabel.textContent = isHlsMaster ? '画质（HLS 变体）' : '画质';
         const fmtSelect = document.createElement('select');
         fmtSelect.className = 'idm-cap-fmt';
         const defOpt = document.createElement('option');
@@ -726,7 +727,8 @@
         fmtRow.appendChild(fmtSelect);
         card.appendChild(fmtRow);
 
-        // 视频站点：异步查询画质列表并填充下拉
+        // 异步查询画质列表并填充下拉：.m3u8 走 host 的 master 变体枚举，其余走 yt-dlp。
+        // 查询失败/超时/无 STREAM-INF ⇒ 只留「最佳画质（默认）」一项（下载能力不受影响）。
         if (looksLikeVideo(resource.url)) {
             fmtSelect.disabled = true;
             const loading = document.createElement('option');
@@ -737,7 +739,7 @@
                 fmtSelect.innerHTML = '';
                 const best = document.createElement('option');
                 best.value = '';
-                best.textContent = '最佳画质（默认）';
+                best.textContent = isHlsMaster ? '最高画质（默认）' : '最佳画质（默认）';
                 fmtSelect.appendChild(best);
                 if (res && res.success && Array.isArray(res.formats) && res.formats.length) {
                     res.formats.forEach((f) => {
@@ -787,14 +789,18 @@
             const dir = dirInput.value.trim();
             const fmt = fmtSelect.value;
             btnNow.disabled = btnQueue.disabled = true;
-            chrome.runtime.sendMessage({
+            // .m3u8 的选择值语义是 HLS 变体（BANDWIDTH 串），不是 yt-dlp -f 串 ⇒ 分字段传，
+            // 让 host/引擎各自消费各自的键；混用会把"未接线"变成"静默错配"。
+            const payload = {
                 action: 'downloadWithOptions',
                 url: resource.url,
                 filename: fn,
                 saveDir: dir,
-                format: fmt,
                 queued: queued
-            }, (response) => {
+            };
+            if (isHlsMaster) payload.hlsVariant = fmt;
+            else payload.format = fmt;
+            chrome.runtime.sendMessage(payload, (response) => {
                 const success = !!(response && response.success);
                 const message = success ? (response && response.message) || '已添加到 IDM Next'
                                          : (response && response.message) || '下载失败';

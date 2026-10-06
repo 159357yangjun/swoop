@@ -83,7 +83,8 @@ public:
     void addTaskFromUrl(const QString& url, const QString& filename = QString(),
                         const QString& dir = QString(), int threads = 0,
                         const QString& queue = QString(),
-                        const QString& format = QString());
+                        const QString& format = QString(),
+                        const QString& hlsVariant = QString());
 
     // 外部入口：浏览器协议关联（magnet:/http(s):/ftp:）或命令行位置参数传入的 URL，
     // 加入下载并置前窗口。供 NSIS 安装的 magnet 协议处理器与 CLI 转发调用。

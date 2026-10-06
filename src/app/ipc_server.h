@@ -30,7 +30,8 @@ public:
     // "add" 命令 → 转发到上层任务添加（通常为 MainWindow::addTaskFromUrl）
     void setAddTaskCallback(std::function<void(const QString& url, const QString& filename,
                                                const QString& dir, int threads,
-                                               const QString& queue, const QString& format)> cb);
+                                               const QString& queue, const QString& format,
+                                               const QString& hlsVariant)> cb);
     // "list" 命令响应所需的当前任务数（由 MainWindow 注入：m_taskModel->rowCount()）
     void setTaskCountProvider(std::function<int()> cb);
 
@@ -55,7 +56,8 @@ private:
     void handleClient(QLocalSocket* client);
 
     QLocalServer* m_server = nullptr;
-    std::function<void(const QString&, const QString&, const QString&, int, const QString&, const QString&)> m_addTask;
+    std::function<void(const QString&, const QString&, const QString&, int, const QString&,
+                       const QString&, const QString&)> m_addTask;
     std::function<int()> m_taskCount;
 
     static DrainStat s_drainStat;   // 单进程内只跑一个 IpcServer，测具用静态量最省事

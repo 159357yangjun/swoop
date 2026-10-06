@@ -547,10 +547,11 @@ function checkHostConnection() {
  * 发送下载请求到 IDM Next 桌面端
  * @param {string} url - 下载链接
  * @param {string} filename - 建议文件名
- * @param {object} [opts] - 选项：{ saveDir, queued, format }
+ * @param {object} [opts] - 选项：{ saveDir, queued, format, hlsVariant }
  *        saveDir: 自定义保存目录（空=应用默认）
  *        queued:  true 则加入“浏览器”队列而非立即下载
  *        format:  视频画质选择串（yt-dlp -f 选择串，空=最佳画质）
+ *        hlsVariant: HLS master 的变体 BANDWIDTH 串（空=引擎默认最高档）
  * @returns {Promise<{success: boolean, message: string}>}
  */
 function sendToIdmNext(url, filename = '', opts = {}) {
@@ -562,7 +563,8 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                 filename: filename,
                 saveDir: opts.saveDir || '',
                 queue: opts.queued ? BROWSER_QUEUE : '',
-                format: opts.format || ''
+                format: opts.format || '',
+                hlsVariant: opts.hlsVariant || ''
             }, (response) => {
                 if (chrome.runtime.lastError) {
                     resolve({ success: false, message: chrome.runtime.lastError.message });
@@ -671,7 +673,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             // 批量下载也支持“加入队列”：转换为 host 的 queue 字段
             queue: r.queued ? BROWSER_QUEUE : '',
             // 视频画质选择（yt-dlp -f 串，空=最佳画质）
-            format: r.format || ''
+            format: r.format || '',
+            // HLS 变体（master BANDWIDTH 串，空=引擎默认最高档）
+            hlsVariant: r.hlsVariant || ''
         }));
         batchSendToIdmNext(items).then(result => {
             sendResponse(result);
@@ -744,7 +748,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendToIdmNext(msg.url, msg.filename || '', {
             saveDir: msg.saveDir || '',
             queued: !!msg.queued,
-            format: msg.format || ''
+            format: msg.format || '',
+            hlsVariant: msg.hlsVariant || ''
         }).then(result => sendResponse(result));
         return true;
     }

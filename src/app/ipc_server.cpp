@@ -45,7 +45,8 @@ IpcServer::IpcServer(QObject* parent)
 }
 
 void IpcServer::setAddTaskCallback(
-    std::function<void(const QString&, const QString&, const QString&, int, const QString&, const QString&)> cb)
+    std::function<void(const QString&, const QString&, const QString&, int, const QString&,
+                       const QString&, const QString&)> cb)
 {
     m_addTask = std::move(cb);
 }
@@ -163,6 +164,7 @@ void IpcServer::handleClient(QLocalSocket* client)
         QString dir      = msg.value("dir").toString();
         QString queue    = msg.value("queue").toString();    // 非空=加入队列
         QString format   = msg.value("format").toString();   // 视频画质（yt-dlp -f 选择串）
+        QString hlsVar   = msg.value("hls_variant").toString();  // HLS 变体 BANDWIDTH 串（空=最高档）
         int    threads   = msg.value("threads").toInt();
 
         if (url.isEmpty()) {
@@ -172,7 +174,7 @@ void IpcServer::handleClient(QLocalSocket* client)
             response["success"] = false;
             response["message"] = QStringLiteral("下载任务入口尚未初始化");
         } else {
-            m_addTask(url, filename, dir, threads, queue, format);
+            m_addTask(url, filename, dir, threads, queue, format, hlsVar);
             response["success"] = true;
             response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
         }

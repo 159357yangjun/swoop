@@ -49,7 +49,7 @@ void TaskController::onMediaStateChanged(int taskId, int state)
 // queue 为空：立即开始下载；否则加入指定队列，由 QueueScheduler 调度启动
 int TaskController::internalAddTask(const QString& url, const QString& dir, const QString& name,
                                     int threads, const QString& queue, const QString& format,
-                                    bool archiveByType)
+                                    bool archiveByType, const QString& hlsVariant)
 {
     // 浏览器扩展等外部来源可能传入一个尚未存在的队列名：自动创建，
     // 否则该队列的 HTTP 任务会永远停在 state 0 等待调度（卡死）。
@@ -167,6 +167,10 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
         req.isMagnet  = false;
         if (!format.isEmpty())
             req.extra.insert(QStringLiteral("format"), format);
+        // HLS 变体选择：键名与 HlsDownloader::start 读的 req.extra["hlsVariant"] 严格一致，
+        // 值域＝master BANDWIDTH 十进制串（host listHlsVariants 的 id 同源）。
+        if (!hlsVariant.isEmpty())
+            req.extra.insert(QStringLiteral("hlsVariant"), hlsVariant);
         if (startNow) {
             hd->start(req);
             if (m_cancelAutoPower) m_cancelAutoPower();

@@ -31,6 +31,7 @@ MEDIA = {}
 HLS = {}
 ENC_EXPECT = b""
 TS_EXPECT = b""
+VAR_EXPECT = {"hi": b"", "lo": b""}   # 变体夹具：两条 media playlist 各自应有的拼接字节
 DOC_TEXT = b""
 
 
@@ -284,12 +285,57 @@ class H(BaseHTTPRequestHandler):
             self._send(400, b"")
 
 
+def build_variant_master():
+    """HLS 变体选择夹具（hls_variant_probe 用）：master 两条变体，字节内容互斥。
+
+    BANDWIDTH 数值刻意对齐真站 mux.dev 的 x36xhzz（hi=6239287 / lo=246440），
+    让"探针里选中的那条"与"上轮真站实测过的那条 240p"是同一个语义。
+    ⚠ ts_fixture._CONT 是模块级续接计数、跨调用不重置 ⇒ 两个 media 的分片必须**路径不同**
+      （hseg*/lseg*），否则第二条流的 continuity counter 从第一条的中间值接着走。
+    """
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import ts_fixture
+    NL = chr(10)
+    hi_segs = [ts_fixture.build_segment(40, i * 90000 * 2, i * 90000 * 2, 100 + i) for i in range(3)]
+    lo_segs = [ts_fixture.build_segment(40, i * 90000 * 2, i * 90000 * 2, 200 + i) for i in range(3)]
+
+    def media(names):
+        L = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0"]
+        for n in names:
+            L += ["#EXTINF:2.0,", n]
+        L += ["#EXT-X-ENDLIST", ""]
+        return NL.join(L).encode("utf-8")
+
+    master = NL.join([
+        "#EXTM3U",
+        '#EXT-X-STREAM-INF:BANDWIDTH=6239287,RESOLUTION=1080x1920,CODECS="avc1.640028"',
+        "media_hi.m3u8",
+        '#EXT-X-STREAM-INF:BANDWIDTH=246440,RESOLUTION=96x540,CODECS="avc1.4d401f"',
+        "media_lo.m3u8",
+        "",
+    ]).encode("utf-8")
+    routes = {
+        "/x36xhzz/master.m3u8": (master, "application/vnd.apple.mpegurl"),
+        "/x36xhzz/media_hi.m3u8": (media(["hseg0.ts", "hseg1.ts", "hseg2.ts"]), "application/vnd.apple.mpegurl"),
+        "/x36xhzz/media_lo.m3u8": (media(["lseg0.ts", "lseg1.ts", "lseg2.ts"]), "application/vnd.apple.mpegurl"),
+    }
+    for i, sg in enumerate(hi_segs):
+        routes[f"/x36xhzz/hseg{i}.ts"] = (sg, "video/mp2t")
+    for i, sg in enumerate(lo_segs):
+        routes[f"/x36xhzz/lseg{i}.ts"] = (sg, "video/mp2t")
+    expect = {
+        "hi": b"".join(hi_segs),
+        "lo": b"".join(lo_segs),
+    }
+    return routes, expect
+
+
 def main():
     global SIZE, PAYLOAD, SHA, PORT
     PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8199
     SIZE = int(sys.argv[2]) if len(sys.argv) > 2 else 512 * 1024
     ready = sys.argv[3] if len(sys.argv) > 3 else None
-    global PAGES, MEDIA, HLS, ENC_EXPECT, TS_EXPECT, DOC_TEXT
+    global PAGES, MEDIA, HLS, ENC_EXPECT, TS_EXPECT, VAR_EXPECT, DOC_TEXT
     PAYLOAD = make_payload(SIZE)
     MEDIA = build_media()
     HLS = build_hls()
@@ -299,6 +345,8 @@ def main():
     ts_routes, ts_expect = build_real_ts_hls()
     HLS.update(ts_routes)
     TS_EXPECT = ts_expect
+    var_routes, VAR_EXPECT = build_variant_master()
+    HLS.update(var_routes)
     PAGES = build_pages(PORT)
     DOC_TEXT = b"not a media resource -- negative control for webRequest sniffing" + bytes([10])
     SHA = hashlib.sha256(PAYLOAD).hexdigest()

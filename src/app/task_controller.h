@@ -65,7 +65,7 @@ public:
     // queue 为空：立即开始下载；否则加入指定队列，由 QueueScheduler 调度启动
     int internalAddTask(const QString& url, const QString& dir, const QString& name,
                         int threads, const QString& queue, const QString& format = QString(),
-                        bool archiveByType = true);
+                        bool archiveByType = true, const QString& hlsVariant = QString());
 
     // ── 后端无关的下载控制：按 taskId 自动分派到 C 引擎或 yt-dlp 视频后端 ──
     void startTaskById(int id);

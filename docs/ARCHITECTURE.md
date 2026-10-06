@@ -3477,3 +3477,34 @@ webRequest 抓到这一事实，将来若有人扩 MIME 集合让它进来，typ
 
 `src/` 一行未动（改动只在 `browser-extension/background.js`、`tools/sniff_rules_test.mjs`、文档与 NOTICE）。
 NOTICE 复签 `408=398+10`（新增 tools/sniff_rules_test.mjs、background.js 字节变化）。
+
+### 2026-10-05 20:1x（第 55 条）— HLS 画质选择入口接通：五层链 + 生产链探针（含一次"假绿门"自我驳回）
+
+批准方案 A 后落地。链路＝content.js capture 卡片 → background hlsVariant → host `req["hls_variant"]`
+→ GUI IpcServer add 读字段 → MainWindow::addTaskFromUrl → TaskController::internalAddTask(…, hlsVariant)
+→ `req.extra["hlsVariant"]` → HlsDownloader 既有 forcedVariant 匹配（该匹配逻辑本来就在，缺的只是没人喂值）。
+默认行为不变：**不选＝最高档**（V1/V3 钉住）；host 拉 master 失败/超时(8s)/无 STREAM-INF ⇒ success=false
+⇒ 下拉只剩「最高画质（默认）」+「画质不可用」禁用项，下载能力零降级（E1/E2/E3 三面实测）。
+
+**本轮最贵的一条是方法级的，必须留档**：第一版探针直接 `new HlsDownloader`、自己往 req.extra 塞
+`hlsVariant` —— 它绕过了本轮要接的全部四层线。摘掉产品里那行注入，探针照样全绿（MUT_RC=0），
+这扇门当时是**假的**。改成走 `TaskController::internalAddTask(..., hlsVariant)` 生产入口后，
+同一处变异立刻把 V2 打红（MUT_RC=1，V1/V3 仍绿＝判别式精确）。⇒ 规矩补一条：
+**测"接线"的探针必须从接线起点进，不能从终点组件进；每扇新门在宣布成立前先做一次"摘产品行"变异。**
+
+其它实测读数：
+- 探针经生产链跑真任务时先崩了一次 `std::bad_function_call`——`m_setSpeed/m_setState` 在
+  internalAddTask 里无条件调用（task_controller.cpp:158-159），MainWindow 注入而探针没注 ⇒ 补 noop sink。
+- 端到端（真 GUI + 命名管道 `hls_variant:"246440"`）：产物逐字节 == lo 变体拼接（owner_lo=True）。
+- **套件出现既有偶发**：IDM_ACTIVATE_PROBE 的 <500ms 轮次断言，带改动 3 跑 2 红、
+  `git stash` 后基线代码同样 3 跑 1 红 ⇒ 与本轮无关，登记为待办（不是本轮引入，不许顺手掩盖计数）。
+- freshness_gate 本轮如实报 DIRTY_INPUT×4（exe 比已提交输入新＝工作树里有未提交源码）。
+  本轮没有再动 src/，commit 后复跑转绿（见下方终态读数）。
+- 语义分叉防呆：`.m3u8` 的选择值走 `hlsVariant`（BANDWIDTH 串），非 m3u8 走 `format`（yt-dlp -f 串），
+  content.js 按后缀分字段传——混用一个字段会把"未接线"变成"静默错配"。
+
+改动文件：src/{app/ipc_server.{h,cpp}, app/task_controller.{h,cpp}, gui/main_window.{h,cpp},
+host/idm_next_host.cpp}、browser-extension/{background.js,content.js}、CMakeLists.txt
+（hls_variant_probe 挂在 IDM_BUILD_UI_SNAPSHOT 开关下）、tools/hls_variant_probe.cpp、
+tools/disk_e2e_server.py（build_variant_master 夹具，hi/lo 分片路径互斥）。NOTICE 复签 `414=404+10`。
+CLI 回退通道（host 未连上 GUI 时）不支持 hls_variant ⇒ 保持默认最高档，已写进代码注释与本条。

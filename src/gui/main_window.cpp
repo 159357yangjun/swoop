@@ -289,8 +289,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_ipcServer = new IpcServer(this);
     m_ipcServer->setAddTaskCallback(
         [this](const QString& url, const QString& filename, const QString& dir,
-               int threads, const QString& queue, const QString& format) {
-            addTaskFromUrl(url, filename, dir, threads, queue, format);
+               int threads, const QString& queue, const QString& format,
+               const QString& hlsVariant) {
+            addTaskFromUrl(url, filename, dir, threads, queue, format, hlsVariant);
         });
     m_ipcServer->setTaskCountProvider([this]() { return m_taskModel->rowCount(); });
     /* listen 必须推迟到事件循环的第一轮，不能在这里同步做。
@@ -1688,12 +1689,14 @@ void MainWindow::refreshSidebarCounts()
 
 void MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
                                  const QString& dir, int threads,
-                                 const QString& queue, const QString& format)
+                                 const QString& queue, const QString& format,
+                                 const QString& hlsVariant)
 {
     QString saveDir = dir.isEmpty() ? m_settings.defaultSaveDir() : dir;
     int threadCount = threads > 0 ? threads : m_settings.maxThreads();
 
-    int id = m_taskController->internalAddTask(url, saveDir, filename, threadCount, queue, format);
+    int id = m_taskController->internalAddTask(url, saveDir, filename, threadCount, queue,
+                                               format, true, hlsVariant);
     if (id <= 0) {
         Log::warn(QStringLiteral("IPC 添加任务失败: %1").arg(url));
         return;
