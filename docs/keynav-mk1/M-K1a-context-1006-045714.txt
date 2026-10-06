@@ -1,0 +1,26 @@
+warning: Environment variable QT_LOGGING_TO_CONSOLE is deprecated, use
+QT_ASSUME_STDERR_HAS_CONSOLE and/or QT_FORCE_STDERR_LOGGING instead.
+QFontDatabase: Cannot find font directory D:/visual studio/lianxi/MFC/idm-next/build/lib/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QSystemTrayIcon::setVisible: No Icon set
+[INFO] "�Ѽ�������: light"
+[INFO] "�����ڳ�ʼ�����"
+[INFO] "HistoryStore �Ѵ�: C:/Users/yyyy/AppData/Local/Temp/idm-keynav-probe-1791276945411/history.db"
+[INFO] "IPC server ������������ idm-probe-16392"
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+qt.sql.qsqldatabase: QSqlDatabasePrivate::removeDatabase: connection 'idm_next_history' is still in use, all queries will cease to work.
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06\_data
+    [K1 canary 发法普查] send(visible-focus)=1 post(visible-focus)=2 (累计 2)
+    [K1 产品链闭环] 弹窗可见=1 onNewTask 进入次数=1(期望>=1) 采样tick=8
+[FAIL] [K1] Ctrl+N：动作存在且 context 可受理（命中数=1 选用=QMenu 可用=1 context=1(0=Widget 1=Window 2=Application 3=WidgetWithChildren) 文本=「新建任务(&N)...」tooltip=「新建任务(N)」）＋canary=2＋产品链闭环(弹窗=1 handler次数=1)
+    [K1 判据四段] ①动作存在(hasAccel=1) ②context==Application(0) ③量具有牙：可见窗上 canary 触发=2(须>=1，证发法能进快捷键系统) ④产品闭环：真键→NewTaskDialog 可见=1 且 onNewTask 进入=1(须>=1)
+[PASS] [K2] 新建任务对话框 Enter 提交面：确定=default&&auto=1 浏览!=default=1 按OK后 onAccepted 真跑(result.url 已填)=1 锚点=1｜链形状只印不判（无 setTabOrder 为它作保）：目录位=1 浏览位=2 链长=12
+    [K2 链读数] 0(QLineEdit) -> 1(QLineEdit) -> 2(QPushButton:浏览...) -> 3(QLineEdit) -> 4(QSpinBox) -> 5(QLineEdit) -> 6(QComboBox) -> 7(QPushButton:刷新格式) -> 8(QWidget) -> 9(QLabel) -> 10(QDialogButtonBox) -> 11(QPushButton:确定)
+    [K3 分段] a)key->command=1 b)command->handler=1(actFired=1 wrongDlg=-) c)handler->dialog=1
+    [K3 reading] spyTicks=2 peak=1 closed=1 before=0 after=0 wrongDlg=-
+[PASS] [K3] Ctrl+N 三段链 key->command=1 (act=新建任务(&N)...) | command->handler=1 (peakDlg=1) | handler->dialog=1 (closed=1 before=0 after=0)
+    [清理读数] 目录=C:/Users/yyyy/AppData/Local/Temp/idm-keynav-probe-1791276945411 删前条目=5 已删净=1

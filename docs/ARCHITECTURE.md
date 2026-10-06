@@ -3723,3 +3723,53 @@ M-C 只演示了一种破坏形态（置空），换成语义错位（如档位�
 `capture_e2e.py` 起的 app 不设它）⇒ `IpcServer::start()` 的 `removeServer()` 会摘掉对方正在监听的 endpoint，
 本轮三次 E2E 与套件是**串行**跑的所以没撞上；并行或残留实例下两侧都可能"连到别人家/没人监听"。这是已知形状，
 不是本轮新发现（§7-57 记过半边），彻底解法（app 侧 pid 作用域管道）仍未做。
+
+---
+
+### 2026-10-06 05:0x（第 60 条）— ⑤ K1 canary 真实化：**"offscreen 到不了快捷键系统"是我量具用法的错，本轮当场纠正**
+
+**问题**：K1 长期只有静态属性证人（动作存在 + context==Application），canary 四种发法累计恒 0。
+台账原话把它归因成"平台限制"。要么产品在走一条没人到达的路径，要么量具瞎——本轮先分诊。
+
+**一、根因（Phase 1，判别式实验，不是猜）**：独立小程序 `k1_canary_scratch.cpp`（%TEMP%，一次性，已删）
+在**同一 Qt 6.11.1 / 同一 offscreen 平台**上：裸 QWidget + `show()` + 同键同 context 的 QShortcut，
+五种发法（sendEvent 主窗 / postEvent+循环 / activateWindow 后 send / 焦点子件 send / 焦点子件 post）
+**全部命中（累计 5）** ⇒ offscreen 合成按键**能**进快捷键系统。
+与探针的真实差别只有一个：**KEYNAV 探针从不 `w.show()`**（§7-38：真显示会污染别的读数）⇒
+隐藏窗口的 `focusWidget()` 恒空 ⇒ 旧 canary 把键投给了一个没激活、不可见的受理者。
+⇒ 判定：**那条 0 属于"量具到不了"（用法错），不属于"现场没有"**；产品路径本身可达。
+
+**二、修法（三层，全绿才算数）**：
+1. **canary 重做**：起一枚 show() 过、可聚焦的普通窗口跑 send/post 两种发法。基线读数
+   `send(visible-focus)=1 post(visible-focus)=2 (累计 2)` ⇒ 量具有牙这句话现在有证人。
+2. **K1 产品链闭环（新增判据段④）**：`w.show()+activateWindow()` 后经 QTimer 排队向焦点件发真 Ctrl+N，
+   要求 NewTaskDialog 出现且可见（第一证人）**且** `MainWindow::onNewTask` 进入次数 ≥1
+   （第二证人：产品侧测具钩子 `IDM_NEWTASK_COUNTFILE`，未设环境变量时零行为变化）。
+   形状沿用 K3 的挂死教训：按键与采样都排在 `outer.exec()` 里，spy(5ms) 负责关窗收摊，
+   另有 1.5s qApp 全局兜底 ⇒ M-K1b 那种"开错窗"的路由不会挂死探针（实测 tick=401 正常退出）。
+   基线读数 `弹窗可见=1 onNewTask 进入次数=1`。
+3. **K1 判据合成四段**：①动作存在 ②context==Application ③canary≥1 ④闭环(弹窗∧handler 计数)，
+   `k1ok = ①∧②∧③∧④`，每段各印自己的读数。
+
+**三、变异（三次，各自咬不同段，日志归档 `docs/keynav-mk1/`）**：
+| 变异 | 破坏点 | 应红段 | 实测 |
+|---|---|---|---|
+| M-K1a | `setShortcutContext(Application→Window)` | ② | [FAIL]，②=0、③④仍绿（闭环在 Window 下也通——受理者是聚焦的主窗）⇒ **②是独立牙，不是④的复读** |
+| M-K1b | 菜单接线 `onNewTask→onBatchImport` | ④ | [FAIL]，弹窗=0、计数=-1、K3 同时 b)红(c)红（wrongDlg 兜住没挂死） |
+| M-K1c | witness 钩子短路（`&& false`） | ④ 的第二证人 | [FAIL]，弹窗=1 但计数=-1 ⇒ **两证人确认可分离：光有弹窗骗不过这条** |
+三面跑完全部还原，复跑基线 [PASS]（`baseline-green-*.txt`）。
+
+**四、顺带修掉一处真实的互踩**：K1 闭环必须 `w.show()` ⇒ KEYNAV 探针从此会起产品服务；
+上一轮 §7-59 记的"真 GUI 与探针共用管道名"风险从理论变成必然 ⇒ 同批把
+`IDM_TEST_PIPE` 的 pid 隔离从 ACTIVATE-only 扩到 KEYNAV（`ui_snapshot.cpp:202`），
+套件里 IDM_IPC_PROBE 的 4 条 PASS 不受影响（它仍走产品字面名）。
+
+**五、门禁**：套件 19 模式 PASS=79 FAIL=0（`/tmp/idm-probes/ui-k1-1006-045718`，
+ui_snapshot sha12 见提交后复跑）；引擎 180/0（engine_selftest sha12 `a254689c17f5`）；
+build/host_manifest/live_roster/probe_roster/a_gate/sniff(12/0) rc=0；
+freshness 在产品代码提交前 rc=1（DIRTY_INPUT=main_window.cpp，预期）、提交后转 rc=0。
+
+**仍然没验证的东西**：K1 闭环只在 offscreen 成立，**真窗口管理器（windows 平台）下的 Ctrl+N 没测**
+（受本机前台焦点约束，与像素证人同一个边界）；M-K1a 只演示了 context 降级一种形态；
+`IDM_NEWTASK_COUNTFILE` 钩子本身没被变异证明"探针忘设时不误伤"（它未设即整块跳过，靠读码保证）；
+CI 从未执行；K1 的 tooltip 文本「新建任务(N)」与声明「(Ctrl+N)」不一致这件事仍只印不判。

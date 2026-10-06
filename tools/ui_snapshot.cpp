@@ -199,7 +199,11 @@ int main(int argc, char** argv) {
      * ⚠ 只给 ACTIVATE 开：IDM_IPC_PROBE 的断言对象**就是那个字面量产品名**
      *   （「窗口构造完、第一轮之前没人监听 idm-next-ipc」），给它改名等于拆它的证人。
      *   不设此变量时产品行为完全不变。 */
-    if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")) {
+    if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")
+        || qEnvironmentVariableIsSet("IDM_KEYNAV_PROBE")) {
+        /* ⑤ 追加 KEYNAV：K1 闭环会 w.show() 起真服务监听——上一轮串行跑套件时它摘掉过
+         *   IDM_IPC_PROBE 的产品名 endpoint（共名互踩，§7-59 记的"已知形状"）。
+         *   KEYNAV 面不读管道，改名不伤它的证人；IDM_IPC_PROBE 仍走产品字面名。 */
         qputenv("IDM_TEST_PIPE",
                 QStringLiteral("idm-probe-%1").arg(QCoreApplication::applicationPid()).toUtf8());
         /* ── 变异面（IDM_ACTIVATE_MUTATE=1）──
@@ -1256,38 +1260,121 @@ int main(int argc, char** argv) {
         };
 
         // ── K1：Ctrl+N ──
-        /* ⚠ 量具自检（canary）：临时挂一个**同键、同 context**的窗口级 QShortcut，把四种发法
-         *   逐个试一遍——这一步不是"挑一个能过的判据"，而是先确认我的量具有没有能力把键
-         *   送进快捷键系统。**实测四种全是 0**（postEvent / sendEvent 到焦点件 / activateWindow 后
-         *   send 到主窗 / QCoreApplication::sendEvent），offscreen 平台没有活动窗口 ⇒
-         *   Qt 的快捷键处理拿不到受理者。结论：**K1 不能靠"发键看弹窗"来证**，那条红属未归因。 */
+        /* ⚠ 量具自检（canary）历史，两次反转都记下来，免得第三次翻车：
+         *   第 1 版结论"四种发法全 0 ⇒ offscreen 到不了快捷键系统"——**被独立小程序实测驳回**
+         *   （同 Qt 6.11.1/offscreen、裸 QWidget+show()+同键 QShortcut：sendEvent/postEvent 全部命中）。
+         *   差别在探针自己：MainWindow **从不 show()**（§7-38：真显示会污染别的读数），
+         *   隐藏窗口的 focusWidget() 恒空 ⇒ 键投给了没激活的隐藏件。⇒ 那是**量具用法错**，不是平台限制。
+         *   本轮修法：canary 起一个 show() 过的普通窗口走一遍，证明发法本身能到达快捷键系统；
+         *   产品面另用第二证人闭环（见下）。 */
         int canaryHits = 0;
         {
-            auto* cs = new QShortcut(QKeySequence(QStringLiteral("Ctrl+N")), &w,
+            QWidget cw;                                // 已知正例：可见、可聚焦、同键同 context
+            cw.setFocusPolicy(Qt::StrongFocus);
+            cw.resize(240, 120);
+            cw.show();
+            QCoreApplication::processEvents();
+            auto* cs = new QShortcut(QKeySequence(QStringLiteral("Ctrl+N")), &cw,
                                      nullptr, nullptr, Qt::WindowShortcut);
             QObject::connect(cs, &QShortcut::activated, [&canaryHits]() { ++canaryHits; });
-            QWidget* tgt = w.focusWidget() ? w.focusWidget() : static_cast<QWidget*>(&w);
             const QString note = QStringLiteral("n");
             QKeyEvent a(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier, note);
-            QApplication::postEvent(tgt, new QKeyEvent(QEvent::KeyPress, Qt::Key_N,
-                                                       Qt::ControlModifier, note));
+            cw.activateWindow();
+            cw.setFocus(Qt::OtherFocusReason);
+            QCoreApplication::processEvents();
+            QApplication::sendEvent(&cw, &a);          // F1 sendEvent 到可见焦点件
             QCoreApplication::processEvents();
             const int h1 = canaryHits;
-            QApplication::sendEvent(tgt, &a);
+            QApplication::postEvent(&cw, new QKeyEvent(QEvent::KeyPress, Qt::Key_N,
+                                                       Qt::ControlModifier, note));  // F2 postEvent
             QCoreApplication::processEvents();
             const int h2 = canaryHits;
+            printf("    [K1 canary 发法普查] send(visible-focus)=%d post(visible-focus)=%d (累计 %d)\n",
+                   h1, h2, canaryHits);
+            delete cs;
+            cw.hide();
+        }
+
+        /* K1 产品面闭环（⑤ 新增）：向**show() 过的主窗口**发 Ctrl+N，要求
+         *   · NewTaskDialog 实例出现且 visible（第一证人），且
+         *   · MainWindow::onNewTask 进入次数 ≥1（第二证人 IDM_NEWTASK_COUNTFILE，
+         *     区分"某个弹窗出现了"与"快捷键真的触发了 handler"）。
+         * ⚠ 形状沿用 K3 的实测教训：**trigger/按键必须排队进 outer.exec()**，闭环比 processEvents
+         *   泵更稳；直接 sendEvent+processEvents 会把 exec 嵌在探针主流程里 ⇒ spy 关不掉它（M2 挂死同形）。
+         *   所以这里用 QTimer 发键 + QTimer(5ms) 采样关闭 + 1.5s 全局兜底。
+         * 环境变量未设时产品行为零变化（IDM_NEWTASK_COUNTFILE 只计数、不改控制流）。 */
+        int prodChainHits = 0;
+        int prodChainCnt = -1;
+        {
+            const QString cntFile = dir + QStringLiteral("/newtask.count");
+            QFile::remove(cntFile);
+            qputenv("IDM_NEWTASK_COUNTFILE", cntFile.toUtf8());
+            w.show();
+            QCoreApplication::processEvents();
             w.activateWindow();
             QCoreApplication::processEvents();
-            QApplication::sendEvent(&w, &a);
+
+            struct ChainPoller {
+                static int count() {
+                    int n = 0;
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (qobject_cast<NewTaskDialog*>(x)) ++n;
+                    return n;
+                }
+                static void closeOne() {
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (auto* d = qobject_cast<NewTaskDialog*>(x)) { d->reject(); return; }
+                }
+                static QString closeAnyModal() {
+                    for (QWidget* x : QApplication::topLevelWidgets())
+                        if (auto* d = qobject_cast<QDialog*>(x); d && d->isModal()) {
+                            const QString nm = QString::fromLatin1(d->metaObject()->className());
+                            d->reject();
+                            return nm;
+                        }
+                    return QString();
+                }
+            };
+
+            QEventLoop outer;
+            QWidget* tgt = w.focusWidget() ? w.focusWidget() : static_cast<QWidget*>(&w);
+            QTimer keyFire;                        // 键在循环内 fire（exec 已起来后事件派发正常）
+            QObject::connect(&keyFire, &QTimer::timeout, &outer, [&, tgt]() {
+                const QString note = QStringLiteral("n");
+                QKeyEvent a(QEvent::KeyPress, Qt::Key_N, Qt::ControlModifier, note);
+                QApplication::sendEvent(tgt, &a);
+            });
+            int ticks = 0;
+            QTimer spy;
+            QObject::connect(&spy, &QTimer::timeout, &outer, [&]() {
+                ++ticks;
+                if (ChainPoller::count() > 0) { prodChainHits = 1; ChainPoller::closeOne(); return; }
+                if (!ChainPoller::closeAnyModal().isEmpty()) return;   // 冒名顶替者：关掉继续看
+                if (prodChainHits && ChainPoller::count() == 0) outer.quit();
+                if (ticks > 400) outer.quit();     // ≈2s 上限
+            });
+            QTimer globalGuard;                    // 挂在 qApp：exec 的内层循环也会 fire 它
+            QObject::connect(&globalGuard, &QTimer::timeout, qApp, [&]() {
+                if (ChainPoller::count() > 0) { prodChainHits = 1; ChainPoller::closeOne(); return; }
+                if (!ChainPoller::closeAnyModal().isEmpty()) outer.quit();
+            });
+            spy.start(5);
+            globalGuard.start(1500);
+            keyFire.start(30);                     // 首跳 30ms 后按键；之后每 500ms 重试一次
+            outer.exec();
+            spy.stop();
+            globalGuard.stop();
+            keyFire.stop();
+            for (int i = 0; i < 40 && ChainPoller::count() > 0; i++)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+
+            { QFile f(cntFile);
+              if (f.open(QIODevice::ReadOnly)) prodChainCnt = QString::fromUtf8(f.readAll()).trimmed().toInt(); }
+            printf("    [K1 产品链闭环] 弹窗可见=%d onNewTask 进入次数=%d(期望>=1) 采样tick=%d\n",
+                   prodChainHits, prodChainCnt, ticks);
+            qunsetenv("IDM_NEWTASK_COUNTFILE");
+            w.hide();
             QCoreApplication::processEvents();
-            const int h3 = canaryHits;
-            QCoreApplication::sendEvent(&w, &a);
-            QCoreApplication::processEvents();
-            const int h4 = canaryHits;
-            printf("    [K1 canary 发法普查] postEvent+focus=%d sendEvent+focus=%d "
-                   "activateWindow+send(main)=%d coreSend(main)=%d (累计到 %d)\n",
-                   h1, h2, h3, h4, canaryHits);
-            delete cs;
         }
 
         /* K1 的正经证人：**不合成按键，只读状态**。缺陷的形状是"声明与生效条件不一致"——
@@ -1309,24 +1396,26 @@ int main(int argc, char** argv) {
         const bool hasAccel = (actN != nullptr);
         const int ctx = actN ? int(actN->shortcutContext()) : -1;
         const bool appCtx = actN && actN->shortcutContext() == Qt::ApplicationShortcut;
-        const bool k1ok = hasAccel && appCtx;
+        const bool k1ok = hasAccel && appCtx && canaryHits >= 1 && prodChainHits && prodChainCnt >= 1;
         const QString tip = actN ? actN->toolTip() : QStringLiteral("(找不到带 Ctrl+N 的动作)");
         /* context 数值**本轮从 qnamespace.h:1317-1322 实测**（enum ShortcutContext 声明序）：
          * WidgetShortcut=0 WindowShortcut=1 ApplicationShortcut=2 WidgetWithChildrenShortcut=3。
          * 第一版凭印象写成 "2=Window 3=Application"，于是读到的 1 会被我解释成 Application
          * ——读数没错、**图例**错了，这种错比没有读数更贵（也是这条为什么把数字和文字一起印）。 */
-        printf("%s [K1] 存在可用的 Ctrl+N 动作、且其 shortcutContext 能在无焦点子控件时受理"
-               "（命中数=%d 选用=%s 可用=%d context=%d(0=Widget 1=Window 2=Application "
-               "3=WidgetWithChildren) 文本=「%s」tooltip=「%s」）\n",
+        printf("%s [K1] Ctrl+N：动作存在且 context 可受理（命中数=%d 选用=%s 可用=%d context=%d(0=Widget "
+               "1=Window 2=Application 3=WidgetWithChildren) 文本=「%s」tooltip=「%s」）"
+               "＋canary=%d＋产品链闭环(弹窗=%d handler次数=%d)\n",
                k1ok ? "[PASS]" : "[FAIL]", accelMatches,
                actN ? (qobject_cast<QWidget*>(actN->parent())
                            ? qobject_cast<QWidget*>(actN->parent())->metaObject()->className()
                            : "(无 parentWidget)") : "(无)",
                hasAccel ? 1 : 0, ctx,
                actN ? actN->text().toUtf8().constData() : "",
-               tip.toUtf8().constData());
-        printf("    [K1 量具限制] canary 四种发法累计触发=%d；0 ⇒ **offscreen 合成按键到不了快捷键系统**，"
-               "所以 K1 只认上面那条状态证人，不认『发键看弹窗』那种证法\n", canaryHits);
+               tip.toUtf8().constData(), canaryHits, prodChainHits, prodChainCnt);
+        printf("    [K1 判据四段] ①动作存在(hasAccel=%d) ②context==Application(%d) "
+               "③量具有牙：可见窗上 canary 触发=%d(须>=1，证发法能进快捷键系统) "
+               "④产品闭环：真键→NewTaskDialog 可见=%d 且 onNewTask 进入=%d(须>=1)\n",
+               hasAccel ? 1 : 0, appCtx ? 1 : 0, canaryHits, prodChainHits, prodChainCnt);
 
         // ── K2：新建任务对话框的 Tab 链形状 ──
         /* ⚠️ **这条的判据在 06:5x 被自己的普查推推翻过一次，本轮（§7-58）再推翻一次**，
@@ -1438,9 +1527,10 @@ int main(int argc, char** argv) {
          *                       qobject.h:403 那个 QSlotObjectBase 是私有参数；靠猜接收者就是假牙）
          *   ③ handler→dialog ：trigger 期间**必须出现一个 NewTaskDialog**（peak 计数），
          *                       且它是在 exec() 里被关掉的（不是没开过）
-         * ⚠ 全程**不发键盘事件**：offscreen 下合成按键进不了快捷键系统（canary 四种发法累计触发 0）。
-         *   所以这条链的可核形式是"程序化触发已注册的动作"，它覆盖 command→handler→dialog 三段，
-         *   唯独 key→accelerator 那一段只能停在静态读取——这一点在结论里要如实标出来。 */
+         * ⚠ 历史注记（⑤ 更正）：这里原写"offscreen 下合成按键进不了快捷键系统 ⇒ 全程不发键盘事件"——
+         *   **那句被独立小程序驳回**（可见+聚焦的窗上 sendEvent/postEvent 全命中）。真实限制是
+         *   "隐藏窗口没有 focusWidget ⇒ 键无处可去"。K1 面现已改用真按键闭环（见上），本段保留 trigger()
+         *   形状是因为它证的是 command→handler→dialog 三段，与 key→command 互补、不重复。 */
         bool seg1 = false, seg2 = false, seg3 = false;
         QString wrongDlg;
         int peakDlg = 0, closedDlg = 0, beforeDlg = 0, afterDlg = 0;

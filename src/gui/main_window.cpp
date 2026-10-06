@@ -1164,6 +1164,15 @@ void MainWindow::applyGroupSpans()
 
 void MainWindow::onNewTask()
 {
+    /* 测具计数钩子（⑤ K1 canary 第二证人）：设 IDM_NEWTASK_COUNTFILE 时进入即 +1 落盘。
+     * 探针据此区分「快捷键真触发了 handler」与「对话框对象存在」。未设 ⇒ 零行为变化。 */
+    if (const QByteArray cnt = qgetenv("IDM_NEWTASK_COUNTFILE"); !cnt.isEmpty()) {
+        QFile f(QString::fromLocal8Bit(cnt));
+        int n = 0;
+        if (f.open(QIODevice::ReadOnly)) { n = QString::fromUtf8(f.readAll()).trimmed().toInt(); f.close(); }
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { f.write(QByteArray::number(n + 1)); f.close(); }
+    }
+
     NewTaskDialog dlg(this, m_settings.defaultSaveDir(), m_settings.maxThreads());
     if (dlg.exec() != QDialog::Accepted)
         return;
