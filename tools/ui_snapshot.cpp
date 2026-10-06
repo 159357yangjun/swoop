@@ -49,6 +49,9 @@
 #include "schedule_dialog.h"
 #include "task_detail_dialog.h"
 #include "hash_verify_dialog.h"
+#include "history_dialog.h"
+#include "history_store.h"
+#include <QClipboard>
 #include <QCryptographicHash>
 #include "../core/download_manager.h"
 #include "download_core.h"
@@ -2038,6 +2041,244 @@ int main(int argc, char** argv) {
         const bool okAll = h0 && h1 && h2a && h2b && h2c && h3 && h3b;
         printf("%s [HASHVERIFY 汇总] h0=%d h1=%d h2a=%d h2b=%d h2c=%d h3=%d h3b=%d\n",
                okAll ? "[PASS]" : "[FAIL]", h0, h1, h2a, h2b, h2c, h3, h3b);
+        return okAll ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_CLIPBOARD_PROBE=1（⑩ A3）──
+     * 剪贴板两条路径的端到端证人。读码定位（本轮实测入口链完整）：
+     *   写侧① HistoryDialog::onRowDoubleClicked（history_dialog.cpp:123-133，双击行 ⇒
+     *          clipboard()->setText(url) + m_countLabel「已复制链接: …」）——入口=表格双击；
+     *   写侧② HashVerifyDialog::onCopyComputed（hash_verify_dialog.cpp:185-191，按钮触发 ⇒
+     *          setText(计算结果)，**无截断**⇒与①的 60 字截断形状互补）；
+     *   读侧  MainWindow::onClipboardChanged（main_window.cpp:854，dataChanged 连接 :445，
+     *          过滤链：开关→单行→四前缀→扩展名白名单→lastUrl 去重→QMessageBox）。
+     * ⚠ 读侧不建 MainWindow、不起真服务：offscreen 下 dataChanged 是否 fire 未证 ⇒
+     *   信号面登记为缺口；这里用 QMetaObject::invokeMethod 直接驱动 handler，
+     *   **判据=用户看得见的量：弹没弹那个 Yes/No 框**（模态拦截槽在 exec 内关框放行，
+     *   K3 同款"exec 内才有控制权"教训），比读私有成员强。
+     * 夹具先清剪贴板再设唯一串：offscreen 上 setText 可能不落系统 ⇒ "写入后读回"的
+     *   正例对照就是"新串绝不等于旧串"本身。 */
+    if (qEnvironmentVariableIsSet("IDM_CLIPBOARD_PROBE")) {
+        const QString dir = QDir::tempPath() + QStringLiteral("/idm-clipboard-probe-")
+                            + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(dir);
+        qputenv("IDM_DATA_DIR", dir.toUtf8());
+
+        bool c1 = false, c1b = false, c2 = false, c3 = false, c4 = false;
+        QString d1, d3, d4;
+
+        // ── C1/C1b：历史对话框双击复制（含 >60 字符的截断标签形状）──
+        {
+            const QString urlA = QStringLiteral("https://ex.test/a.zip");
+            const QString urlB = QStringLiteral("https://ex.test/")
+                                 + QString(70, QLatin1Char('x')) + QStringLiteral(".bin");
+            { HistoryStore& hs = HistoryStore::instance();
+              hs.init(dir + QStringLiteral("/clip_history.db"));   // MainWindow 之前：显式开库
+              hs.recordAdded(urlA, QStringLiteral("a.zip"), dir);
+              hs.recordAdded(urlB, QStringLiteral("b.bin"), dir); }
+            HistoryDialog hd;
+            hd.move(-32000, -32000);
+            hd.show();
+            QCoreApplication::processEvents();
+            auto* tbl = hd.findChild<QTableWidget*>();
+            int rowA = -1, rowB = -1;
+            if (tbl) for (int r = 0; r < tbl->rowCount(); ++r) {
+                const QTableWidgetItem* it = tbl->item(r, 1);
+                if (!it) continue;
+                if (it->text() == urlA) rowA = r;
+                if (it->text() == urlB) rowB = r;
+            }
+            QApplication::clipboard()->setText(QStringLiteral("__sentinel_pre_c1__"));
+            bool okA = false;
+            if (rowA >= 0) {
+                QMetaObject::invokeMethod(&hd, "onRowDoubleClicked", Q_ARG(int, rowA), Q_ARG(int, 0));
+                QCoreApplication::processEvents();
+                okA = (QApplication::clipboard()->text() == urlA);
+            }
+            const QString labelA = [&]{
+                for (QLabel* l : hd.findChildren<QLabel*>())
+                    if (l->text().startsWith(QStringLiteral("已复制链接"))) return l->text();
+                return QString();
+            }();
+            bool okB = false;
+            if (rowB >= 0) {
+                QMetaObject::invokeMethod(&hd, "onRowDoubleClicked", Q_ARG(int, rowB), Q_ARG(int, 0));
+                QCoreApplication::processEvents();
+                okB = (QApplication::clipboard()->text() == urlB);   // 内容不截断，只有标签截
+            }
+            const QString labelB = [&]{
+                for (QLabel* l : hd.findChildren<QLabel*>())
+                    if (l->text().startsWith(QStringLiteral("已复制链接"))) return l->text();
+                return QString();
+            }();
+            c1 = okA && !labelA.isEmpty() && labelA.contains(urlA);
+            // 产品形状（history_dialog.cpp:131-132）：url>60 ⇒ 标签只留 left(60)+「…」。
+            // 判别式必须按这个形状来：截断点**落在 x 族内部**（body[:60] 里有 46 个连续 x），
+            // 所以"标签不含 20 连 x"是错判据（第一版在此恒红）；正确的牙是
+            //   ① 剪贴板逐字==全长 URL（写入层不截断）＋ ② 标签严格短于 URL（显示层截断）。
+            c1b = okB && labelB.startsWith(QStringLiteral("已复制链接: "))
+                  && labelB.length() < urlB.length();
+            d1 = QStringLiteral("rowA=%1 rowB=%2 读回A=%3 标签A=「%4」读回B=%5 "
+                                "标签B长度=%6/URL长度=%7")
+                     .arg(rowA).arg(rowB).arg(okA ? 1 : 0).arg(labelA.left(50))
+                     .arg(okB ? 1 : 0).arg(labelB.length()).arg(urlB.length());
+            hd.hide();
+            HistoryStore::instance().clear();
+        }
+        printf("%s [C1] 历史对话框双击⇒剪贴板逐字==该行 URL 且标签报出该链接（写入成功+格式=纯文本URL）\n",
+               c1 ? "[PASS]" : "[FAIL]");
+        printf("    [C1 读数] %s\n", d1.toUtf8().constData());
+        printf("%s [C1b] >60 字符 URL：剪贴板内容不截断、仅提示标签折短（截断只属于显示层）\n",
+               c1b ? "[PASS]" : "[FAIL]");
+
+        // ── C2：哈希对话框「复制结果」（产品里按钮实名，:82）──
+        // 两面：C2a 空结果⇒**不**改写（早退守卫）；C2b 有真值⇒逐字写入并读回。
+        // 只留 C2a 的话 M-⑩b（摘掉 setText）不会红——期望"没变化"的夹具给不了"应当写"的牙，
+        // 所以正例面必须自己造一个已算出结果的对话框（与 ⑨ 同一形状：真文件 + certutil 标准值）。
+        {
+            const QString hdir = QDir::tempPath() + QStringLiteral("/idm-clip-hash-")
+                                 + QString::number(QDateTime::currentMSecsSinceEpoch());
+            QDir().mkpath(hdir);
+            const QString hp = hdir + QStringLiteral("/fixture.bin");
+            { QFile fo(hp); if (fo.open(QIODevice::WriteOnly)) { fo.write(QByteArrayLiteral("abcde")); fo.close(); } }
+
+            HashVerifyDialog hv(nullptr, hp);
+            hv.move(-32000, -32000);
+            hv.show();
+            QCoreApplication::processEvents();
+            QList<QPushButton*> btns = hv.findChildren<QPushButton*>();
+            QPushButton* copyBtn = nullptr;
+            for (QPushButton* b : btns)
+                if (b->text() == QStringLiteral("复制结果")) { copyBtn = b; break; }   // 逐字全等（⑨ 教训）
+            QApplication::clipboard()->setText(QStringLiteral("__sentinel_pre_c2__"));
+            bool okEmpty = false;
+            if (copyBtn) {
+                copyBtn->click();
+                QCoreApplication::processEvents();
+                okEmpty = (QApplication::clipboard()->text() == QStringLiteral("__sentinel_pre_c2__"));
+                // 空结果时 onCopyComputed 早退（hash.isEmpty() return）⇒ 剪贴板保持原值。
+            }
+            // 先算出真摘要（SHA-256 of "abcde"），再点复制 ⇒ 剪贴板必须逐字等于该值
+            auto* combo = hv.findChild<QComboBox*>();
+            QList<QLabel*> labels = hv.findChildren<QLabel*>();
+            QLabel* resultLab = nullptr;
+            for (QLabel* l : labels)
+                if (l->styleSheet().contains(QStringLiteral("monospace"))) { resultLab = l; break; }
+            bool okFull = false;
+            const QString sha = QStringLiteral("36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c");
+            if (combo && resultLab) {
+                const int idx = combo->findText(QStringLiteral("SHA-256"));
+                if (idx >= 0) combo->setCurrentIndex(idx);
+                for (QPushButton* b : btns)
+                    if (b->text().contains(QStringLiteral("计算并校验"))) { b->click(); break; }
+                QCoreApplication::processEvents();
+                QApplication::clipboard()->setText(QStringLiteral("__sentinel_pre_c2b__"));
+                copyBtn->click();
+                QCoreApplication::processEvents();
+                okFull = (QApplication::clipboard()->text() == sha)
+                      && (resultLab->text() == sha);   // 读的字段≠写的字段⇒变异会漏
+            }
+            c2 = (copyBtn != nullptr) && okEmpty && okFull;
+            printf("%s [C2] 校验对话框存在「复制结果」按钮（逐字全等）；空结果不改写、有结果逐字写入并读回\n",
+                   c2 ? "[PASS]" : "[FAIL]");
+            printf("    [C2 读数] 按钮找到=%d 空结果未改写=%d 有结果逐字写入=%d 结果标签=%s\n",
+                   copyBtn ? 1 : 0, okEmpty ? 1 : 0, okFull ? 1 : 0,
+                   resultLab ? resultLab->text().toUtf8().constData() : "<无 monospace 标签>");
+            hv.hide();
+            QDir(hdir).removeRecursively();
+        }
+
+        // ── C3/C4：onClipboardChanged 过滤链（Yes/No 框当证人）──
+        {
+            struct Spy : QObject {
+                int seen = 0;
+                QString firstText;
+                bool eventFilter(QObject* o, QEvent* e) override {
+                    auto* mb = qobject_cast<QMessageBox*>(o);
+                    if (mb && e->type() == QEvent::Show
+                        && mb->windowTitle() == QStringLiteral("检测到下载链接")) {
+                        ++seen;
+                        if (firstText.isEmpty()) {
+                            // 正文模板 =「剪贴板中检测到下载链接：\n\n%1\n\n是否添加下载任务？」
+                            // ⇒ 取**第一条非空行**才是 URL（第一版只跳到第一个 '\n'，
+                            //   把「\n\n」的第二个换行之后整段都留下 ⇒ 逐字比较恒不等）。
+                            const QStringList lines = mb->text().split(QLatin1Char('\n'));
+                            for (const QString& ln : lines) {
+                                const QString t = ln.trimmed();
+                                if (!t.isEmpty() && !t.startsWith(QStringLiteral("剪贴板中"))) {
+                                    firstText = t;
+                                    break;
+                                }
+                            }
+                        }
+                        QTimer::singleShot(0, mb, [mb]{ mb->done(QMessageBox::No); });
+                    }
+                    return false;
+                }
+            };
+            Spy spy;
+            qApp->installEventFilter(&spy);
+
+            Settings st; st.load();
+            st.setClipboardMonitor(true);
+            QStringList exts = st.capturedExtensions();
+            if (!exts.contains(QStringLiteral("clipzip"))) exts << QStringLiteral("clipzip");
+            st.setCapturedExtensions(exts);
+            st.save();
+
+            // MainWindow 需要建（构造会起 IPC/定时器等）——本面接受它：K1 闭环证明 show 过的
+            // MainWindow 可控；数据目录已隔离、管道名走 IDM_TEST_PIPE pid 隔离（:204 扩面）。
+            qputenv("IDM_TEST_PIPE",
+                    QStringLiteral("idm-clip-%1").arg(QCoreApplication::applicationPid()).toUtf8());
+            {
+                MainWindow w;
+                w.move(-32000, -32000);
+                w.show();
+                QCoreApplication::processEvents();
+
+                const QString goodUrl = QStringLiteral("https://ex.test/good.CLIPZIP");
+                // before 必须在 setText **之前**取：setText 会让 Qt 自己 fire dataChanged，
+                // 于是 onClipboardChanged 可能已经弹出第一个框（第一版在 setText 之后才快照，
+                // 把这次命中算给了 invokeMethod ⇒ 差分恒 0 ⇒ 明明弹了却报"命中弹窗=0"）。
+                int before = spy.seen;
+                QApplication::clipboard()->setText(goodUrl);
+                QCoreApplication::processEvents();
+                QMetaObject::invokeMethod(&w, "onClipboardChanged", Qt::DirectConnection);
+                QCoreApplication::processEvents();
+                // 两面判据：① 恰好一个新框；② firstText 逐字==URL。
+                // ⚠ 若本轮一个框都没见过（before==0 && seen==0），firstText 是空串——
+                //   那时必须点名"量具到不了"而不是让 c3 静默为假（0 有两种：现场没有 / 量具瞎）。
+                c3 = (spy.seen == before + 1) && (spy.firstText == goodUrl);
+                d3 = QStringLiteral("命中弹窗=%1 首见文本=「%2」期望=「%3」 本轮前累计=%4"
+                                    "（大写扩展名须匹配小写白名单=toLower 归一）")
+                         .arg(spy.seen - before).arg(spy.firstText, goodUrl).arg(before);
+
+                int b2 = spy.seen;
+                QApplication::clipboard()->setText(QStringLiteral("hello world"));
+                QMetaObject::invokeMethod(&w, "onClipboardChanged", Qt::DirectConnection);
+                QApplication::clipboard()->setText(QStringLiteral("https://ex.test/other.pptx"));
+                QMetaObject::invokeMethod(&w, "onClipboardChanged", Qt::DirectConnection);
+                QApplication::clipboard()->setText(goodUrl);   // 与 lastUrl 相同 ⇒ 去重必须吞掉
+                QMetaObject::invokeMethod(&w, "onClipboardChanged", Qt::DirectConnection);
+                QCoreApplication::processEvents();
+                c4 = (spy.seen == b2);
+                d4 = QStringLiteral("三种噪声（非链接/白名单外扩展/重复链接）新增弹窗=%1（期望 0）"
+                                    "；C3 已见弹窗累计=%2")
+                         .arg(spy.seen - b2).arg(b2);
+                w.hide();
+            }
+        }
+        printf("%s [C3] 合法下载链接进 onClipboardChanged ⇒ 弹「检测到下载链接」且正文含该 URL 原文\n",
+               c3 ? "[PASS]" : "[FAIL]");
+        printf("    [C3 读数] %s\n", d3.toUtf8().constData());
+        printf("%s [C4] 负例三连（非链接/白名单外扩展/与上次相同）⇒ 一次都不弹\n",
+               c4 ? "[PASS]" : "[FAIL]");
+        printf("    [C4 读数] %s\n", d4.toUtf8().constData());
+
+        const bool okAll = c1 && c1b && c2 && c3 && c4;
+        printf("%s [CLIPBOARD 汇总] c1=%d c1b=%d c2=%d c3=%d c4=%d\n",
+               okAll ? "[PASS]" : "[FAIL]", c1, c1b, c2, c3, c4);
+        QDir(dir).removeRecursively();
         return okAll ? 0 : 1;
     }
 

@@ -1,0 +1,17 @@
+warning: Environment variable QT_LOGGING_TO_CONSOLE is deprecated, use
+QT_ASSUME_STDERR_HAS_CONSOLE and/or QT_FORCE_STDERR_LOGGING instead.
+[INFO] "IPC server ÒÑÆô¶¯£¬¼àÌı idm-pg-25752"
+[INFO] "IPC add ²ÎÊı: url=http://127.0.0.1:1/a.bin file=a.bin dir=..\\evil_dir_a1 threads=0 queue= format= hlsVariant="
+[INFO] "IPC ÇëÇó: add ¡ú ³É¹¦£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+[INFO] "IPC add ²ÎÊı: url=http://127.0.0.1:1/b.bin file=..\\..\\evil_b.bin dir=C:/Users/yyyy/AppData/Local/Temp/idm-pathguard-probe-1791287224643 threads=0 queue= format= hlsVariant="
+[INFO] "IPC ÇëÇó: add ¡ú ³É¹¦£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+[INFO] "IPC add ²ÎÊı: url=http://127.0.0.1:1/c.bin file=ok_c.bin dir=C:/Users/yyyy/AppData/Local/Temp/idm-pathguard-probe-1791287224643 threads=0 queue= format= hlsVariant="
+[INFO] "IPC ÇëÇó: add ¡ú ³É¹¦£¨ÅÅ¶Ó -1ms£¬´¦Àí 0ms£¬ËÍ´ï=1£¬»Ø»°Ê±¿Í»§¶Ë=ÔÚ£©"
+[out] äº§ç‰©ç›®å½• = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06
+[iso] æ•°æ®ç›®å½• = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06\_data
+[FAIL] [G1] IPC add çš„ dir å« .. â‡’ å¿…é¡»è¢«æ‹’æˆ–è¢«æ”¶æ•›ï¼ˆä¸å¾—åŸæ ·è½¬å‘è¶Šç•Œç›®å½•ï¼‰
+    [G1 è¯»æ•°] got=1 success=1 è½¬å‘dir=ã€Œ..\evil_dir_a1ã€hits=1 msg=ã€Œå·²æ·»åŠ ä¸‹è½½: a.binã€
+[FAIL] [G2] IPC add çš„ filename å« ..\ â‡’ è½¬å‘å€¼ä¸å¾—ä¿ç•™è·¯å¾„åˆ†éš”ç¬¦
+    [G2 è¯»æ•°] got=1 success=1 è½¬å‘name=ã€Œ..\..\evil_b.binã€å«åæ–œæ =1
+[PASS] [G3] åˆæ³• dir/filename å¿…é¡» success=true ä¸”é€å­—åŸæ ·è½¬å‘ï¼ˆæ¸…æ´—ä¸è®¸ä¼¤æ­£ä¾‹ï¼‰
+    [G3 è¯»æ•°] got=1 success=1 hits=1 dir==root=1 name=ã€Œok_c.binã€

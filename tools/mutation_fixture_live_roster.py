@@ -25,13 +25,13 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOC = os.path.join(ROOT, "docs", "ARCHITECTURE.md")
 CML = os.path.join(ROOT, "CMakeLists.txt")
-GATE = [sys.executable, os.path.join(ROOT, "tools", "live_roster.py")]
 
 DAY = time.strftime("%Y-%m-%d")
 LOGDIR = os.path.join(os.environ.get("TEMP", "/tmp"), "idm-probes", DAY, "live_roster")
 if not os.path.isdir(LOGDIR):
     os.makedirs(LOGDIR)
 LOG = os.path.join(LOGDIR, "mutation-%s.log" % time.strftime("%Y%m%dT%H%M%SZ"))
+GATE_HOLDER = {"gate": [sys.executable, os.path.join(ROOT, "tools", "live_roster.py")]}
 
 ORIG = {}
 
@@ -69,7 +69,7 @@ def restore():
 
 
 def gate():
-    proc = subprocess.run(GATE, cwd=ROOT, capture_output=True)
+    proc = subprocess.run(GATE_HOLDER["gate"], cwd=ROOT, capture_output=True)
     out = proc.stdout.decode("utf-8", "replace") + proc.stderr.decode("utf-8", "replace")
     return proc.returncode, out
 
@@ -94,7 +94,7 @@ def case(name, expect_tag, expect_rc, mutate, note):
         return
     rc, out = gate()
     hit = expect_tag in out if expect_tag else None
-    ok = (rc == expect_rc) and (hit if expect_rc == 1 else not _any_red(out))
+    ok = (rc == expect_rc) and (hit if expect_rc == 1 else _gate_green(out))
     ok = ok and EXTRA.get(name, True)          # 两面夹具的第二面（M5 的 naive 对照）
     reading = "rc=%d tag_found=%s" % (rc, hit) if expect_tag else "rc=%d naive洗白=%s" % (rc, EXTRA.get(name))
     results.append((name, ok, reading, note))
@@ -105,6 +105,16 @@ def case(name, expect_tag, expect_rc, mutate, note):
     still = restore()
     if still:
         results.append((name + " 还原", False, "restore-failed", "还原不干净会让后面所有读数作废"))
+
+
+# 两道门住在同一个夹具里（live_roster + probe_roster）：M12/M13 打的是 probe_roster，
+# 它红时只印自己的 [RED] 行、不会带 live_roster 的标记；反过来"期望绿"的面也只该数本门的红。
+# 上一版用"[RED] 字样"当"期望绿"的判据 ⇒ 任何与本门无关的红（例如 NOTICE.md 没复签到定点）
+# 都会把 M5/M6a/BASELINE 判成 BAD，把夹具本身变成假坏。改成本门末行的机器事实：
+#   live_roster  → "live_roster OK"
+#   probe_roster → "[PROBE_ROSTER] OK"
+def _gate_green(out):
+    return ("live_roster OK" in out) or ("[PROBE_ROSTER] OK" in out)
 
 
 def _any_red(out):
@@ -314,6 +324,33 @@ def m11():
     return put(st, mutated)
 
 
+def m12():
+    """表里把红门那行的类型改成**不认识**的字符串 ⇒ ROSTER-KIND（probe_roster 侧）。
+    纯文档变异、零 CI 改动：新类型的字面量是门的解析锚点，谁把它改错（或加第四类却不同批改门），
+    门必须拒绝而不是静默把这条当"没登记"。"""
+    s = read(DOC)
+    row = row_of("IDM_PATHGUARD_PROBE")
+    if row is None or "待修型" not in row:
+        return None
+    mut = row.replace("待修型（刻意不进闸门名单）", "待修型（临时豁免）")
+    if mut == row:
+        return None
+    return put(DOC, s.replace(row, mut, 1))
+
+
+def m13():
+    """反向那一侧：表里把待修型直接改标成断言型（而它并不在 CI 名单）⇒ ROSTER-CI + ROSTER-KIND。
+    钉的是"想进门必须先让它绿"：只改标签不改判据，门要拦下来——所以「待修型」不是永久豁免的逃生口。"""
+    s = read(DOC)
+    row = row_of("IDM_PATHGUARD_PROBE")
+    if row is None or "待修型" not in row:
+        return None
+    mut = row.replace("待修型（刻意不进闸门名单） | 否", "断言型 | 是")
+    if mut == row:
+        return None
+    return put(DOC, s.replace(row, mut, 1))
+
+
 def main():
     snap(DOC, CML)
     rc, out = gate()
@@ -338,6 +375,17 @@ def main():
          "登记与代码反向不符 ⇒ 红（清掉 include 后若忘了改表，就是这条拦）")
     case("M11 代码新增僵尸 include", "ROSTER-ZOMBIE", 1, m11,
          "源码变异：门真的在扫代码，不是只比文档")
+
+    # M12/M13 打的是**另一道门** tools/probe_roster.py（同属"名单类"门，共用这套还原/留档骨架）。
+    GATE_HOLDER["gate"] = [sys.executable, os.path.join(ROOT, "tools", "probe_roster.py")]
+    rc0, out0 = gate()
+    results.append(("BASELINE-ROSTER", rc0 == 0, "rc=%d" % rc0,
+                    "probe_roster 未变异必须绿（三集合一致），否则 M12/M13 的红不作数"))
+    case("M12 待修型字面量被改错", "ROSTER-KIND", 1, m12,
+         "类型列是门的解析锚点：不认识的值必须红，不许静默当成「没登记」")
+    case("M13 待修型改标断言型", "ROSTER-CI", 1, m13,
+         "只改标签不修判据想进门 ⇒ 红（待修型不是永久豁免的逃生口）")
+    GATE_HOLDER["gate"] = [sys.executable, os.path.join(ROOT, "tools", "live_roster.py")]
 
     dirty = restore()
     rc_after, out_after = gate()

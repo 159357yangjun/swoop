@@ -15,6 +15,12 @@
   C. 文档表 = ARCHITECTURE.md 里 PROBE-ROSTER-BEGIN..END 之间的 markdown 行。
 
 类型不由人写死：`人眼对照` 必须与"B 里没有它"一致——一个人肉标注和一个机器事实互相钉。
+
+第三种类型 `待修型（刻意不进闸门名单）` 是为"红门不许进门、但也不许从名单蒸发"加的：
+先红后绿的夹具（如 IDM_PATHGUARD_PROBE 的 G1/G2）在产品修好前必然红，把它塞进 CI 会让
+CI 永远红、真回归被淹没；可它若干脆不登记，ROSTER-MISSING 又该点名它。所以给它一条**只收紧不放宽**
+的规则：必须标 待修型 + 必须不在 CI 名单（三者互相钉），断言型/人眼对照的旧规则一字未动。
+
 断言条数那一列**不比对**（它每轮都在动），只要求它是非负整数，并在读数行印出来供核对。
 
 退出码：0 = 三集合一致；1 = 不一致（逐条 ROSTER-* 打印）；2 = 前置不成立（缺文件/缺锚点/解析不出）。
@@ -76,8 +82,8 @@ def doc_rows():
         if not re.fullmatch(r"\d+", cnt):
             print(f"[RED] ROSTER-COUNT {mode} 的断言条数不是非负整数：{cnt!r}")
             sys.exit(1)
-        if kind not in ("断言型", "人眼对照"):
-            print(f"[RED] ROSTER-KIND {mode} 的类型只能是 断言型/人眼对照，实得 {kind!r}")
+        if kind not in ("断言型", "人眼对照", "待修型（刻意不进闸门名单）"):
+            print(f"[RED] ROSTER-KIND {mode} 的类型只能是 断言型/人眼对照/待修型（刻意不进闸门名单），实得 {kind!r}")
             sys.exit(1)
         if inc not in ("是", "否"):
             print(f"[RED] ROSTER-INCI {mode} 的「在 CI 闸门名单」只能 是/否，实得 {inc!r}")
@@ -108,9 +114,9 @@ def main():
         fail("ROSTER-EXTRA", f"{m} 文档表里有、代码里没有这个模式")
     for m in sorted(a ^ b):
         side = "在代码不在 CI" if m in a else "在 CI 不在代码"
-        # 人眼对照表刻意不进闸门名单：只有当文档把它标成 断言型 时才算违规
+        # 人眼对照表 / 待修型（红门刻意不进门）：只有当文档把它标成 断言型 时才算违规
         if m in a and m not in b and rows.get(m, ("", False))[1] is False \
-                and rows.get(m, ("x",))[0] == "人眼对照":
+                and rows.get(m, ("x",))[0] in ("人眼对照", "待修型（刻意不进闸门名单）"):
             continue
         fail("ROSTER-CI", f"{m} {side}")
     for m, (kind, inc, _n) in sorted(rows.items()):
@@ -123,9 +129,15 @@ def main():
                 fail("ROSTER-KIND", f"{m} 标为人眼对照却出现在 CI 闸门名单里")
             if kind == "断言型" and not truly_in_ci:
                 fail("ROSTER-KIND", f"{m} 标为断言型却没进 CI 闸门名单")
+            # 待修型的钉子：它**必须**不在闸门名单（否则 CI 常红），且必须标 否。
+            # 与"断言型⇔在名单"合起来 ⇒ 类型列不能拿"待修型"当永久豁免的逃生口：
+            # 想留在名单里就必须先让它绿并改标断言型。
+            if kind.startswith("待修型") and truly_in_ci:
+                fail("ROSTER-KIND", f"{m} 标为待修型却出现在 CI 闸门名单里（红门不许进门）")
 
     print(f"[probe_roster] 代码声明={len(a)} CI名单={len(b)} 文档表={len(c)} "
           f"人眼对照={sum(1 for k, _, _ in rows.values() if k == '人眼对照')} "
+          f"待修型={sum(1 for k, _, _ in rows.values() if k.startswith('待修型'))} "
           f"断言型={sum(1 for k, _, _ in rows.values() if k == '断言型')} 违规={bad}")
     if verbose:
         for m, (kind, inc, n) in sorted(rows.items()):

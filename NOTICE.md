@@ -11,11 +11,11 @@
 | 路径 | 文件数 | 字节数 | 是否在开源交付范围内 |
 |---|---|---|---|
 | `src/` | 114 | 947112 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
-| `tools/` | 52 | 984443 | ✅ 在——自测与门禁脚本 |
-| `docs/` | 85 | 692513 | ✅ 在 |
+| `tools/` | 52 | 1003379 | ✅ 在——自测与门禁脚本 |
+| `docs/` | 85 | 699960 | ✅ 在 |
 | `resources/` | 18 | 35001 | ✅ 在 |
 | `installer/` | 2 | 17674 | ✅ 在 |
-| `.github/` | 2 | 37113 | ✅ 在 |
+| `.github/` | 2 | 37222 | ✅ 在 |
 | `third_party/` | 125 | 20168154 | ⚠️ 在范围内但**不是本项目的原创代码**，见 §3 |
 | `browser-extension/` | 19 | 666798 | ❌ **不在**——浏览器扩展不属开源交付物（所有者口头指示）；处置见 §2 |
 | 仓根散装文件 | 10 | — | ✅ 在（`CMakeLists.txt`、`README.md`、`NOTICE.md`、`vcpkg.json`、`REFACTOR_PLAN.md`、`开发文档.md`、`.gitignore`、`.gitattributes`、`.editorconfig`、`.clang-format`） |

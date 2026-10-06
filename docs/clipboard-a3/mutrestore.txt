@@ -1,0 +1,12 @@
+[out] 产物目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06
+[iso] 数据目录 = C:\Users\yyyy\AppData\Local\Temp\idm-next-probes\2026-10-06\_data
+[PASS] [C1] 历史对话框双击⇒剪贴板逐字==该行 URL 且标签报出该链接（写入成功+格式=纯文本URL）
+    [C1 读数] rowA=1 rowB=0 读回A=1 标签A=「已复制链接: https://ex.test/a.zip」读回B=1 标签B长度=68/URL长度=90
+[PASS] [C1b] >60 字符 URL：剪贴板内容不截断、仅提示标签折短（截断只属于显示层）
+[PASS] [C2] 校验对话框存在「复制结果」按钮（逐字全等）；空结果不改写、有结果逐字写入并读回
+    [C2 读数] 按钮找到=1 空结果未改写=1 有结果逐字写入=1 结果标签=36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c
+[PASS] [C3] 合法下载链接进 onClipboardChanged ⇒ 弹「检测到下载链接」且正文含该 URL 原文
+    [C3 读数] 命中弹窗=1 首见文本=「https://ex.test/good.CLIPZIP」期望=「https://ex.test/good.CLIPZIP」 本轮前累计=0（大写扩展名须匹配小写白名单=toLower 归一）
+[PASS] [C4] 负例三连（非链接/白名单外扩展/与上次相同）⇒ 一次都不弹
+    [C4 读数] 三种噪声（非链接/白名单外扩展/重复链接）新增弹窗=0（期望 0）；C3 已见弹窗累计=1
+[PASS] [CLIPBOARD 汇总] c1=1 c1b=1 c2=1 c3=1 c4=1

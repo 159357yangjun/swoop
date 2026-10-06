@@ -1707,7 +1707,17 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 | IDM_SIZELIVE_PROBE | 断言型 | 是 | 3 |
 | IDM_KEYNAV_PROBE | 断言型 | 是 | 3 |
 | IDM_ZOOM_PROBE | 断言型 | 是 | 4 |
+| IDM_PATHGUARD_PROBE | 待修型（刻意不进闸门名单） | 否 | 3 |
+| IDM_HASHVERIFY_PROBE | 断言型 | 是 | 7 |
+| IDM_CLIPBOARD_PROBE | 断言型 | 是 | 5 |
 <!-- PROBE-ROSTER-END -->
+
+「待修型」这一类的存在理由：**红门不许进 CI 闸门名单**（否则 CI 永远红、真回归被淹没），
+但它又必须出现在表里，否则 `probe_roster` 的 ROSTER-MISSING 会点名它——两边都要出声。
+判据三条：① 类型只能是 断言型 / 人眼对照 / 待修型；② 断言型 ⇔ 必须在 CI 名单，
+待修型与人眼对照 ⇒ 必须不在 CI 名单；③ 待修型条目**必须同批在 §7 登记"什么时候才转成断言型"**，
+没有收口条件的待修型等于永久豁免。当前只有一条合法住户：`IDM_PATHGUARD_PROBE`
+（G1/G2 因 A1 dir 面零清洗而必红，见 §7-63；A1 修法落地那轮把它改标断言型并进 CI）。
 上表的三个集合恒等式（模式名 / 类型 / 是否在 CI 名单）由 `python tools/probe_roster.py` 现算比对，
 不一致即 rc=1。**它当时是红的**：`IDM_SIZEWIRING_PROBE` 已进二进制与 CI，但文档一处登记都没有——
 正是"只存在于当前代码恰好遵守、没人断言"的那类约定。
@@ -3946,3 +3956,65 @@ h2c 用大写输入+通过判定**，两条各钉一侧归一，且都在盘上�
 **五、门禁**：build/host_manifest/live_roster/a_gate/sniff/notice_verify rc=0；freshness rc=0（产品源码零改动，`git diff --stat src/` 空）；probe_roster rc=1 = PATHGUARD+HASHVERIFY 两个新模式未进文档表/CI 名单（沿 ⑧ 的规矩：修好轮一起收尾进门）。套件沿 e871ec7 前的 79/0 未重跑（本轮只动 ui_snapshot 一个新增分支，不触碰其它模式代码——这个"没跑"是声明不是遗漏）。
 
 **仍然没验证的东西**：H3 只证按钮存在且可用，**没点它**——点了会 exec() 起嵌套模态循环，探针无人收尸（K1 同款坑，登记为缺口；"按下⇒对话框出现"这一段目前无断言）；onVerifyFile 的路径拼接只在 -999（任务不存在⇒fullPath 退化 filename）形状下走过，正常完成任务的 dir+sep+fn 拼接无逐字证人；大文件（跨 4MB 块边界）只有 H1 的单形状对拍，进度条百分比无断言；错误路径（文件打不开⇒QMessageBox）刻意不进探针（模态框）；browse 按钮/QFileDialog 未测；computeHash() 那个成员函数**无人调用**（onVerify 自己重写了一遍分块循环——两份哈希实现并存，死代码疑云，属作者权问题只报不删）；**computed.toLower() 那半边归一无可区分观测（M-⑨a3 实测"不可见"），当前夹具形状下它是一行语义正确但测不到的代码**。
+### 2026-10-06 07:4x（第 65 条）— ⑩ A3：剪贴板回调探针 `IDM_CLIPBOARD_PROBE`，四面变异各咬一条 + 给「红门」开了一类登记口径
+
+仓根 `D:/visual studio/lianxi/MFC/idm-next`，起点 HEAD `a4ce4b8`。产品源码本轮**零改动**（四次变异跑完逐字节还原，`git diff --stat src/` 空）。
+证据目录 `docs/clipboard-a3/`（README + 六份原文，逐文件 sha12 见 README 表）。
+
+**一、定位结论（一手 grep + 读码，不是推测）**：全仓 `clipboard()` 调用只有三处 ——
+写侧两处（`history_dialog.cpp:130` 双击历史行复制 URL；`hash_verify_dialog.cpp:189` 「复制结果」按钮复制摘要）、
+读侧一处（`main_window.cpp:858` `onClipboardChanged` 读剪贴板）。
+需求里问的"选中任务后复制**任务信息**"这一族**在仓内不存在**（没有右键复制菜单、没有复制任务详情到剪贴板的入口）⇒
+如实报"有调用但只有那两个入口"，不硬造探针。**写入格式=纯文本单行**（URL 或十六进制摘要），无 HTML/RTF 富格式。
+
+**二、五条断言（C1/C1b/C2/C3/C4，全绿 rc=0）**：
+C1 双击短 URL ⇒ 剪贴板逐字==该行 URL 且标签报出该链接；C1b 90 字符长 URL ⇒ **剪贴板全长不截断**而标签折成 68 字符（截断只属于显示层）；
+C2 「复制结果」按钮逐字实名存在 + **两面**（空结果不改写=早退守卫有牙 / 有结果逐字写入并读回=写入本身有牙）；
+C3 合法链接进读侧 ⇒ 恰好弹一个「检测到下载链接」框且正文首条非空行逐字==URL（大写 `.CLIPZIP` 靠 `toLower` 归一命中小写白名单）；
+C4 负例三连（非链接 / 白名单外扩展 / 与上次相同）⇒ 一次都不弹。
+
+**三、三条第一版判据被实测驳回（先取证再改期望，没一条是靠放宽过的）**：
+① C1b 原写 `!labelB.contains(20 连 x)` —— 产品截断留的是 `left(60)`，夹具去掉前缀后剩 70 个 x，
+   截断点落在 x 族**内部**（标签含 46 连 x）⇒ 谓词恒假、夹具恒红。改成 `剪贴板==全长 ∧ 标签长度<URL长度`。
+② C3 的 `before=spy.seen` 原本取在 `clipboard()->setText()` **之后**：`setText` 自己会 fire `dataChanged`，
+   第一个框在那一刻就弹了 ⇒ 差分恒 0，读数出现"首见文本非空却报命中弹窗=0"的自相矛盾。快照必须放在 setText 之前。
+③ 正文提取原来只跳到第一个 `'
+'`，而模板是 `…：
+
+%1
+
+是否添加…` ⇒ 尾部段落一起留下、逐字比较恒不等；改为取第一条非空行。
+这三条都是**测具的错**，不是产品的错；如果当时直接放宽判据或删断言，就会把三条真信号洗白。
+
+**四、四面变异（各咬一条、互不重叠，原文 `%TEMP%` 备份 + 跑完逐字还原；每面先 grep 确认标记串已在盘上再重编）**：
+M-⑩a 摘 `history_dialog.cpp:130` 的 `setText(url)` → exe `bbf7b8fcaafe` → **C1+C1b 红**，且标签仍显示「已复制链接: …」
+（证明标签与剪贴板是两个独立字段，光看 UI 永远发现不了写入没发生）；
+M-⑩b 摘 `hash_verify_dialog.cpp:189` 的 `setText(hash)` → exe `0e7efd677a75` → **只有 C2 红**，
+而同一行的"空结果未改写=1"仍绿 ⇒ 这就是我给 C2 补正例面的理由：**期望值为 0 的那一面给不了"应当写"的牙**；
+M-⑩c 写入内容改成 `url.left(60)` → exe `7e022722de70` → **只有 C1b 红**（26 字符那条不受影响 ⇒ 判别式隔离成功）；
+M-⑩d 摘读侧扩展名守卫 `if (!extOk) return;` → exe `2ab8dafdcbd0` → **只有 C4 红**，新增弹窗=2 而不是 3
+（"非链接"那条被前缀门挡住 ⇒ 2 这个数本身就是过滤链顺序的证据）。还原复绿 exe `fc642b28777f`。
+
+**五、给「红门」开的登记口径（新类型 + 两面夹具）**：`probe_roster` 原先只有 断言型/人眼对照 两类，
+而"断言型 ⇔ 必须在 CI 名单"这条铁律把 ⑧ 的红门逼进两难：进了 CI 常红、不进则 ROSTER-MISSING 点名。
+新增第三类 **待修型（刻意不进闸门名单）**，规则只收紧不放宽：待修型必须不在名单、断言型/人眼对照的原规则一字未动，
+并在 §1.4 写明"待修型条目必须同批在 §7 登记转成断言型的收口条件"——当前唯一住户 `IDM_PATHGUARD_PROBE`，
+收口条件=A1 dir 面清洗落地那轮改标断言型并进 CI。`HASHVERIFY`(6 条)/`CLIPBOARD`(6 条)本轮进 CI 名单，
+名单 19→21，`TOTAL_PASS ≥50` 钉到 **≥70**（本机 21 模式现算 96 条，余量 26）。
+新类型自己也要有牙：`mutation_fixture_live_roster.py` 加 M12/M13 两面（打 probe_roster），
+现 **16/16 按预期**（BASELINE+11 旧面+BASELINE-ROSTER+M12+M13，还原核对干净）。
+顺带修了夹具自身的一处口径错误：它原来用"[RED] 字样"当"期望绿"的判据，会把与本门无关的红（NOTICE 没复签到定点）
+误判成夹具 BAD ⇒ 改成本门末行的机器事实（`live_roster OK` / `[PROBE_ROSTER] OK`）。
+
+**六、门禁现值**：build/host_manifest/live_roster/probe_roster/a_gate/sniff/notice_verify **rc=0**（七道门全绿，
+PATHGUARD 不再让 roster 红，因为它已被合法登记为待修型）；freshness rc=0（不合格=0）；
+套件 24 模式 PASS=92 FAIL=2 零断言=0，问题模式只有 `IDM_PATHGUARD_PROBE(F=2,rc=1)`＝**按设计红**（A1 未修，见 §7-63）；
+引擎自测当场复算见下条。NOTICE 复签到定点：`427 = 417 + 10`，
+`tools/=1003379`、`docs/=693399`、`.github/=37222`（三轮迭代到 FAIL=0，notice_sha12 `290ed39e38dd`，工具号 `16f38fd0dd63/242行`）。
+
+**仍然没验证的东西**：① offscreen 下 `QClipboard::dataChanged` 由真实系统输入（Ctrl+C）触发的链路仍未证——
+C3/C4 是用 `QMetaObject::invokeMethod` 直接驱动 handler 证的，**信号连接面（`main_window.cpp:444-445`）只有静态证人**；
+② Yes 分支（弹窗点「是」⇒ `internalAddTask`）没走：模态框由测具 `done(QMessageBox::No)` 收尸，点 Yes 会真的建任务、
+落盘、触网，本轮边界不允许；③ 剪贴板富格式（HTML/图片）本仓不涉及，但也因此没证过"复制多行任务信息"这类形状；
+④ CI 仍未执行过一次（push 属用户边界），`TOTAL_PASS ≥70` 是新写的、从未在 runner 上响过；
+⑤ PATHGUARD 的 G1/G2 仍红＝A1 dir 面零清洗未修，修法提案在 `docs/coverage-audit-1006.md` §7-63 等授权。

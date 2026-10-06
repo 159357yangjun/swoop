@@ -119,7 +119,7 @@ jobs:
                   IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE
                   IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE IDM_FLUSH_PROBE
                   IDM_FILEICON_PROBE IDM_SIZECOL_PROBE IDM_SIZEWIRING_PROBE IDM_SIZELIVE_PROBE
-                  IDM_KEYNAV_PROBE"
+                  IDM_KEYNAV_PROBE IDM_HASHVERIFY_PROBE IDM_CLIPBOARD_PROBE"
           BAD=""
           TOTAL_PASS=0
           # 判据：**红的原文必须可重取**。以前每个探针的输只活在 shell 变量里，
@@ -162,14 +162,14 @@ jobs:
             echo "::error::本轮套件目录 = $RUN_LOG_DIR"
             exit 1
           fi
-          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 15 个模式共 62 条，
-          # 留 12 条余量给 runner 上的差异（字体/组件在位与否会影响个别断言数），
-          # 但整段被删空、或大面积退化仍然会红。
-          if [ "$TOTAL_PASS" -lt 50 ]; then
-            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥50）—— 断言被删了还是根本没跑？"
+          # 光「每个都 rc=0」不够。下面这句把总量钉住：本机实测这 21 个模式共 96 条（⑩ 那轮现算，
+          # 见 docs/clipboard-a3/suite-1006-074552.txt），留 26 条余量给 runner 上的差异
+          # （字体/组件在位与否会影响个别断言数），但整段被删空、或大面积退化仍然会红。
+          if [ "$TOTAL_PASS" -lt 70 ]; then
+            echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥70）—— 断言被删了还是根本没跑？"
             exit 1
           fi
-          echo "UI 探针全绿：15 个模式共 $TOTAL_PASS 条断言"
+          echo "UI 探针全绿：21 个模式共 $TOTAL_PASS 条断言"
 
       - name: Engine self-test (local authenticated HTTP server)
         shell: msys2 {0}
