@@ -1,0 +1,17 @@
+[身份] 仓根=D:\visual studio\lianxi\MFC\idm-next HOST=ab3922b804f8 PROBE=f65dd3494a07
+[身份] HEAD=565800f face=ALL
+[PASS] L1a 两档 master ? success — rc=0 success=True
+[PASS] L1b id 序列==声明序透传 — ids=['6239287', '246440']
+[PASS] L1c fmt==id（content.js 用它作 option.value） — fmt=['6239287', '246440']
+[PASS] L1d 值是 BANDWIDTH 十进制串（不是索引/label） — ids=['6239287', '246440']
+[PASS] L2a label 含 RESOLUTION 与换算后的 Mbps（同长自检） — labels=['1080x1920 · 6.2 Mbps', '96x540 · 0.2 Mbps']
+[PASS] L2b height 取 RESOLUTION 高（第二证人） — h=[1920, 540]
+[PASS] L2c 乱序声明?输出保持声明序（**不重排**是本轮定的语义；若改成降序门必须红） — ids=['246440', '6239287']
+[PASS] L1e 无 BANDWIDTH 的档位被跳过 — ids=['246440']
+[PASS] L1f 无可选变体 ? success=false（UI 降级路径有数据形状） — msg='主播放列表里没有可选择的变体（缺少 EXT-X-STREAM-INF）'
+[PASS] L3a 默认（forcedVariant 空）? 产物==最高 BANDWIDTH 拼接 — probe rc=1
+[FAIL] L3b 指定低档 '246440' ? 产物==lo 拼接（传值=BANDWIDTH 串被引擎认） — 
+[PASS] L3c 未知值 '999999999' ? 回退最高、任务成功 — 
+[FAIL] L4 URI 交换夹具 ? 默认拿 hi 字节(rc=0)、选 246440 拿 lo 字节(rc=0)（传值绝不是 URI/索引） — hi==bcbdbebf lo==9c9d9e9f
+[汇总] 判据 13 条，红 2 条：["L3b 指定低档 '246440' ? 产物==lo 拼接（传值=BANDWIDTH 串被引擎认）", 'L4 URI 交换夹具 ? 默认拿 hi 字节(rc=0)、选 246440 拿 lo 字节(rc=0)（传值绝不是 URI/索引）']
+[读数档] C:\Users\yyyy\AppData\Local\Temp\idm-hls-logic-1006-051823

@@ -82,10 +82,54 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("idm-hls-variant-probe"));
 
+    /* ── 单例判别式面（⑥ L4）：IDM_PROBE_CASE_VARIANT=<串|__none__> + IDM_HLS_BASE_URL/OUT_DIR
+     *    ⇒ 只跑一例，产物留在 OUT_DIR/master.ts 由调用方（hls_variant_logic_test.py）比对。
+     *    存在的理由：整跑 V1–V3 的期望值从**固定 URI**（media_hi/media_lo）拼出，
+     *    "同带宽不同 URI"的交换夹具会让三条全红、失去诊断能力；单例面允许只切一个变量的判别式。
+     *    ⚠ 必须排在 V0-V3 整跑之前——它不设 IDM_HLS_VARIANT_PROBE，两闸共设时 case 优先。 ── */
+    if (qEnvironmentVariableIsSet("IDM_PROBE_CASE_VARIANT")) {
+        const QString base = qEnvironmentVariable("IDM_HLS_BASE_URL");
+        const QString dir  = qEnvironmentVariable("IDM_HLS_OUT_DIR");
+        const QString var  = qEnvironmentVariable("IDM_PROBE_CASE_VARIANT");
+        const QString variant = (var == QStringLiteral("__none__")) ? QString() : var;
+        if (base.isEmpty() || dir.isEmpty()) {
+            qCritical().noquote() << "[FAIL] case 面需要 IDM_HLS_BASE_URL 与 IDM_HLS_OUT_DIR";
+            return 9;
+        }
+        QDir().mkpath(dir);
+        Settings settings; settings.load();
+        TaskListModel model;
+        QueueScheduler scheduler;
+        TaskController controller;
+        controller.setModel(&model);
+        controller.setQueueScheduler(&scheduler);
+        controller.setSettings(&settings);
+        controller.setStateSink([](int, int) {}, [](int) {});
+        controller.setSpeedSink([](int, qint64) {}, [](int) {});
+        int id = controller.internalAddTask(base + QStringLiteral("/master.m3u8"), dir,
+                                            QString(), 1, QString(), QString(), true, variant);
+        bool done = false, okFlag = false;
+        QObject::connect(&controller, &TaskController::mediaCompleted,
+                         [&](int tid, bool success, const QString&) {
+                             if (tid != id) return;
+                             okFlag = success; done = true;
+                         });
+        QElapsedTimer t; t.start();
+        while (!done && t.elapsed() < 60000)
+            QCoreApplication::processEvents();
+        qInfo().noquote() << (done && okFlag ? "[CASE-DONE]" : "[CASE-FAIL]")
+                         << QStringLiteral("variant=%1 done=%2 ok=%3")
+                                .arg(variant.isEmpty() ? QStringLiteral("(none)") : variant)
+                                .arg(done).arg(okFlag);
+        return (done && okFlag) ? 0 : 3;
+    }
+
     if (!qEnvironmentVariableIsSet("IDM_HLS_VARIANT_PROBE")) {
         qInfo().noquote() << "[SKIP] IDM_HLS_VARIANT_PROBE 未设置";
         return 0;
     }
+
+
     const QString base = qEnvironmentVariable("IDM_HLS_BASE_URL");   // 例 http://127.0.0.1:8272/x36xhzz
     const QString dir  = qEnvironmentVariable("IDM_HLS_OUT_DIR");
     if (base.isEmpty() || dir.isEmpty()) {

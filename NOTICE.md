@@ -10,9 +10,9 @@
 
 | 路径 | 文件数 | 字节数 | 是否在开源交付范围内 |
 |---|---|---|---|
-| `src/` | 114 | 946490 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
-| `tools/` | 51 | 946543 | ✅ 在——自测与门禁脚本 |
-| `docs/` | 76 | 643019 | ✅ 在 |
+| `src/` | 114 | 947112 | ✅ 在——IDM Next 应用本体（GUI + 下载核心） |
+| `tools/` | 51 | 949094 | ✅ 在——自测与门禁脚本 |
+| `docs/` | 76 | 648205 | ✅ 在 |
 | `resources/` | 18 | 35001 | ✅ 在 |
 | `installer/` | 2 | 17674 | ✅ 在 |
 | `.github/` | 2 | 37113 | ✅ 在 |
@@ -69,7 +69,7 @@ git ls-files | wc -l               # 合计
 `networkinformation/qnetworklistmanager.dll`、`tls/qcertonlybackend.dll`、`tls/qschannelbackend.dll`。
 同目录另有 **6 个**构建产物（`Qt6Core.dll` 11.3MB、`libstdc++-6.dll` 2.2MB、`Qt6Network.dll` 2.0MB、
 `libgcc_s_seh-1.dll`、`libwinpthread-1.dll`、`idm-next-host.exe`）**未入库**。
-整个目录在盘上是 25 个文件 / 16509136 字节，被跟踪的是 19 个文件 / 入库数 666798 字节——
+整个目录在盘上是 25 个文件 / 16541543 字节，被跟踪的是 19 个文件 / 入库数 666798 字节——
 两个数都印在这里并由 `--verify` 各自核对，**不许用"约 16MB"冒充公开暴露的量**：
 公开暴露的是入库数，磁盘数只是本机残留。
 

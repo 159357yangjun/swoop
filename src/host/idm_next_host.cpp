@@ -580,6 +580,16 @@ int main(int argc, char* argv[])
     // 在 host 进程中计算出的路径一致，从而能找到 GUI 已下载/捆绑的 yt-dlp。
     app.setApplicationName(QStringLiteral("IDM Next"));
 
+    /* 测具面（⑥）：IDM_HOST_LIST_JSON=<master URL> ⇒ 直接跑**真** listHlsVariants 一次、
+     * 把返回 JSON 印到 stdout 后退出——不进 stdin 循环、不碰注册表、不起管道。
+     * host 没有链接期测试钩子（WIN32 exe），这是它唯一的可调用面；产品正常路径零变化。 */
+    if (qEnvironmentVariableIsSet("IDM_HOST_LIST_JSON")) {
+        const QJsonObject o = listHlsVariants(qEnvironmentVariable("IDM_HOST_LIST_JSON"));
+        printf("%s\n", QJsonDocument(o).toJson(QJsonDocument::Compact).constData());
+        fflush(stdout);
+        return 0;
+    }
+
     while (true) {
         QByteArray raw = readNativeMessage();
         if (raw.isEmpty())

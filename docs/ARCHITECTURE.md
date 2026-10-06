@@ -3712,7 +3712,7 @@ CI 从未在 runner 执行；像素证人受本机焦点约束；采集卡真浏
 - freshness_gate 在 `97c51ec`（产品代码那笔）**落地后复跑 rc=0、不合格=0** ⇒ "产品 exe == 当前源码"这句话本轮成立。
 - 引擎自测 **180/0**（带认证服务器 18092，`engine_selftest.exe a254689c17f5`，落盘 `/tmp/est_run1.log`）。
 - NOTICE 由 `notice_verify.py` 自己的口径重签：`src/=945872`、`tools/=941109(51 个)`、`docs/=624301`，
-  合计 `402 + 10 = 412`（本轮新增被跟踪文件只有 `tools/capture_e2e.py`）⇒ FAIL=0（⑤ 后重签：src=946490 tools=946543 docs=76/642939，合计 407+10=417），`notice_sha12=8efdf6b55662`。
+  合计 `402 + 10 = 412`（本轮新增被跟踪文件只有 `tools/capture_e2e.py`）⇒ FAIL=0（⑤ 后重签：src=946490 tools=946543 docs=76/642939，合计 407+10=417），`notice_sha12=8efdf6b55662`；⑥ 后随盘上真值再签为 `a705d5f5bee6`（src=947112 tools=949094 docs=648205，文件数不变⇒本轮新增件全部未跟踪）。
 
 **仍然没验证的东西**：卡片在**非默认窗口尺寸/缩放下**是否仍不截断（只量了 746×483 这一档）；
 「取消」按钮与 ESC 的关闭语义没有判据；多标签页并发弹卡（同名去重、焦点归属）未测；
@@ -3773,3 +3773,60 @@ freshness 在产品代码提交前 rc=1（DIRTY_INPUT=main_window.cpp，预期�
 （受本机前台焦点约束，与像素证人同一个边界）；M-K1a 只演示了 context 降级一种形态；
 `IDM_NEWTASK_COUNTFILE` 钩子本身没被变异证明"探针忘设时不误伤"（它未设即整块跳过，靠读码保证）；
 CI 从未执行；K1 的 tooltip 文本「新建任务(N)」与声明「(Ctrl+N)」不一致这件事仍只印不判。
+
+---
+
+### 2026-10-06 05:3x（第 61 条）— ⑥ 画质下拉的**引擎/数据层**判据：L1–L4 十三道全绿，五面变异各咬指定段
+
+**范围界定**：④ 证的是端到端（真浏览器点选 ⇒ 产物字节），本条证它测不到的四件事——
+列表生成、排序规则、默认选择、选中后的值传递。**不是新写解析器复制品**：
+L1/L2 跑**真 `idm-next-host.exe`**，L3/L4 跑**真 `hls_variant_probe.exe`（生产链 TaskController⇒HlsDownloader）**。
+
+**一、实现位置（读码定位，全部有本轮实测行为证人）**：
+- 列表生成：`src/host/idm_next_host.cpp:357 listHlsVariants()` —— 逐行扫 `#EXT-X-STREAM-INF:`，
+  取 `BANDWIDTH=(\d+)` 作 `id`/`fmt`，label=`RESOLUTION · Mbps`，无 BANDWIDTH 跳过，无 URI 跳过。
+- 排序：**没有排序步骤**——输出＝master **声明序透传**。UI 默认项「最高画质（默认）」是 content.js:742
+  的合成占位、不参与数据层；content.js 不按 height 重排（本轮 grep+实跑双证）。
+- 默认选择：`src/protocols/hls_downloader.cpp:198-204` forcedVariant 空 ⇒ 遍历取 max(BANDWIDTH)。
+- 值传递：`QString::number(v.bw) == m_forcedVariant` —— **传的是 BANDWIDTH 十进制串，不是索引/URI**；
+  未知值不命中 ⇒ 保持 max（回退最高、任务不失败）。
+
+**二、覆盖判定**：L3 默认/传值 = hls_variant_probe V0–V3 **已有**（本轮复算：夹具换成本文件自建后仍 4/4 PASS）；
+L1/L2 列表生成与排序 **没有**任何既有测具 ⇒ 新增 `tools/hls_variant_logic_test.py`（13 判据）+
+两个最小测具面：host 侧 `IDM_HOST_LIST_JSON=<url>`（跑真 listHlsVariants 印 JSON 即退，不进 stdin 循环）、
+probe 侧 `IDM_PROBE_CASE_VARIANT` 单例面（URI 交换夹具下整跑会三条全红失去诊断力 ⇒ 只切一个变量）。
+
+**三、基线读数（HEAD `565800f`，HOST=`9b2c6a56cd2c` PROBE=`b95a02c7e890`）**：13 条全绿——
+L1a success / L1b id 序列==声明序 / L1c fmt==id / L1d 值是十进制串 / L1e 无 BANDWIDTH 档被跳 /
+L1f 无变体⇒success=false / L2a label 内容+同长自检 / L2b height=[1920,540] 第二证人 /
+L2c **乱序声明⇒输出保持声明序（反序夹具，钉"没重排"而不是"碰巧有序"）** /
+L3a 默认⇒hi 字节 / L3b 选 246440⇒lo 字节 / L3c 未知值⇒回退 hi / L4 URI 交换夹具⇒hi/lo 各自归位。
+
+**四、变异五面（日志归档 `docs/hls-logic-mk/`，每面跑完当场还原）**：
+| 变异 | 破坏点 | 红条签名 |
+|---|---|---|
+| M-a `v.bw > chosen.bw`→`<` | 引擎默认挑最低 | **仅默认面** L3a/L3c/L4 红、L3b 绿（显式选档不受影响）|
+| M-b 匹配改 `toInt()` 当索引 | 值语义 | L3b/L4 红、L3a/L3c 绿（默认逻辑没动）|
+| M-c 摘掉 forcedVariant 消费块 | 用户选择被静默忽略 | L3b/L4 红、其余绿 |
+| M-d 不跳过无 BANDWIDTH 档 | host 列表生成 | **恰好 L1e 一条红**（ids=['0','246440']）|
+| M-e variants 整体反序 | 声明序透传 | L1b/L2a/L2b/L2c 四条齐红 |
+⚠ M-e 第一次用 `std::reverse(QJsonArray)` **编译失败**（QJsonValueRef 不可 swap）⇒ 变异体自己也要先过
+"它在盘上生效"这道门（构建 rc=0 + 二进制 sha 变了才许跑），否则测的是旧二进制。
+三面还原后复跑 13/13 绿（`baseline-restored.txt`）。
+
+**五、过程中驳回的两个假象（都是量具侧）**：
+1. probe 输出在 capture pipe 里恒 0 字节：Windows GUI 子系统无控制台时 qInfo/qWarning 走 Debug 通道 ⇒
+   `QT_LOGGING_TO_CONSOLE` 已废弃且无效，要 `QT_FORCE_STDERR_LOGGING=1 + QT_ASSUME_STDERR_HAS_CONSOLE=1`。
+   差点把"下载其实成功"读成"L3 全红"。
+2. 单例面第一版排在 `IDM_HLS_VARIANT_PROBE` 闸之后，而调用方两个都设 ⇒ case 请求跑了整跑面。
+   判别式夹具当时表现为"三条全红"——那正是我预判过的**无诊断形状**，归因正确、形状暴露了闸序缺陷。
+
+**六、门禁**：套件 19 模式 PASS=79 FAIL=0（`ui_snapshot b8e4fc20be1e`）；build/host_manifest/live_roster/
+probe_roster/a_gate/sniff(12/0) rc=0；freshness 提交前 DIRTY_INPUT×3（就是本轮未提交的 host/probe/py），
+提交后复跑转绿；引擎自测本轮未改其输入（`src/core|utils|protocols` 中仅 protocols 被变异触碰又还原，
+`git diff src/protocols` 为空）⇒ 沿 05-06 号读数有效，另在同批二进制上复跑 180/0 见提交后终态。
+
+**仍然没验证的东西**：三档以上 master 的排序透传（只测两档）；BANDWIDTH 相同但 RESOLUTION 不同的并列档
+（引擎取首个命中，UI 显示两条同值选项这件事没人拦）；host 8s 超时分支与网络错误文案；
+yt-dlp 格式列表一侧（非 .m3u8）不在本条范围；L2c 只演示"反序"一种重排形态（按 height 排序未必红 L1b）；
+CI 从未执行；`IDM_HOST_LIST_JSON`/`IDM_PROBE_CASE_VARIANT` 两个测具面的存在性靠读码，未入闸门名单。
