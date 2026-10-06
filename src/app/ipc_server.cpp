@@ -229,6 +229,13 @@ void IpcServer::handleClientData(QLocalSocket* client, const QByteArray& data)
             response["message"] = QStringLiteral("下载任务入口尚未初始化");
         } else {
             m_addTask(url, filename, dir, threads, queue, format, hlsVar);
+            /* 用户从浏览器卡片上选中的画质**必须留一行可复算的读数**：
+             * 「IPC 请求: add → 成功」那条通用回话行只有命令名与时序，看不出用户选了哪一档，
+             * 所以真站 E2E 只能靠"产物字节数 == 低档拼接"反推（间接、且要求下载真跑完）。
+             * 这行把投递时刻收到的原始字段写出来 ⇒ 点击→IPC 这一段当场可核，不必等落盘。
+             * ⚠ 只加日志，不改任何控制流；空值也照印（默认最高档同样要有证人）。 */
+            Log::info(QStringLiteral("IPC add 参数: url=%1 file=%2 dir=%3 threads=%4 queue=%5 format=%6 hlsVariant=%7")
+                          .arg(url, filename, dir).arg(threads).arg(queue, format, hlsVar));
             response["success"] = true;
             response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
         }
