@@ -85,3 +85,27 @@ REFACTOR_PLAN.md 战略清单，以及本轮现场 grep/读码复核（每条都
 - 代码输入集合逐字节未变：`git status --porcelain -- src resources third_party/libcurl/include CMakeLists.txt tools` 空（本轮只新增 docs/ 一份 .md）。
 - live_roster rc=0（新 md 不在其扫描面，顺带复跑确认没被我的表外文件绊到）。
 - **未跑**：全套件/引擎/logic 测试——按上面口径它们测的是同一二进制同一源码，重跑只会得到 §7-61 补录里已有的数。**这个"没跑"是声明，不是遗漏。**
+
+---
+
+## 7. ⑧ A1 负例夹具轮（2026-10-06，TDD：先红归档，修法未实施）
+
+**A1 判定 = 确认，但两处修正初稿口径**（一手读数 `docs/a1-red/red-baseline-1006.txt`）：
+
+| 面 | 一手证据 | 定性 |
+|---|---|---|
+| filename | `[37 读数] 输入「..\..\evil_a1.bin」存下filename=「.._.._evil_a1.bin」`；PathGuard G2 转发值仍含 `\` | **引擎有清洗**（sanitize_filename_utf8 把 `\`→`_`），但 **IPC/GUI 层原样转发**——桌面 GUI 的 NewTaskDialog 路径不走 dlmgr_add 的清理 ⇒ 暴露面真实存在，只是比初稿窄 |
+| dir | `[G1 读数] success=1 转发dir=「..\evil_dir_a1」`、`[37②] load_state=0 越界dir任务可查=1` | **全链零清洗**（add/IPC/state 恢复三条路都原样受理）⇒ A1 的核心就是 dir 面 |
+| 放大形状 | download_core.c:119-122：`\?\` 不折叠仅在宽路径 ≥260 生效 | 短遍历路径会被 OS 折叠到根外（相对 save_dir），超长路径连折叠都没有 ⇒ 两种长度两种语义，都需要钉住 |
+
+**交付的测具（本轮只加测具，产品代码零改动）**：
+- `IDM_PATHGUARD_PROBE`（ui_snapshot 新模式，3 断言）：真 IpcServer + pid 私有管道 + 回调只记转发值。基线 **G1 FAIL / G2 FAIL / G3 PASS**。
+- engine_selftest `[37①②③]`（3 断言）：dlmgr_add 的 name 证人 + load_state 的 dir 注入。基线 **①PASS（引擎已清）/ ②FAIL（dir 无清洗）/ ③PASS（正例没被误杀）**。
+- ⚠ 两个新模式**尚未进 CI 名单与 PROBE-ROSTER 表**（probe_roster 会红）——登记为修好轮的收尾项，本轮不进门。
+
+**修法提案（等授权，不在本轮实施）**：
+1. **策略二选一，主控定夺**：(a) 拒绝式——IPC add 收到含 `..` 分量或绝对性可疑的 dir 时直接 `success=false, message="保存目录不合法"`；(b) 收敛式——`QDir(root).absoluteFilePath()` 折叠后必须仍以授权根为前缀，否则回落默认目录并印一行读数。建议 (a)：扩展卡片的 dir 本来就允许留空/手填，拒绝的用户代价低，静默改路径反而制造"下载到奇怪地方"悬案。
+2. **落点唯一化**：清洗放 `ipc_server.cpp` add 分支（三入口 host/CLI/web 共用它）+ `task_controller.cpp internalAddTask` 兜底一层（覆盖 state 恢复与定时下载等非 IPC 路）。引擎侧 `dlmgr_add` 的 save_dir 也补一道"不含 `..` 分量"的入参检查（纵深，且 load_state :2134 那条恢复路在引擎内，只有引擎自己拦得住）。
+3. **白名单根怎么定**：GUI 侧以 `Settings.defaultSaveDir()` 所在盘符下的用户目录树为根做前缀判断，还是"任意绝对路径都收、只拒 `..` 分量"？前者更安全但会打断"另存到 D:\downloads"这类合法用法。**这是产品决策，不是工程决策**。
+4. **可核性补丁**：TaskInfo/summary 增加最终落点字段（或在 witness 行印 canonical 后的 dir），否则将来清洗对不对只能靠行为猜——本轮 dir 面证人停在"被受理与否"就是这个缺口的直接后果。
+5. **变异证明计划**（修好轮执行）：摘 IPC 清洗 ⇒ G1/G2 从绿转红；摘引擎入参检查 ⇒ [37②] 红；把清洗写成"含点就拒" ⇒ G3/[37③] 红。三条各打一段，缺一不算闭环。

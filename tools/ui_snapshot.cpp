@@ -200,7 +200,8 @@ int main(int argc, char** argv) {
      *   （「窗口构造完、第一轮之前没人监听 idm-next-ipc」），给它改名等于拆它的证人。
      *   不设此变量时产品行为完全不变。 */
     if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")
-        || qEnvironmentVariableIsSet("IDM_KEYNAV_PROBE")) {
+        || qEnvironmentVariableIsSet("IDM_KEYNAV_PROBE")
+        || qEnvironmentVariableIsSet("IDM_PATHGUARD_PROBE")) {
         /* ⑤ 追加 KEYNAV：K1 闭环会 w.show() 起真服务监听——上一轮串行跑套件时它摘掉过
          *   IDM_IPC_PROBE 的产品名 endpoint（共名互踩，§7-59 记的"已知形状"）。
          *   KEYNAV 面不读管道，改名不伤它的证人；IDM_IPC_PROBE 仍走产品字面名。 */
@@ -1906,6 +1907,131 @@ int main(int argc, char** argv) {
      *   ③ 发一条 activate：必须拿到 success=true 的回话。
      * ⚠️ 前置：本机不能有正在运行的 idm-next GUI——那样 ① 连上的是他的实例，
      * 结论跟本进程无关，所以直接判失败并要求先关掉，而不是假装通过。 */
+
+    /* ── 诊断模式：IDM_PATHGUARD_PROBE=1（⑧ A1，最小夹具轮）──
+     * IPC `add` 的 dir/filename 参数在**真 IpcServer 命令层**上的负例夹具。
+     * 形状：独立 IpcServer + pid 私有管道（IDM_TEST_PIPE，:204 扩面）；
+     *       addTask 回调**只记录转发值** ⇒ 零落盘、零触网、不建 MainWindow。
+     * 三条各印读数：
+     *   G1 dir 含 `..` ⇒ 必须被拒（success=false）或转发值不含越界分量；
+     *   G2 filename 含 `..\` ⇒ 转发值不得保留路径分隔符；
+     *   G3 正例对照：合法 dir/filename 必须 success=true 且逐字原样转发（期望非 0 的牙，
+     *      没有它"全拒一切"也算过 G1/G2）。
+     * ⚠ 当前源码下 G1/G2 **必红是设计目标**（A1 未修）；G3 绿钉住测具本身没坏。 */
+    if (qEnvironmentVariableIsSet("IDM_PATHGUARD_PROBE")) {
+        qputenv("IDM_TEST_PIPE",
+                QStringLiteral("idm-pg-%1").arg(QCoreApplication::applicationPid()).toUtf8());
+        const QString rootPg = QDir::tempPath() + QStringLiteral("/idm-pathguard-probe-")
+                               + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(rootPg);
+        qputenv("IDM_DATA_DIR", rootPg.toUtf8());
+
+        struct Fwd { int hits = 0; QString url, name, dir; };
+        Fwd fwd;
+        IpcServer srv;
+        srv.setAddTaskCallback([&fwd](const QString& url, const QString& filename,
+                                      const QString& dir, int, const QString&,
+                                      const QString&, const QString&) {
+            ++fwd.hits; fwd.url = url; fwd.name = filename; fwd.dir = dir;
+        });
+        if (!srv.start()) {
+            printf("[FAIL] PathGuard 探针起不了管道 %s\n", ipcServerName().toUtf8().constData());
+            return 1;
+        }
+
+        auto askIpc = [&](const QJsonObject& reqIn, bool* okOut, QString* msgOut) -> bool {
+            struct Res { bool done = false, replied = false; QString reply; };
+            auto res = std::make_shared<Res>();
+            QThread* client = QThread::create([res, reqIn] {
+                QLocalSocket sk;
+                sk.connectToServer(ipcServerName());
+                if (sk.waitForConnected(2000)) {
+                    sk.write(QJsonDocument(reqIn).toJson(QJsonDocument::Compact));
+                    sk.flush();
+                    if (sk.waitForBytesWritten(2000) && sk.waitForReadyRead(3000)) {
+                        res->reply = QString::fromUtf8(sk.readAll());
+                        res->replied = !res->reply.isEmpty();
+                    }
+                    sk.disconnectFromServer();
+                }
+                res->done = true;
+            });
+            client->start();
+            for (int i = 0; i < 300 && !res->done; ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+            client->wait(5000);
+            delete client;
+            if (!res->replied) return false;
+            const QJsonObject resp = QJsonDocument::fromJson(res->reply.toUtf8()).object();
+            if (okOut) *okOut = resp.value(QStringLiteral("success")).toBool(false);
+            if (msgOut) *msgOut = resp.value(QStringLiteral("message")).toString();
+            return true;
+        };
+
+        bool g1 = false, g2 = false, g3 = false;
+        QString d1, d2, d3;
+        {   // G1：dir 越界
+            fwd.hits = 0;
+            QJsonObject req;
+            req[QStringLiteral("command")] = QStringLiteral("add");
+            req[QStringLiteral("url")] = QStringLiteral("http://127.0.0.1:1/a.bin");
+            req[QStringLiteral("filename")] = QStringLiteral("a.bin");
+            req[QStringLiteral("dir")] = QStringLiteral("..\\evil_dir_a1");
+            bool ok = false; QString msg;
+            const bool got = askIpc(req, &ok, &msg);
+            const bool escaped = (fwd.hits > 0) && fwd.dir.contains(QStringLiteral(".."));
+            g1 = got && (!ok || !escaped);
+            d1 = QStringLiteral("got=%1 success=%2 转发dir=「%3」hits=%4 msg=「%5」")
+                     .arg(got ? 1 : 0).arg(ok ? 1 : 0).arg(fwd.dir).arg(fwd.hits).arg(msg.left(40));
+        }
+        {   // G2：filename 带穿越分量
+            fwd.hits = 0;
+            QJsonObject req;
+            req[QStringLiteral("command")] = QStringLiteral("add");
+            req[QStringLiteral("url")] = QStringLiteral("http://127.0.0.1:1/b.bin");
+            req[QStringLiteral("filename")] = QStringLiteral("..\\..\\evil_b.bin");
+            req[QStringLiteral("dir")] = rootPg;
+            bool ok = false; QString msg;
+            const bool got = askIpc(req, &ok, &msg);
+            const bool backslashAlive = (fwd.hits > 0) && fwd.name.contains(QLatin1Char('\\'));
+            g2 = got && (!ok || !backslashAlive);
+            d2 = QStringLiteral("got=%1 success=%2 转发name=「%3」含反斜杠=%4")
+                     .arg(got ? 1 : 0).arg(ok ? 1 : 0).arg(fwd.name).arg(backslashAlive ? 1 : 0);
+        }
+        {   // G3：正例必须原样转发且成功
+            fwd.hits = 0;
+            QJsonObject req;
+            req[QStringLiteral("command")] = QStringLiteral("add");
+            req[QStringLiteral("url")] = QStringLiteral("http://127.0.0.1:1/c.bin");
+            req[QStringLiteral("filename")] = QStringLiteral("ok_c.bin");
+            req[QStringLiteral("dir")] = rootPg;
+            bool ok = false; QString msg;
+            const bool got = askIpc(req, &ok, &msg);
+            g3 = got && ok && fwd.hits == 1 && fwd.dir == rootPg
+                 && fwd.name == QStringLiteral("ok_c.bin");
+            d3 = QStringLiteral("got=%1 success=%2 hits=%3 dir==root=%4 name=「%5」")
+                     .arg(got ? 1 : 0).arg(ok ? 1 : 0).arg(fwd.hits)
+                     .arg(fwd.dir == rootPg ? 1 : 0).arg(fwd.name);
+        }
+        printf("%s [G1] IPC add 的 dir 含 .. ⇒ 必须被拒或被收敛（不得原样转发越界目录）\n",
+               g1 ? "[PASS]" : "[FAIL]");
+        printf("    [G1 读数] %s\n", d1.toUtf8().constData());
+        printf("%s [G2] IPC add 的 filename 含 ..\\ ⇒ 转发值不得保留路径分隔符\n",
+               g2 ? "[PASS]" : "[FAIL]");
+        printf("    [G2 读数] %s\n", d2.toUtf8().constData());
+        printf("%s [G3] 合法 dir/filename 必须 success=true 且逐字原样转发（清洗不许伤正例）\n",
+               g3 ? "[PASS]" : "[FAIL]");
+        printf("    [G3 读数] %s\n", d3.toUtf8().constData());
+        {   // IpcServer 没有 stop()：摘回调防悬垂引用，再摘 endpoint；srv 随作用域出栈
+            srv.setAddTaskCallback(nullptr);
+            QLocalServer::removeServer(ipcServerName());
+        }
+        QDir(rootPg).removeRecursively();
+        return (g1 && g2 && g3) ? 0 : 1;
+    }
+
     if (qEnvironmentVariableIsSet("IDM_IPC_PROBE")) {
         {
             QLocalSocket guard;

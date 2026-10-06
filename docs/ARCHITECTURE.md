@@ -3862,3 +3862,43 @@ logic 测试在 HEAD `a7760bd` 上连跑 4 次 13/13。⚠ 期间我报过一次
 （现值 FAIL=3：docs 82→83、字节、合计 424→425）⇒ **本轮不声称"含报告的树七门全绿"**；
 代码输入集合逐字节未变（`git status --porcelain -- src resources … tools` 空）、live_roster rc=0，
 套件/引擎沿 HEAD `85224ab` 既有读数（同二进制同源码，不重跑是声明不是遗漏）。NOTICE 复签：docs=83/674911、合计 415+10=425，复签值以 `notice_verify` 汇总行为准（本轮迭代到 FAIL=0 的定点号印在该工具输出里，不在这里抄数——抄了就会因这段文字本身改变 docs 字节）。
+
+---
+
+### 2026-10-06 06:2x（第 63 条）— ⑧ A1 负例夹具轮：PathGuard 探针 + [37]，先红归档，修法只提案未实施
+
+**要求原话**："不碰代码、纯审计"延续到本轮 = **产品源码零改动**（`git status --porcelain -- src resources … CMakeLists.txt` 空），只交付测具与读数。
+
+**一、A1 判定 = 确认，但口径比审计报告更窄也更准（一手读数 `docs/a1-red/red-baseline-1006.txt`）**：
+- filename 面：**引擎有清洗**——`[37 读数] 输入「..\..\evil_a1.bin」存下filename=「.._.._evil_a1.bin」`
+  （sanitize_filename_utf8 把 `\ / : * ?` 全换 `_`）。但 PathGuard G2 证明 **IPC 转发值仍含 `\`**
+  ⇒ 桌面 GUI 手填路径那条路（NewTaskDialog→internalAddTask）不经过 dlmgr_add 的清理 ⇒ 暴露真实存在。
+- dir 面：**全链零清洗坐实**——G1 `success=1 转发dir=「..\evil_dir_a1」`；[37②] state 文件里越界 dir
+  经 load_state 原样进队列（可查=1）。三条注入路（IPC add / CLI / state 恢复）同形状。
+- 长度依赖形状：`\?\` 不折叠仅 ≥260 生效（download_core.c:119-122）⇒ 短遍历靠 OS 折叠出根、
+  超长连折叠都没有——同一输入两种语义，必须被夹具钉住。
+
+**二、交付的测具（两条，共 6 断言，基线形状 = 该红的红、该绿的黑盒对照也绿）**：
+| 测具 | 断言 | 基线 |
+|---|---|---|
+| `IDM_PATHGUARD_PROBE`（ui_snapshot 新模式：真 IpcServer + pid 私有管道 IDM_TEST_PIPE 扩面 + 回调只记转发值，零落盘零触网） | G1 dir 越界须拒/收敛；G2 name 越界须清；G3 正例逐字原样转发 | **G1 FAIL / G2 FAIL / G3 PASS**，rc=1 |
+| engine_selftest `[37①②③]` | ①name 引擎证人 ②dir state 恢复证人 ③正例对照 | **①PASS ②FAIL ③PASS**，套件 182/1 |
+⚠ 新模式**未进 CI PROBES 与 PROBE-ROSTER 表**（probe_roster 现算会把它列为文档缺行）⇒ 登记为修好轮收尾项；本轮刻意不进门（红门不许进闸门名单，这是台账规矩）。
+
+**三、过程中驳回的一条假牙（自查）**：G1 第一版谓词用 `!fwd.dir.startsWith(rootPg.left(2))` 判越界——
+相对路径 `..\evil_dir_a1` 不以盘符开头就喊越界，那会把合法相对目录也算坏 ⇒ 改成"转发值含 `..` 分量"
+这一条与被测缺陷同名的谓词，并把"拒绝式修复"显式列为另一支绿（`!ok` 也算过）。
+另：d1/d2/d3 读数第一版用了 printf 风格 `%d/%s` 塞进 `QStringLiteral().arg()` ⇒ Qt 报
+`Argument missing`、印出字面量（跑出来的读数行没有插值）——**读数印了不等于读数对了**，
+grep 一手日志才看见，改 `%1..%5` 后复跑才有上表那些带值的行。
+
+**四、修法提案（§7 of coverage-audit；等授权，未实施）**：拒绝式（建议）或收敛式，落点 ipc_server.cpp add 分支
++ internalAddTask 兜底 + 引擎 dlmgr_add/load_state 入参检查；白名单根怎么定是**产品决策交主控**；
+TaskInfo/summary 需增最终落点字段否则清洗对不对无法逐字核；变异计划三条（摘 IPC 清洗⇒G1/G2 红、
+摘引擎检查⇒[37②] 红、写成"含点就拒"⇒G3/[37③] 红）。
+
+**仍然没验证的东西**：夹具证到"受理/转发"层，**没有做真写出根外的 PoC**（边界内不写敏感路径；
+且 start 会触网）⇒ "实测可越界写文件"这句话仍未被证，被证的是"参数原样抵达引擎并被受理"；
+dir 面证人读不出收敛后的具体路径（TaskInfo 无 save_dir，提案第 4 条就是补这个）；
+web_server/CLI 两个旁路入口未单独建夹具（它们汇入同一条 internalAddTask，按共享段处理）；
+新测具未进门；CI 从未执行。

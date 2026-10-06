@@ -3195,6 +3195,84 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ── [37] A1 路径穿越负例夹具（⑧，TDD：清洗落地前恒红）──
+     * 形状：dlmgr_add 不触网、只 strncpy + snprintf 拼 tmp_path ⇒ 拼接结果当场可读；
+     *       dir 的第二条注入路走 load_state（恢复时 :2196 用 save_dir 重算 tmp_path）。
+     * ⚠ TaskInfo **没有** save_dir/tmp_path 字段（本轮读 download_core.h:240-268 实证），
+     *   summary 也没有 ⇒ 证人通道只有两条：add 面的 tmp_path 无从读，改读
+     *   filename（sanitize 后原样与否即证人）+ state 文件里 dir 是否被原样持久化。
+     * 判据三条各印读数：
+     *   ① filename 含 `..\` ⇒ sanitize 必须把它清成 `_` 或整单拒绝（落点不可能越根）；
+     *   ② dir 含 `..` ⇒ 保存/恢复链必须拒或收敛回授权根；
+     *   ③ 正例对照：合法名字与合法子目录必须照常通过（期望非 0 的牙，防"全拒"式假修）。
+     * ⚠ PoC 边界：全程不 start ⇒ 引擎绝不向 system32 之类真实位置写任何东西。 */
+    {
+        char root37[MAX_PATH + 64];
+        snprintf(root37, sizeof(root37), "%s\\idm_selftest_out", getenv("TEMP") ? getenv("TEMP") : ".");
+        const char* evil_name = "..\\..\\evil_a1.bin";
+        int idA = dlmgr_add("http://127.0.0.1:1/a.bin", root37, evil_name, 1, NULL, NULL, NULL, NULL);
+        int idC = dlmgr_add("http://127.0.0.1:1/c.bin", root37, "sub_ok.bin", 1, NULL, NULL, NULL, NULL);
+        TaskInfo iA; memset(&iA, 0, sizeof(iA));
+        TaskInfo iC; memset(&iC, 0, sizeof(iC));
+        int gA = idA >= 0 ? dlmgr_get_task_info(idA, &iA) : -1;
+        int gC = idC >= 0 ? dlmgr_get_task_info(idC, &iC) : -1;
+        /* ① 证人谓词：sanitize 把 `\` 换成 `_` ⇒ 存下的 filename 不含反斜杠、不含裸 `..` 分量。
+         *   若将来有人改成"直接拒绝带 .. 的名字"（add 返回 -1），同样算绿。 */
+        int name_bad = (gA == 0) && (strchr(iA.filename, '\\') != NULL);
+        char d37[900];
+        snprintf(d37, sizeof(d37),
+                 "①name面: add=%d 输入「%s」存下filename=「%s」含反斜杠=%d（1=穿越分量存活）",
+                 idA, evil_name, iA.filename, name_bad);
+        printf("    [37 读数] %s\n", d37); fflush(stdout);
+        check("[37①] filename 含 ..\\ 时必须被清洗为安全名或整单拒绝",
+              idA < 0 || gA != 0 || !name_bad, d37);
+
+        /* ② dir 面：写一份 state JSON（dir 用 `..\evil_dir_a1`），load_state 后看
+         *   dir 是否被原样恢复。原样恢复 ⇒ GUI 打开目录/完成 rename 都按越界路径走。
+         *   绿的两支：load 后该任务消失（拒收），或 save_dir 已被收敛到授权根内。 */
+        {
+            char sj37[MAX_PATH + 80];
+            snprintf(sj37, sizeof(sj37), "%s\\a1_state.json", root37);
+            const char* content =
+                "{\n  \"idmFormat\": 2,\n  \"tasks\": [\n"
+                "    {\"id\":9370, \"url\":\"http://127.0.0.1:1/d.bin\", "
+                "\"file\":\"d.bin\", \"dir\":\"..\\\\evil_dir_a1\", "
+                "\"size\":1024, \"downloaded\":0, \"status\":2,\n"
+                "     \"chunks\":[] }\n"
+                "  ]\n}\n";
+            utf8_write_file(sj37, content);
+            int ld = dlmgr_load_state(sj37);
+            TaskInfo iD; memset(&iD, 0, sizeof(iD));
+            int gotD = (dlmgr_get_task_info(9370, &iD) == 0);
+            /* ⚠ 本轮读码纠正一处夹具设计错误：load_state **不清空队列**（:2113 起是
+             *   append 语义；"先清空"的注释属于另一个函数，我把它当成了 load 的行为）。
+             *   ⇒ 越界 dir 任务被追加进来、可查到 = dir 无清洗的证据；A/C 仍在队列里，
+             *   末尾统一 cancel。TaskInfo/summary 都不带 save_dir ⇒ dir 面的证人只能到
+             *   "被受理与否"这一层，读不出收敛后的具体路径——这条限制写进修法提案
+             *   （提案第 4 项：把最终落点暴露成可读字段，否则清洗对不对没法逐字核）。 */
+            int dir_bad = (ld == 0) && gotD;
+            snprintf(d37, sizeof(d37),
+                     "②dir面: load_state=%d 越界dir任务可查=%d（1=..目录被原样受理，dir 无清洗）",
+                     ld, dir_bad);
+            check("[37②] state/IPC 的 dir 含 .. 时必须被拒或收敛回授权根",
+                  !dir_bad, d37);
+            utf8_delete(sj37);
+        }
+
+        /* ③ 正例对照：合法名字必须照常受理（A/C 未被 load 清掉，直接读回） */
+        if (gC != 0) { /* 防御：若将来 load 改成清空语义，这里补一次 add */
+            idC = dlmgr_add("http://127.0.0.1:1/c.bin", root37, "sub_ok.bin", 1, NULL, NULL, NULL, NULL);
+            gC = idC >= 0 ? dlmgr_get_task_info(idC, &iC) : -1;
+        }
+        snprintf(d37, sizeof(d37), "③正例: add=%d filename=「%s」（合法名不得被误杀）",
+                 idC, iC.filename);
+        check("[37③] 合法文件名必须照常受理（清洗不许伤正例）",
+              idC >= 0 && gC == 0 && strcmp(iC.filename, "sub_ok.bin") == 0, d37);
+        if (idA >= 0) dlmgr_cancel(idA);
+        if (idC >= 0) dlmgr_cancel(idC);
+        dlmgr_remove(9370);
+    }
+
     dlmgr_destroy();
     printf("\n== 结果：%d 通过，%d 失败 ==\n", g_pass, g_fail);
 

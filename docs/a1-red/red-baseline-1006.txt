@@ -1,0 +1,17 @@
+# ⑧ A1 负例夹具 RED 阶段归档（HEAD 242448e，产品源码零改动）
+# ui_snapshot sha12=2570d8e709c0 engine_selftest sha12=304e278bbba8
+
+== PathGuard G1/G2/G3 ==
+[FAIL] [G1] IPC add 的 dir 含 .. ⇒ 必须被拒或被收敛（不得原样转发越界目录）
+    [G1 读数] got=1 success=1 转发dir=「..\evil_dir_a1」hits=1 msg=「已添加下载: a.bin」
+[FAIL] [G2] IPC add 的 filename 含 ..\ ⇒ 转发值不得保留路径分隔符
+    [G2 读数] got=1 success=1 转发name=「..\..\evil_b.bin」含反斜杠=1
+[PASS] [G3] 合法 dir/filename 必须 success=true 且逐字原样转发（清洗不许伤正例）
+    [G3 读数] got=1 success=1 hits=1 dir==root=1 name=「ok_c.bin」
+
+== engine [37] ==
+    [37 读数] ①name面: add=7346 输入「..\..\evil_a1.bin」存下filename=「.._.._evil_a1.bin」含反斜杠=0（1=穿越分量存活）
+  [PASS] [37①] filename 含 ..\ 时必须被清洗为安全名或整单拒绝
+  [FAIL] [37②] state/IPC 的 dir 含 .. 时必须被拒或收敛回授权根  -> ②dir面: load_state=0 越界dir任务可查=1（1=..目录被原样受理，dir 无清洗）
+  [PASS] [37③] 合法文件名必须照常受理（清洗不许伤正例）
+== 结果：182 通过，1 失败 ==
