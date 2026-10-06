@@ -4021,3 +4021,19 @@ C3/C4 是用 `QMetaObject::invokeMethod` 直接驱动 handler 证的，**信号�
 落盘、触网，本轮边界不允许；③ 剪贴板富格式（HTML/图片）本仓不涉及，但也因此没证过"复制多行任务信息"这类形状；
 ④ CI 仍未执行过一次（push 属用户边界），`TOTAL_PASS ≥70` 是新写的、从未在 runner 上响过；
 ⑤ PATHGUARD 的 G1/G2 仍红＝A1 dir 面零清洗未修，修法提案在 `docs/coverage-audit-1006.md` §7-63 等授权。
+
+**七、sniff E2E 本轮复跑 rc=12（capstone 未闭合）——一手取证后定性为「测具假设错 + 一条真实产品缺陷」**：
+链条本身全绿（`[VERDICT] 链条接上：网页识别 → popup → 真点击 → host → GUI 收下`、任务进『已完成』、`.idmtmp` 残留=0），
+红在最后一步取证。逐手证据：fixture 服务器 `/media/dom.mp4` = 24 B ftyp 头 + 200000×`0x01` ⇒ **恰 200012 B**；
+本轮（08:04:38）落盘的是 `~/Downloads/dom (2).mp4`，`sha256(dom.mp4)==sha256(dom (1).mp4)==sha256(dom (2).mp4)`
+=`267989ec0181…`（三文件同 size 同 sha）⇒ 字节完整写对，只是**名字被改了**。
+原因不是引擎没同步：引擎 `pick_free_filename` 会就地更新 `t->filename`（download_core.c:1334 注释自明）。
+是 GUI 只在**建行时**读一次名字：新建任务走 `TaskController::internalAddTask`，
+`row.fileName = name.isEmpty() ? QUrl(url).fileName() : name`（task_controller.cpp:90/142/203，全部来自 URL），
+完成后的 tick 只刷状态/速度/提示（main_window.cpp:1500-1513 `continue`），**从不回读 `info.filename`**；
+唯一读引擎名字的那行（:1520）在"恢复的任务没有 Qt 回调"那个分支里。
+⇒ 用户可见后果：**同名重下时列表显示 `dom.mp4` 而盘上是 `dom (2).mp4`**，双击/打开目标会指错文件。
+测具那一侧同时错两处：① 拿死名 `f_expected = Downloads/dom.mp4` 当唯一取证点（disk_e2e.py:251 同形状隐患）；
+② 它的注释写着「向 GUI 问这个任务的保存目录（ipc_server 的 info 命令带路径）」但代码根本没问，直接用了注册表默认目录。
+修法候选（属作者权，等点名才做）：GUI 在状态 tick 里对已完成任务回读 `dlmgr_get_task_info().filename` 并 `setFileName`；
+或 IPC `list` 改为从引擎现取文件名。测具侧改法：先向 GUI/host 要最终落点名，再按那个名字取证。
