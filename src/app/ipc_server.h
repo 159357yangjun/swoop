@@ -49,10 +49,16 @@ public:
     };
     static DrainStat drainStat();
 
+    /* 读阶段完成后的命令处理入口（§7-56 异步重构）：由 PendingRead（.cpp 内的读状态机）
+       在凑齐一条完整 JSON 或判空转后调用。public 是刻意的——它是这条异步链的交付口，
+       不是给外部用的 API；onNewConnection/handleClient 保持私有。 */
+    void handleClientData(QLocalSocket* client, const QByteArray& data);
+
 private slots:
     void onNewConnection();
 
 private:
+    // 读阶段入口：把 client 交给 PendingRead（非阻塞，readyRead/grace 驱动）。
     void handleClient(QLocalSocket* client);
 
     QLocalServer* m_server = nullptr;

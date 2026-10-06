@@ -3508,3 +3508,45 @@ host/idm_next_host.cpp}、browser-extension/{background.js,content.js}、CMakeLi
 （hls_variant_probe 挂在 IDM_BUILD_UI_SNAPSHOT 开关下）、tools/hls_variant_probe.cpp、
 tools/disk_e2e_server.py（build_variant_master 夹具，hi/lo 分片路径互斥）。NOTICE 复签 `414=404+10`。
 CLI 回退通道（host 未连上 GUI 时）不支持 hls_variant ⇒ 保持默认最高档，已写进代码注释与本条。
+
+### 2026-10-05 20:4x（第 56 条）— P0：IpcServer 空转连接阻塞主线程修复（异步读阶段）+ E 段夹具（含一次"无效证人"自我驳回）
+
+方案 A 批准时从代码里读出的产品缺陷，本轮修完。机制：`handleClient` 旧形状在 **GUI 线程**上
+对每条新连接跑 `waitForReadyRead(100)`×2 起步的有界循环 ⇒ 一条"连上一个字节都不发"的客户端
+（扩展 checkConnection 轮询、被杀的副实例、探针自己的空转连接）让服务端白占主线程 ≥200ms；
+用户每点一次插件界面就卡一下。这条同时解释了 §7-38 的"量具常数"与登记过的 ACTIVATE 偶发红。
+
+**修法**：读阶段拆成 `PendingRead` 状态机（readyRead/graceTimer/disconnected 信号驱动），
+槽函数里不再有任何 sleep。保留的原意逐条对上：分片累积不变；"已收半条才继续等"由 graceTimer
+（收到过东西才挂，500ms）承担；凑齐完整 JSON 即交付 `handleClientData`。回话/送达/drainStat
+取证路径一行未动。管道名新增 `IDM_TEST_PIPE` 覆盖（仅测具；不设＝产品行为逐字不变）。
+
+**过程中我犯了两条、都被实测当场驳回，留档防重犯：**
+1. **第一版夹具的证人无效**：用"压在空转连接后面的真请求往返 <150ms"当判据。Windows 命名管道
+   允许写先于 accept 完成（worker 线程 waitForConnected 返回前就 write+flush 是常态），字节常常
+   在 newConnection 之前已可读 ⇒ 往返量不到那两轮 sleep，变异实测 17ms 照样绿。**假门。**
+   正解＝直接量"这一轮本身"：探针自起私有 IpcServer（pid 管道），空转连接建立后连续泵事件 300ms
+   取最长一轮。修复后=0ms；把 waitFor 塞回去=**204ms 红**（两面各留原文）。
+2. **首检无字节就立即交付会吃掉真请求**：中间版本把"已连接且安静"当空转坐实 ⇒ ack=0/50，
+   所有跨线程投递的请求被当哑巴连接处理。空转的正确证人是对端 **disconnected**（真请求不会关自己）。
+3. 顺带两条既有事实：ACTIVATE 探针此前从不 show() 窗口（activate 的 showNormal 对隐藏窗等价首次
+   show ⇒ ok3 量的不是幂等），本轮补 w.show()；探针服务改 pid 隔离管道前，同机残留实例会让它
+   连到别人家服务（第一轮 ack=0/0 peakN=1 就是那个形状——归因走 CLI 复算，非猜测）。
+
+**前后对比读数**（同一台机器、同一枚 fixture）：
+| 面 | 修复前 | 修复后 |
+|---|---|---|
+| E 段：空转连接触发的那一轮 | ≥200ms（变异复现 204ms） | **0ms** |
+| D 段：取尽自身峰值 | 210~213ms | **0ms** |
+| D 段：IPC 占比 | ~12% | **0%** |
+| C 段：连续 50 投 ack | 50/50 | 50/50（能力不降级） |
+| B 段：放弃后往返 | 9~14ms | 14ms |
+
+D 段单轮最长仍 ~1711ms（需 <500）⇒ 那是 MainWindow 定时器回调（§7-38 已消融归因、基线同现），
+**IPC 已被证明不在其中**；这正是下一步 ② ACTIVATE C→B 的输入。
+
+改动文件：src/app/ipc_server.{h,cpp}（异步读阶段 + handleClientData 公开为交付口）、
+src/app/cli_forward.cpp（IDM_TEST_PIPE 覆盖）、tools/ui_snapshot.cpp（E 段夹具 + w.show() +
+ACTIVATE 私有管道）。回归全绿：套件 19 模式 PASS=79 FAIL=0（比上轮 +1＝E 段）、引擎 180/0、
+hls_variant_probe V0–V3、真 GUI E2E（add hls_variant=246440 ⇒ 产物==lo 拼接、help 正常）、
+七道文本门将随本轮 NOTICE 复签后跑齐。证据档 docs/activate-e-idle-block-1005.txt。

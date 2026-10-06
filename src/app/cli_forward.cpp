@@ -13,6 +13,11 @@
 
 QString ipcServerName()
 {
+    /* 覆盖开关只给测具用（IDM_IPC_PROBE 连假服务的既有形状）：探针必须量**自己起的**
+       IpcServer，不能去碰用户此刻正在跑的实例；不设环境变量时行为与产品完全一致。 */
+    const QString override = qEnvironmentVariable("IDM_TEST_PIPE").trimmed();
+    if (!override.isEmpty())
+        return override;
     return QStringLiteral("idm-next-ipc");
 }
 

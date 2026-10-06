@@ -189,6 +189,18 @@ int main(int argc, char** argv) {
     // 必须先建 QApplication 并设置应用名，AppPaths::settings() 才能定位到与产品一致的配置位置
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("IDM Next"));
+
+    /* 探针起真 MainWindow（会调 IpcServer::start()）时，管道名带 pid 隔离：
+     * 同机可能有别的实例/别的会话在听 `idm-next-ipc`，共名 ⇒ 探针连到别人家的服务上，
+     * 读数整轮作废（本仓踩过的形状："假绿与假红都在这条路上"）。
+     * ⚠ 只给 ACTIVATE 开：IDM_IPC_PROBE 的断言对象**就是那个字面量产品名**
+     *   （「窗口构造完、第一轮之前没人监听 idm-next-ipc」），给它改名等于拆它的证人。
+     *   不设此变量时产品行为完全不变。 */
+    if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")) {
+        qputenv("IDM_TEST_PIPE",
+                QStringLiteral("idm-probe-%1").arg(QCoreApplication::applicationPid()).toUtf8());
+    }
+
     // 与产品入口保持一致：否则截图里标准按钮是英文，走查结论会失真
     installZhCnTranslator();
 
@@ -2087,6 +2099,8 @@ int main(int argc, char** argv) {
         bool ok1 = false, ok2 = false, ok3 = false, ok4 = false, ok5 = false, ok6 = false, ok7 = false;
         bool firstAbandonedAck = false;
         bool okIdleAck = false;
+        qint64 okIdleBlockMs = -1;   // E 段：压在空转连接后面的真请求往返（判据量）
+        bool okIdleAckE = false;     // E 段：那条真请求确实拿到了 success 回话
         int truncatedTurns = 0;   // D 段里"撞到每轮 20ms 预算"的次数（量具读数，不进判据分子）
         /* 取对照数据用的口径开关：只改变**采样调用形状**，判据表达式与阈值 500 都不动。 */
         const bool roundCriterionCount =
@@ -2109,6 +2123,11 @@ int main(int argc, char** argv) {
 
         {
             MainWindow w;
+            /* 必须 show()：activate 分支调 showNormal()/raise()/activateWindow()，而 Qt 对
+             * "还没显示过的窗口"调 showNormal() 等价于首次 show —— 隐藏态起步时第一遍投递
+             * 会把窗口**显示出来**，ok3 的「仍可见、正常态」量的就不再是幂等。
+             * offscreen 平台下这一步不产生任何真实绘制。 */
+            w.show();
             QCoreApplication::processEvents();          /* singleShot(0) → IpcServer::start() */
 
             /* 前置：等到管道真的可连，而不是"泵一圈事件循环就算起好了"。
@@ -2476,6 +2495,48 @@ int main(int argc, char** argv) {
                    ack1, ack2, rowsBefore, rowsAfter, engBefore, engAfter,
                    (long long)roundTripMs, stressAcks, stressTotal,
                    (long long)worstLoopMs);
+
+            /* ── E 段：空转连接不得阻塞主线程（§7-56 P0 的夹具）──
+             * 旧形状：handleClient 在 GUI 线程上 waitForReadyRead(100)×2 ⇒ 一条"连上一个字节
+             * 都不发"的连接让 newConnection 那一轮 ≥200ms；扩展 checkConnection 轮询就是这种
+             * 客户端 ⇒ 用户每点一次插件，界面卡一下。
+             * ⚠ 第一版用"压在空转后面的真请求往返"当证人——**无效**：Windows 命名管道允许
+             *   写先于 accept 完成，waitForConnected 返回时字节常常已可读，往返量不到那两轮
+             *   sleep（变异实测 17ms < 150 照样绿）。证人换成**直接量这一轮本身**：
+             *   同一进程内自起一个 IpcServer（自己的 pid 管道，不碰产品实例），
+             *   空转连接建立后连续泵事件 300ms，取最长一轮 ——
+             *   修复前 ≥200（sleep 全落在这一轮里），修复后 ≈0~20。 */
+            {
+                const QString epipe = QStringLiteral("idm-idle-block-probe-%1")
+                                          .arg(QCoreApplication::applicationPid());
+                QLocalServer::removeServer(epipe);
+                IpcServer srv;
+                bool listened = false;
+                {   // 临时把服务名指到探针私有管道（ipcServerName() 尊重 IDM_TEST_PIPE）
+                    qputenv("IDM_TEST_PIPE", epipe.toUtf8());
+                    listened = srv.start();
+                }
+                if (!listened) {
+                    printf("[FAIL] E 段前置不成立：探针私有 IPC 服务起不来\n");
+                    ++okIdleBlockMs;      // -1 → 0：判据行会读成"没跑过"⇒ 红
+                } else {
+                    QLocalSocket idleS;
+                    idleS.connectToServer(epipe);
+                    const bool idleConn = idleS.waitForConnected(2000);
+                    // 连上、一个字不发。此刻起 newConnection 要么已触发、要么即将触发。
+                    QElapsedTimer win; win.start();
+                    qint64 worstE = 0;
+                    while (win.elapsed() < 300) {
+                        QElapsedTimer one; one.start();
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                        worstE = qMax(worstE, one.elapsed());
+                    }
+                    okIdleBlockMs = worstE;
+                    okIdleAckE = idleConn;    // 正例对照：连接真建立起来，读数才有归属
+                    idleS.abort();
+                    qunsetenv("IDM_TEST_PIPE");   // 交还产品名（本探针后续不再起产品服务）
+                }
+            }
         }
 
         printf("%s activate 连投两次都被服务端确认处理（success=true×2，"
@@ -2491,6 +2552,12 @@ int main(int argc, char** argv) {
         printf("%s 连续投递 %d 次全部拿到回话（%d/%d；回话被丢掉就在这里红）\n",
                ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
         ok7 = (okIdleAck && worstEventLoopTurnMs >= 0 && worstEventLoopTurnMs < 500);
+        /* E 段判据（§7-56）：探针私有 IpcServer 上，一条连上不发消息的连接所触发的
+         * newConnection 轮次本身必须 <100ms。修复前 ≥200（两轮 waitForReadyRead(100)），
+         * 修复后 ≈0~20。ackE＝连接真的建立起来（正例对照：没连上的 0ms 不算证据）。 */
+        const bool ok8 = (okIdleAckE && okIdleBlockMs >= 0 && okIdleBlockMs < 100);
+        printf("%s 空转连接（连上不发字节）不再阻塞主线程：它触发的那一轮最长=%lldms（需 <100）连接成立=%d\n",
+               ok8 ? "[PASS]" : "[FAIL]", (long long)okIdleBlockMs, int(okIdleAckE));
         /* ⚠ 口径旗子必须印出来：第一版对照我切了 IDM_ROUND_CRITERION=count，两面读数几乎重叠
          *   （219~228 vs 203~227），当时无法区分"两种写法等价"还是"开关根本没生效"。
          *   没有这一行，那份对照就是不可解释的数据。 */
@@ -2505,7 +2572,7 @@ int main(int argc, char** argv) {
                "（同窗口最长轮次=%lldms 取尽连接数 peakN=%d；本轮首次测量、无基线⇒不进判据、不配阈值）\n",
                (long long)idleBehindReplyMs, int(okIdleReply),
                (long long)turnBehindMs, nBehind);
-        return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
+        return (ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8
                 && roundTripMs >= 0 && roundTripMs < 1500) ? 0 : 1;
     }
 

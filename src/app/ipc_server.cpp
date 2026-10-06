@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QTimer>
 #include <QWidget>
 
 /* 管道名只有 cli_forward.h 的 ipcServerName() 一个来源：
@@ -84,6 +85,56 @@ IpcServer::DrainStat IpcServer::drainStat()
     return s_drainStat;
 }
 
+/* ── 读阶段：非阻塞，readyRead 信号驱动（缺陷登记 §7-56）──────────────
+ * 旧形状＝在 GUI 线程上 waitForReadyRead(100)×2 起步的有界循环。一条"连上一个字节
+ * 都不发"的空转/半开连接 ⇒ 服务端白占主线程 ≥200ms；扩展 checkConnection 轮询 +
+ * 被杀掉的副实例都是这种客户端 ⇒ **用户每点一次插件，界面就卡一下**。
+ * 新形状：首检无字节 ⇒ 挂一次性 readyRead 立刻返回；宽限语义原样保留——
+ * "已收到过半条消息才继续等下一片"由 graceTimer 承担，与旧 `i > 1` 的意图一致。
+ * 分片累积、完整 JSON 判定、对端断开判定全部不变；只是不再在槽函数里睡。 */
+namespace {
+
+struct PendingRead : public QObject {
+    QLocalSocket* socket = nullptr;
+    QByteArray data;
+    QTimer* graceTimer = nullptr;       // 首包宽限：收到半条后续 500ms；一个字节都没有 ⇒ 判空转
+    IpcServer* server = nullptr;        // 交付目标（构造时注入，不靠 parent() 链反推）
+    bool handoff = false;               // 防重入：done() 只交付一次
+
+    PendingRead(QLocalSocket* s, IpcServer* srv) : QObject(s), socket(s), server(srv) {}
+
+    void done() {
+        if (handoff) return;
+        handoff = true;
+        socket->disconnect(this);       // 断开挂在这条 socket 上、以 this 为 context 的全部连接
+        if (graceTimer) graceTimer->stop();
+        server->handleClientData(socket, data);
+        // 生命周期：PendingRead 是 socket 的子对象；handleClientData 走 deleteLater，
+        // socket 销毁时本对象一起销毁。done() 之后不得再碰 this 的任何成员。
+    }
+
+    void pump() {
+        data.append(socket->readAll());
+        if (!data.isEmpty() && QJsonDocument::fromJson(data).isObject()) {
+            done();
+            return;
+        }
+        if (socket->state() != QLocalSocket::ConnectedState) {
+            // 对端已走：收过东西却凑不成一条命令 ⇒ 静默销毁（没人听，别回话）。
+            if (handoff) return;
+            handoff = true;
+            socket->disconnect(this);
+            if (graceTimer) graceTimer->stop();
+            socket->deleteLater();
+            return;
+        }
+        if (!data.isEmpty() && !graceTimer->isActive())
+            graceTimer->start(500);     // 半条消息：给它继续到的机会（比旧的 9×100ms 上限更宽）
+    }
+};
+
+} // namespace
+
 void IpcServer::onNewConnection()
 {
     // newConnection 可能一次积累多个客户端；全部取出，避免短时间浏览器/CLI 连发时
@@ -107,32 +158,35 @@ void IpcServer::onNewConnection()
 
 void IpcServer::handleClient(QLocalSocket* client)
 {
-    // 读取客户端发来的 JSON 命令：原生消息以单次写入整体送达，但可能跨多次
-    // readyRead 分片到达；此处用有界循环累积，直到得到可解析的完整 JSON 对象，
-    // 避免单次 readAll 截断导致命令解析失败。
-    QByteArray data;
-    for (int i = 0; i < 10; ++i) {
-        if (client->bytesAvailable() == 0) {
-            /* ⚠️ 只有"已经收到半条消息"才值得继续等下一片 —— 这个循环存在的理由就是
-             * 原生消息可能分片到达。一个字节都没到过 ⇒ 对端是空转/半开连接，
-             * 再等 9×100ms 也等不来东西，却是把 **GUI 线程** 独占掉：
-             * 实测一条连上不发消息的客户端让事件循环单轮跑到 1090ms（IDM_ACTIVATE_PROBE D 段，
-             * 3/3 次都是 1088~1090ms）。两条三条排队（扩展轮询 + 被杀掉的副实例）
-             * 就越过客户端那 3 秒死线 —— 这是与"回话没推完"并列的第二条机制，
-             * 而且它能解释"服务端日志显示处理很快、客户端却什么都没等到"。 */
-            if (data.isEmpty() && i > 1)     // 留 200ms 宽限：慢一点的首包仍然收得到
-                break;
-            client->waitForReadyRead(100);   // 最多约 1s，正常情况首轮即有数据
-        }
-        QByteArray chunk = client->readAll();
-        if (!chunk.isEmpty())
-            data.append(chunk);
-        if (!data.isEmpty() && QJsonDocument::fromJson(data).isObject())
-            break;   // 已收到完整命令
-        if (client->state() != QLocalSocket::ConnectedState)
-            break;   // 对端已断开
+    auto* pr = new PendingRead(client, this);
+    pr->graceTimer = new QTimer(pr);
+    pr->graceTimer->setSingleShot(true);
+    QObject::connect(pr->graceTimer, &QTimer::timeout, pr, [pr] { pr->done(); });
+    QObject::connect(client, &QLocalSocket::readyRead, pr, [pr] { pr->pump(); });
+    /* 空转判定的证人换成 disconnected，不是"连上且安静"：
+     * Windows 命名管道上，对端进程**先写后连**（worker 线程 waitForConnected 返回前就
+     * write+flush 是常态）⇒ 字节可能在 newConnection 发出之前就已可读，而 readyRead
+     * 在 emit 那一刻消费掉它 —— 之后不会再有第二发。第一版把"已连接但首检无字节"
+     * 当成空转立即交付，实测 ack=0/50：真请求被当哑巴连接处理掉了。
+     * 真正的空转客户端（checkConnection 轮询、被杀的副实例）的特征是**它会关**：
+     * 对端 disconnect ⇒ 永远等不到字节 ⇒ 在这里交付空 data，走"不支持的操作"回话。
+     * 半条消息的续宽限仍在 pump() 里（收到过东西才挂 graceTimer）。 */
+    QObject::connect(client, &QLocalSocket::disconnected, pr, [pr] {
+        if (pr->data.isEmpty()) pr->done();   // 一个字节都没来过 ⇒ 空转坐实
+        else pr->pump();                       // 凑齐就走正常路，凑不齐 done 时 fromJson 兜底
+    });
+    // enterMs 的旧口径＝进入 handleClient；异步化后取"首检时刻"，与 t0 同用墙钟，语义不漂。
+    client->setProperty("_idmEnterMs", QDateTime::currentMSecsSinceEpoch());
+    if (client->bytesAvailable() > 0) {
+        pr->pump();                      // 常见路径：单次写入整体送达，当场就能凑齐
+        return;
     }
+    // 首检无字节：**不等、不睡**（旧形状在这里 waitForReadyRead(100)×2 起步，白占 GUI 线程
+    // ≥200ms）。字节若已在路上会由 readyRead 补一发；真的没有 ⇒ 只有 disconnected 会来收尸。
+}
 
+void IpcServer::handleClientData(QLocalSocket* client, const QByteArray& data)
+{
     QJsonDocument doc = QJsonDocument::fromJson(data);
     QJsonObject msg = doc.object();
 
@@ -141,7 +195,7 @@ void IpcServer::handleClient(QLocalSocket* client)
      *   处理 = 回话写完时刻 − 进入本函数时刻 → 大 ⇒ 命令本身在 GUI 线程上慢
      * 老客户端不带 t0 时记 -1，不参与统计。 */
     const double t0 = msg.value(QStringLiteral("t0")).toDouble(0.0);
-    const qint64 enterMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 enterMs = client->property("_idmEnterMs").toLongLong();
     const qint64 queueMs = (t0 > 0.0) ? (enterMs - static_cast<qint64>(t0)) : -1;
     QElapsedTimer handledClock;
     handledClock.start();
