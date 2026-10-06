@@ -296,12 +296,36 @@ static long long first_mismatch_offset(const char *path, long long expect_size, 
 static int utf8_delete(const char *path)
 {
     wchar_t wpath[MAX_PATH * 2];
+    /* ⚠ 删不动时要能"让位"，不能只返回失败：连跑时上一轮留下的 .idmtmp 常常**还开着写句柄**
+     *   （dlmgr_pause 只置标志、不等 worker 退出），DeleteFileW 直接 ERROR_SHARING_VIOLATION。
+     *   而 RemoveDirectoryA 只能摘空目录 ⇒ 父目录跟着一起赖在盘上 ⇒ 夹具前提不成立。
+     *   Windows 允许"已标记删除、句柄关完后消失"的文件继续存在，所以改名不需要等句柄：
+     *   先重试，仍不动就改名成 .zombie 并登记开机清 —— 对**本目录**而言那个文件已经不存在了。 */
     /* 原来这里返回 void 并丢掉 DeleteFileW 的结果 ⇒ 删除失败完全看不出来，
      * [33] 面 B 就因此"造了个不匹配"却没造成，读数长得像正常重启现场。
      * 现在把 BOOL 交回调用方；不关心成败的老调用点照旧忽略它。 */
     if (!test_to_wpath(path, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))))
         return 0;
-    return DeleteFileW(wpath);
+    if (DeleteFileW(wpath)) return 1;
+    /* 删不动（多半是 ERROR_SHARING_VIOLATION＝还有写句柄）时，把它改名再交给系统开机清：
+     * 改名不需要等句柄释放 ⇒ 父目录立刻能摘空，夹具前提当场恢复。 */
+    wchar_t wtmp[MAX_PATH * 3];
+    for (int try_ = 0; try_ < 50; try_++) {
+        Sleep(100);
+        if (DeleteFileW(wpath)) return 1;
+        if (try_ == 4) {                       /* 0.5s 还没放手就走改名 */
+            DWORD n = GetFileAttributesW(wpath);
+            if (n == INVALID_FILE_ATTRIBUTES) return 1;   /* 已经没了也算成功 */
+            wcsncpy(wtmp, wpath, (size_t)(sizeof(wtmp) / sizeof(wtmp[0]) - 1));
+            wtmp[sizeof(wtmp) / sizeof(wtmp[0]) - 1] = L'\0';
+            wcscat(wtmp, L".zombie");
+            if (MoveFileExW(wpath, wtmp, MOVEFILE_REPLACE_EXISTING)) {
+                MoveFileExW(wtmp, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+                return 1;                      /* 对本目录而言这个文件已经不存在了 */
+            }
+        }
+    }
+    return 0;
 }
 
 /* 清除本轮会写入的所有产物，返回清理前残留的非空文件数（>0 说明上轮有遗留） */
@@ -1204,15 +1228,20 @@ int main(int argc, char **argv)
         if (GetFileAttributesA(d2) != INVALID_FILE_ATTRIBUTES) {
             char pat[MAX_PATH + 96];
             WIN32_FIND_DATAA fd;
-            snprintf(pat, sizeof(pat), "%s\*", d2);
+            snprintf(pat, sizeof(pat), "%s\\*", d2);
             HANDLE h = FindFirstFileA(pat, &fd);
             if (h != INVALID_HANDLE_VALUE) {
                 do {
                     if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
                     char fp[MAX_PATH + 128];
-                    snprintf(fp, sizeof(fp), "%s\%s", d2, fd.cFileName);
+                    snprintf(fp, sizeof(fp), "%s\\%s", d2, fd.cFileName);
+                    /* ⚠ 走 utf8_delete（内含"重试到真删掉 / 改名让位"），别用裸 DeleteFileA：
+                     *   上一轮留下的正是**还开着写句柄**的 .idmtmp，裸删必失败 ⇒ sub/ 摘不掉
+                     *   ⇒ 本项前提红 ⇒ [14] 之后整片失去输入。
+                     *   顺带修掉两处坏转义 `"%s\*"` / `"%s\%s"`：`\*`、`\%` 在 C 里是未知转义，
+                     *   通配模式与拼出来的路径都不是本意（编译器一直有 warning，没人看）。 */
                     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryA(fp);
-                    else DeleteFileA(fp);
+                    else utf8_delete(fp);
                 } while (FindNextFileA(h, &fd));
                 FindClose(h);
             }
@@ -2809,10 +2838,21 @@ int main(int argc, char **argv)
 
             int sv = dlmgr_save_state(stp);
             int deleted = 1;
-            DWORD del_err = 0;
             if (G33[f].mismatch) {
-                deleted = utf8_delete(tmpp);              /* utf8_delete：成功返回非 0 */
-                del_err = GetLastError();
+                /* ⚠ 删除要重试：`交出前父进程确实停了笔` 那条断言量的是"文件尺寸连续 2s 不再增长"，
+                 *   而 dlmgr_pause 只置状态标志、**不等 worker 退出**（download_core.c:1627 起），
+                 *   所以此刻写句柄可能还开着 ⇒ DeleteFileW 返回 ERROR_SHARING_VIOLATION。
+                 *   （实测过的形状：连跑时夹具前提没造出来 ⇒ 后面整片重启用例失去输入。
+                 *     注意这条红**不能归因于本处**：当时同一枚二进制第一次跑就是 180/0，
+                 *     "停笔后立刻删必失败"预测不了它——真正的因见 [13] 的拆除那段与 /_shutdown。）
+                 *   重试到真删掉为止；改名兜底在 utf8_delete 里。 */
+                DWORD del_err = 0;
+                for (int dtry = 0; dtry < 50; dtry++) {
+                    deleted = utf8_delete(tmpp);          /* utf8_delete：成功返回非 0 */
+                    del_err = GetLastError();
+                    if (deleted && file_size_i64_of(tmpp) < 0) break;
+                    Sleep(100);
+                }
                 snprintf(d, sizeof(d), "删除返回=%d GetLastError=%lu 删后 .idmtmp=%lld（期望 -1=真没了）",
                          deleted, del_err, file_size_i64_of(tmpp));
                 check("面 B：不匹配是**真的**造出来了（.idmtmp 确实不存在，不是删除失败装了个假的）",

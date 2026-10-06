@@ -1329,16 +1329,27 @@ int main(int argc, char** argv) {
                "所以 K1 只认上面那条状态证人，不认『发键看弹窗』那种证法\n", canaryHits);
 
         // ── K2：新建任务对话框的 Tab 链形状 ──
-        /* ⚠️ **这条的判据在 06:5x 被自己的普查推翻了，改过一次形状**，过程记在这里免得下次又被复活：
-         *   台账原话是「Tab 到『保存目录』会弹模态选择器」⇒ 我据此写成"两次 Tab 必须落在目录输入框"。
-         *   实测 nextInFocusChain（从焦点件所属容器起步；从 dlg 起步会把 dirLayout 那一跳折叠掉）：
-         *     url → dir → 浏览... → name → spin → …
-         *   「浏览...」**夹在两个输入框中间**，Enter 永远落不到它身上 ⇒ 原来那句描述不成立，
-         *   我的断言也就永远红（红的是测具写的期望，不是产品）。
-         *   现在改成断**真实需要的不变式**：目录输入框必须在链上、且紧跟「浏览...」按钮，
-         *   这样键盘用户 Tab 两下就到目录、第三下离开按钮回到文件名，不会卡在触发模态框的控件上。
-         *   ⚠ 这条**没有**由变异证明过自己有牙（我没演示"摘掉 setTabOrder 它就红"），
-         *     所以按台账规矩标"不占功"——它现在是读数，不是证人。 */
+        /* ⚠️ **这条的判据在 06:5x 被自己的普查推推翻过一次，本轮（§7-58）再推翻一次**，
+         *   两次过程都记在这里，免得第三次复活：
+         *   第 1 版：台账原话「Tab 到『保存目录』会弹模态选择器」⇒ 写成"两次 Tab 必须落在目录输入框"。
+         *     实测 nextInFocusChain：url → dir → 浏览... → name ⇒ 「浏览...」夹在两个输入框中间，
+         *     Enter 永远落不到它身上 ⇒ 那句描述不成立，断言永远红（红的是我写的期望，不是产品）。
+         *   第 2 版（上一轮）：改成断「dir 在链上且紧跟 浏览...」。
+         *     ⚠ **本轮驳回它**：全仓 grep `setTabOrder` = **0 处命中**，NewTaskDialog 从未声明过
+         *     任何显式 Tab 序；而 Qt 默认 Tab 序＝控件创建顺序（new_task_dialog.cpp:56..68 就是
+         *     url→dir→browse→name），所以那条不变式是**框架默认行为**在满足，摘掉任何一行产品代码
+         *     都不会让它红 ⇒ 按台账规矩它是**没有牙的护栏**。更糟的是它当时印 [PASS]，
+         *     绿灯谎称"这行断言在保护键盘面"——比没有更坏（半坏自检）。
+         *   第 3 版（本轮）：判据换成**产品代码真正写下的那件事**——按下 OK 必须真的走到
+         *     onAccepted，其末端是 accept()、对外可见的副作用是 `dlg.result().url` 被填上
+         *     （new_task_dialog.cpp:365..371）。这才是用户"填完按回车"的真实契约。
+         *     ⚠ 第一版实现是在旁边挂观察者数 accepted —— **假牙**：那是框架自己发的信号，
+         *     摘掉产品接线照样数得到 1，变异在和自己比。改成读产品自己的输出后，
+         *     两次变异各咬中一段（原文见 §7-58）：
+         *       M-A 摘 :121 的 connect(accepted→onAccepted) ⇒ c) 段归 0 ⇒ [FAIL] rc=1
+         *       M-B 给 OK 加 setAutoDefault(false)        ⇒ a) 段归 0 且 c) 也归 0 ⇒ [FAIL] rc=1
+         *   ⚠ 诚实标注：链形状读数（dir 与 浏览... 相邻）**降级为只印不判**——
+         *     它没有任何产品代码为它作保，写进退码就是让假牙占功。 */
         bool k2ok = false;
         int chainPos = -1, browsePos = -1, chainLen = 0;
         {
@@ -1375,11 +1386,12 @@ int main(int argc, char** argv) {
             const int urlPos = reg.isEmpty() ? -1 : 0;
             Q_UNUSED(urlPos);
 
-            /* 第三条读数：**Enter 的去向**。⚠ 它**不进退码、也不进 K2 判据**——
-             *    变异实测：把产品里的 setDefault/setAutoDefault 整批摘掉，`确定=default:1/auto:1`
-             *    逐字不变（QDialogButtonBox 自己就把 OK 设成默认按钮）⇒ 这条断言没有牙，
-             *    写进判据只会让绿灯谎称"是这行代码在保护 Enter"。
-             *    所以只印读数；K2 的真判据是上面那条链形状（同样见下方"未被变异证明"的坦白）。 */
+            /* Enter 归向的**结构面**：进 K2 判据（a)/b)）。
+             * ⚠ 诚实标注：上一轮我写的"摘掉 setDefault 读数不变 ⇒ 没牙"这个实验本身没有牙——
+             *   **产品里根本没有 setDefault 可摘**（全仓 grep = 0 命中），OK 成为默认按钮是
+             *   QDialogButtonBox 的框架行为。本轮换了变异对象才让它有证人：
+             *   M-B 在产品里给 OK 加 `setAutoDefault(false)` ⇒ a) 段当场归 0 ⇒ [FAIL]。
+             *   所以 a)/b) 由 M-B 证明过，c) 由 M-A 证明过；链形状仍只印不判。 */
             QPushButton* okBtn = nullptr;
             if (auto* box = dlg.findChild<QDialogButtonBox*>())
                 okBtn = box->button(QDialogButtonBox::Ok);
@@ -1388,14 +1400,29 @@ int main(int argc, char** argv) {
                 if (b->text() == QStringLiteral("浏览...")) { browseBtn = b; break; }
             const bool okIsDefault = okBtn && okBtn->isDefault() && okBtn->autoDefault();
             const bool browseNotDefault = browseBtn && !browseBtn->isDefault();
-            k2ok = anchored && chainPos >= 0 && browsePos == chainPos + 1;
-            printf("%s [K2] 新建任务对话框键盘提交面：目录框在链上、下一站是「浏览...」"
-                   "（链长=%d 目录位=%d 浏览位=%d 锚点=%d）｜对照读数 Enter 归向："
-                   "确定=default:%d/auto:%d 浏览=default:%d%s\n",
-                   k2ok ? "[PASS]" : "[FAIL]", chainLen, chainPos, browsePos, anchored ? 1 : 0,
-                   okBtn && okBtn->isDefault() ? 1 : 0, okBtn && okBtn->autoDefault() ? 1 : 0,
-                   browseBtn && browseBtn->isDefault() ? 1 : 0,
-                   okIsDefault && browseNotDefault ? "" : "  ⇒ Enter 去向异常");
+
+            /* 判据（第 3 版）：Enter 提交契约。三段各管一段，任一不成立就红：
+             *   a) OK 是默认按钮（回车会去按它，而不是去按「浏览...」）
+             *   b) 「浏览...」不是默认按钮（否则回车弹模态目录选择器＝台账最初那条真缺陷）
+             *   c) **按下 OK 必须真的走到产品的 onAccepted**：它的末端是 accept()，
+             *      对外可见的副作用是 `dlg.result().url` 被填上（new_task_dialog.cpp:365）。
+             *      ⚠ 不能像第一版那样在旁边挂个观察者数 accepted——那是框架自己发的信号，
+             *      摘掉产品接线照样数得到 1 ⇒ 变异在和自己比、假牙。现在读的是**产品自己的输出**。
+             * ⚠ 链形状（dir/浏览 相邻）只印不判，理由见上面那段驳回。 */
+            bool handlerRan = false;
+            {
+                const QString probeUrl = QStringLiteral("http://127.0.0.1:1/k2.bin");
+                dlg.setUrl(probeUrl);           // 走真入口：URL 合法，onAccepted 能跑到 accept()
+                if (okBtn) okBtn->click();       // 模拟"填完按回车"：默认按钮被激活
+                handlerRan = (dlg.result().url == probeUrl);
+            }
+            k2ok = anchored && okIsDefault && browseNotDefault && handlerRan;
+            printf("%s [K2] 新建任务对话框 Enter 提交面：确定=default&&auto=%d "
+                   "浏览!=default=%d 按OK后 onAccepted 真跑(result.url 已填)=%d 锚点=%d"
+                   "｜链形状只印不判（无 setTabOrder 为它作保）：目录位=%d 浏览位=%d 链长=%d\n",
+                   k2ok ? "[PASS]" : "[FAIL]",
+                   okIsDefault ? 1 : 0, browseNotDefault ? 1 : 0, handlerRan ? 1 : 0,
+                   anchored ? 1 : 0, chainPos, browsePos, chainLen);
             printf("    [K2 链读数] %s\n", reg.join(QStringLiteral(" -> ")).toUtf8().constData());
             dlg.reject();
         }
