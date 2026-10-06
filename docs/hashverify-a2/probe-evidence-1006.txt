@@ -1,0 +1,37 @@
+# ⑨ A2 哈希校验对拍与入口探针归档（HEAD e871ec7 基线，产品源码本轮零改动）
+# ui_snapshot sha12=76d5e89bca3e @ 06:35
+
+== 基线（还原后复跑）==
+[PASS] [H0] 三算法已知向量对拍（abcde：SHA-256/MD5/SHA-1 全等 RFC 标准串）
+    [H0 读数] sha256=「36bbe50ed96841d1」期望=NIST 向量 相等=1｜独立重算=「36bbe50ed96841d1」一致=1
+    [H0 读数] md5=「ab56b4d92b40713acc5af89985d4b786」==RFC2202=1 ｜ sha1=「03de6c570bfe24bfc328ccd7ca46b76eadaf4334」==RFC3174=1
+[PASS] [H1] 对话框分块结果 == QCryptographicHash 独立重算（两种调用形状互印）
+[PASS] [H2] 预期值匹配⇒「✓ 校验通过」、错一位⇒「✗ 校验失败」（两分支都有牙）
+    [H2 读数] 正=「✓ 校验通过 — 哈希值匹配」错=「✗ 校验失败 — 哈希值不匹配！
+[PASS] [H3] 详情对话框里「校验文件完整性...」按钮存在（入口链活着，不是死 UI）
+    [H3 读数] 按钮找到=1 enabled=1（完成态才允许；-999 不存在任务时的形状如实印）
+[PASS] [HASHVERIFY 汇总] h0=1 h1=1 h2a=1 h2b=1 h3=1 h3b=1
+
+== certutil 独立向量（Windows 自带实现，非 Qt）==
+SHA256: 36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c
+MD5: ab56b4d92b40713acc5af89985d4b786
+SHA1: 03de6c570bfe24bfc328ccd7ca46b76eadaf4334
+
+== M-⑨a 比对恒真 ==
+[FAIL] [H2] 预期值匹配⇒「✓ 校验通过」、错一位⇒「✗ 校验失败」（两分支都有牙）
+    [H2 读数] 正=「✓ 校验通过 — 哈希值匹配」错=「✓ 校验通过 — 哈希值匹配」（大写输入也须匹配=大小写归一在 :158 toLower）
+[FAIL] [HASHVERIFY 汇总] h0=1 h1=1 h2a=1 h2b=0 h3=1 h3b=1
+
+== M-⑨b MD5 标签挂 SHA-1 ==
+[FAIL] [H0] 三算法已知向量对拍（abcde：SHA-256/MD5/SHA-1 全等 RFC 标准串）
+    [H0 读数] md5=「03de6c570bfe24bfc328ccd7ca46b76eadaf4334」==RFC2202=0 ｜ sha1=「03de6c570bfe24bfc328ccd7ca46b76eadaf4334」==RFC3174=1
+[FAIL] [HASHVERIFY 汇总] h0=0 h1=1 h2a=1 h2b=1 h3=1 h3b=1
+
+== M-⑨c 结果截断 32 ==
+[FAIL] [H0] 三算法已知向量对拍（abcde：SHA-256/MD5/SHA-1 全等 RFC 标准串）
+[FAIL] [H1] 对话框分块结果 == QCryptographicHash 独立重算（两种调用形状互印）
+[FAIL] [HASHVERIFY 汇总] h0=0 h1=0 h2a=1 h2b=1 h3=1 h3b=1
+
+== M-⑨d 入口按钮改名（第一版 contains 谓词被蒙过→改逐字全等后才红；见 §7-64）==
+[FAIL] [H3] 详情对话框里「校验文件完整性...」按钮存在（入口链活着，不是死 UI）
+[FAIL] [HASHVERIFY 汇总] h0=1 h1=1 h2a=1 h2b=1 h3=0 h3b=0

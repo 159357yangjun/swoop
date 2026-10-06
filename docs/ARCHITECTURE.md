@@ -3902,3 +3902,40 @@ TaskInfo/summary 需增最终落点字段否则清洗对不对无法逐字核；
 dir 面证人读不出收敛后的具体路径（TaskInfo 无 save_dir，提案第 4 条就是补这个）；
 web_server/CLI 两个旁路入口未单独建夹具（它们汇入同一条 internalAddTask，按共享段处理）；
 新测具未进门；CI 从未执行。
+
+---
+
+### 2026-10-06 06:4x（第 64 条）— ⑨ A2：哈希校验对拍 + 入口链探针 `IDM_HASHVERIFY_PROBE`，四面变异各咬一段
+
+**一、入口定位（读码，全部本轮实测行为证人）**：
+用户路径 = 双击任务列表行（main_window.cpp:538 doubleClicked→onTaskDoubleClicked:1099）
+→ 非模态 TaskDetailDialog（:1114）→ 「校验文件完整性...」按钮（task_detail_dialog.cpp:136，
+connect :143 → onVerifyFile）→ onVerifyFile 用 **dlmgr_get_task_summary** 拿 save_dir+filename
+拼完整路径（:252-257，拼法 `dir + QDir::separator() + fn`）→ `HashVerifyDialog dlg(this, fullPath)` exec。
+参数：**文件路径字符串**（不是任务 id——出了对话框就没有 id 了）；结果展示：对话框内
+m_resultLabel（十六进制串）+ m_matchLabel（✓/✗/橙色跳过三态），无状态栏/日志出口。
+
+**二、探针六断言（真控件、真信号链：findChild 拿 combo/edit/button，click() 走真 onVerify 分块循环）**：
+| 断言 | 判据 | 基线 |
+|---|---|---|
+| H0 | 夹具 `abcde` 的三算法结果 == **certutil（Windows 自带独立实现）现场生成向量**（SHA-256 36bbe50e…、MD5 ab56b4d9…、SHA-1 03de6c57…；不是 Qt 自算自对拍） | PASS |
+| H1 | 对话框分块结果 == QCryptographicHash::addData(&f) 独立重算（同库两种调用形状互印） | PASS |
+| H2 | 预期值正确⇒「✓ 校验通过」（含大写输入，验 :158 toLower 归一）；错一位⇒「✗ 校验失败」——两分支都有牙 | PASS |
+| H3/H3b | 详情对话框里按钮**逐字全等**存在且 enabled | PASS |
+
+**三、变异四面（各红各段，跑完当场还原，证据档 `docs/hashverify-a2/probe-evidence-1006.txt`）**：
+| 变异 | 破坏点 | 签名 |
+|---|---|---|
+| M-⑨a `computed==expected`→恒真 | 比对语义 | **恰好 h2b=0**（错值也报通过），其余全绿 |
+| M-⑨b MD5 标签挂 Sha1 | 算法映射 | h0=0，读数 md5=「03de6c…」sha1 仍对 ⇒ 点名到算法粒度 |
+| M-⑨c 结果截断 left(32) | 输出完整性 | h0=0 h1=0、**h2 仍绿**（比对两侧同被截断仍相等）⇒ H1 的第二证人价值当场演示 |
+| M-⑨d 按钮改名加后缀 | 入口可寻性 | h3=0 h3b=0 |
+
+**四、本轮抓回的三条测具缺陷（都在交付前修掉并留字）**：
+1. **sed 替换串含 `/` ⇒ 整条命令没执行**，我差点把"未改动的绿"记成 M-⑨a 的结果——变异生效证人=先 grep 标记串在盘上（`grep -c M-⑨a`=1）再跑门（§二十二 的同族）。
+2. **H3 第一版谓词用 `contains("校验文件完整性")`** ⇒ M-⑨d 改名"校验文件完整性(占位)"照样绿。**contains 是入口类断言的固定无牙形状**（§二十一第四例），改逐字全等后同一变异立刻红。
+3. d0/d2a/d3 又犯了 printf 风格塞 `.arg()`（⑧ 刚记过的同形错），读数行带 `%d/%s` 字面量——靠一手日志发现，改 `%1..%n`。教训升级：**同类错误第二次发生就要进长期记忆**，已写。
+
+**五、门禁**：build/host_manifest/live_roster/a_gate/sniff/notice_verify rc=0；freshness rc=0（产品源码零改动，`git diff --stat src/` 空）；probe_roster rc=1 = PATHGUARD+HASHVERIFY 两个新模式未进文档表/CI 名单（沿 ⑧ 的规矩：修好轮一起收尾进门）。套件沿 e871ec7 前的 79/0 未重跑（本轮只动 ui_snapshot 一个新增分支，不触碰其它模式代码——这个"没跑"是声明不是遗漏）。
+
+**仍然没验证的东西**：H3 只证按钮存在且可用，**没点它**——点了会 exec() 起嵌套模态循环，探针无人收尸（K1 同款坑，登记为缺口；"按下⇒对话框出现"这一段目前无断言）；onVerifyFile 的路径拼接只在 -999（任务不存在⇒fullPath 退化 filename）形状下走过，正常完成任务的 dir+sep+fn 拼接无逐字证人；大文件（跨 4MB 块边界）只有 H1 的单形状对拍，进度条百分比无断言；错误路径（文件打不开⇒QMessageBox）刻意不进探针（模态框）；browse 按钮/QFileDialog 未测；computeHash() 那个成员函数**无人调用**（onVerify 自己重写了一遍分块循环——两份哈希实现并存，死代码疑云，属作者权问题只报不删）。

@@ -48,6 +48,9 @@
 #include "settings_dialog.h"
 #include "schedule_dialog.h"
 #include "task_detail_dialog.h"
+#include "hash_verify_dialog.h"
+#include <QCryptographicHash>
+#include "../core/download_manager.h"
 #include "download_core.h"
 #include <QSqlDatabase>
 #include "task_list_model.h"   // 限流倒计时探针：TaskRow / stateText / throttleNoticeText
@@ -1893,6 +1896,138 @@ int main(int argc, char** argv) {
         printf("    [LIVE 收摊] 端口仍在监听=%d 数据目录已清空=%d\n",
                stillListening ? 1 : 0, purged ? 1 : 0);
         return (okPre && okDone && okSize && okPaintNoSource) ? 0 : 1;
+    }
+
+    /* ── 诊断模式：IDM_HASHVERIFY_PROBE=1（⑨ A2）──
+     * 「文件完整性校验」的入口链 + 哈希本体。三段六断言，全部读**产品自己的输出**：
+     *   H0/H1 已知向量对拍：真 HashVerifyDialog 摆到屏幕外、findChild 拿到控件后
+     *      设值 + 点「计算并校验」（走真 onVerify 的分块循环），断言 m_resultLabel
+     *      等于 NIST/RFC 标准串；H1 再钉"对话框结果 == QCryptographicHash 独立重算"
+     *      （同库不同调用形状：对话框是分块 read+processEvents，这里是 addData(&f)）。
+     *   H2 匹配/不匹配两分支：预期值正确 ⇒ 「✓ 校验通过」；预期值错一个字符 ⇒ 「✗ 校验失败」。
+     *      ⚠ offscreen 下 QMessageBox 不会自动 exec 拦路？会——所以比对只在 expected 非空时
+     *      才走 label 分支；错误路径（打不开文件）不在本面范围（它弹模态框，测具收不了尸）。
+     *   H3 入口链可达：TaskDetailDialog(真 DownloadManager, id=-999) findChild 到
+     *      「校验文件完整性...」按钮且 enabled ⇒ 双击详情→校验入口不是死 UI。
+     *      ⚠ 不点它：点了会 dlg.exec() 起嵌套模态循环，探针里没人能替用户关它
+     *      （K1 同款坑）⇒ "按下去弹窗"那一段由 K1 的形状证不了这里，如实登记为缺口。
+     * 变异计划：摘 result->setText / 改算法映射 / 把比对改成恒真，各红一条（见 §7-64）。 */
+    if (qEnvironmentVariableIsSet("IDM_HASHVERIFY_PROBE")) {
+        const QString dir = QDir::tempPath() + QStringLiteral("/idm-hashverify-probe-")
+                            + QString::number(QDateTime::currentMSecsSinceEpoch());
+        QDir().mkpath(dir);
+        qputenv("IDM_DATA_DIR", dir.toUtf8());
+
+        // 测试夹具：5 个字节 abcde —— 三算法标准摘要由 **certutil（Windows 自带，独立实现）**
+        // 本轮现场生成（不是 Qt 自己算了自己对拍）：
+        //   SHA-256 36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c
+        //   MD5     ab56b4d92b40713acc5af89985d4b786
+        //   SHA-1   03de6c570bfe24bfc328ccd7ca46b76eadaf4334
+        const QByteArray fixture = QByteArrayLiteral("abcde");
+        const QString fpath = dir + QStringLiteral("/fixture.bin");
+        { QFile fo(fpath); fo.open(QIODevice::WriteOnly); fo.write(fixture); fo.close(); }
+
+        auto runVerify = [&](const QString& algoName, const QString& expectedIn) -> QStringList {
+            HashVerifyDialog dlg(nullptr, fpath);
+            dlg.move(-32000, -32000);
+            dlg.show();
+            QCoreApplication::processEvents();
+            auto* combo = dlg.findChild<QComboBox*>();
+            QList<QLineEdit*> edits = dlg.findChildren<QLineEdit*>();
+            QList<QPushButton*> btns = dlg.findChildren<QPushButton*>();
+            QList<QLabel*> labels = dlg.findChildren<QLabel*>();
+            if (!combo || edits.size() < 2 || btns.isEmpty()) return {QString(), QString(), QStringLiteral("控件缺失")};
+            int idx = combo->findText(algoName);
+            if (idx < 0) return {QString(), QString(), QStringLiteral("算法项缺失")};
+            combo->setCurrentIndex(idx);
+            edits[1]->setText(expectedIn);          // 第 2 个 QLineEdit = 预期值
+            QPushButton* vb = nullptr;
+            for (QPushButton* b : btns)
+                if (b->text().contains(QStringLiteral("计算并校验"))) { vb = b; break; }
+            if (!vb) return {QString(), QString(), QStringLiteral("按钮缺失")};
+            vb->click();
+            QCoreApplication::processEvents();
+            QString result, match;
+            for (QLabel* l : labels) {
+                const QString t = l->text();
+                if (t.size() == 32 || t.size() == 40 || t.size() == 64) {
+                    bool hex = true;
+                    for (const QChar& c : t) if (!QStringLiteral("0123456789abcdefABCDEF").contains(c)) { hex = false; break; }
+                    if (hex && result.isEmpty()) result = t;
+                } else if ((t.contains(QStringLiteral("校验通过")) || t.contains(QStringLiteral("校验失败")))
+                           && match.isEmpty()) {
+                    match = t.left(24);
+                }
+            }
+            dlg.hide();
+            return {result, match, QString()};
+        };
+
+        bool h0 = false, h1 = false, h2a = false, h2b = false, h3 = false, h3b = false;
+        QString d0, d2a, d2b, d3;
+        {
+            const auto r = runVerify(QStringLiteral("SHA-256"), QString());
+            const QString indep = QString::fromLatin1(
+                QCryptographicHash::hash(fixture, QCryptographicHash::Sha256).toHex());
+            h0 = r[2].isEmpty() && r[0] == QStringLiteral("36bbe50ed96841d10443bcb670d6554f0a34b761be67ec9c4a8ad2c0c44ca42c");
+            h1 = r[2].isEmpty() && !r[0].isEmpty() && r[0] == indep;
+            d0 = QStringLiteral("sha256=「%1」期望=NIST 向量 相等=%2｜独立重算=「%3」一致=%4")
+                     .arg(r[0].left(16)).arg(h0 ? 1 : 0).arg(indep.left(16)).arg(h1 ? 1 : 0);
+        }
+        {
+            const auto rm = runVerify(QStringLiteral("MD5"), QString());
+            const auto rs = runVerify(QStringLiteral("SHA-1"), QString());
+            const bool md5ok = rm[0] == QStringLiteral("ab56b4d92b40713acc5af89985d4b786");
+            const bool sha1ok = rs[0] == QStringLiteral("03de6c570bfe24bfc328ccd7ca46b76eadaf4334");
+            h0 = h0 && md5ok && sha1ok;
+            printf("%s [H0] 三算法已知向量对拍（abcde：SHA-256/MD5/SHA-1 全等 RFC 标准串）\n",
+                   (md5ok && sha1ok && h0) ? "[PASS]" : "[FAIL]");
+            printf("    [H0 读数] %s\n", d0.toUtf8().constData());
+            printf("    [H0 读数] md5=「%s」==RFC2202=%d ｜ sha1=「%s」==RFC3174=%d\n",
+                   rm[0].toUtf8().constData(), md5ok ? 1 : 0,
+                   rs[0].toUtf8().constData(), sha1ok ? 1 : 0);
+            printf("%s [H1] 对话框分块结果 == QCryptographicHash 独立重算（两种调用形状互印）\n",
+                   h1 ? "[PASS]" : "[FAIL]");
+        }
+        {   // H2：匹配与不匹配两分支
+            const auto good = runVerify(QStringLiteral("SHA-256"),
+                                        QStringLiteral("36BBE50ED96841D10443BCB670D6554F0A34B761BE67EC9C4A8AD2C0C44CA42C"));
+            const auto bad = runVerify(QStringLiteral("SHA-256"),
+                                       QStringLiteral("0000000000000000000000000000000000000000000000000000000000000000"));
+            h2a = good[1].contains(QStringLiteral("校验通过"));
+            h2b = bad[1].contains(QStringLiteral("校验失败"));
+            d2a = QStringLiteral("正=「%1」错=「%2」")
+                      .arg(good[1].isEmpty() ? QStringLiteral("-") : good[1],
+                           bad[1].isEmpty() ? QStringLiteral("-") : bad[1]);
+            printf("%s [H2] 预期值匹配⇒「✓ 校验通过」、错一位⇒「✗ 校验失败」（两分支都有牙）\n",
+                   (h2a && h2b) ? "[PASS]" : "[FAIL]");
+            printf("    [H2 读数] %s（大写输入也须匹配=大小写归一在 :158 toLower）\n",
+                   d2a.toUtf8().constData());
+        }
+        {   // H3：入口链——真 DownloadManager + 详情对话框里的按钮存在且可用
+            DownloadManager mgr;
+            TaskDetailDialog td(-999, &mgr, nullptr);
+            td.move(-32000, -32000);
+            td.show();
+            QCoreApplication::processEvents();
+            QList<QPushButton*> btns = td.findChildren<QPushButton*>();
+            QPushButton* vbtn = nullptr;
+            for (QPushButton* b : btns)
+                if (b->text() == QStringLiteral("校验文件完整性...")) { vbtn = b; break; }   // 逐字全等：contains 会被"校验文件完整性(占位)"这类改名蒙过（M-⑨d 实测）
+            h3 = (vbtn != nullptr);
+            h3b = h3 && vbtn->isEnabled();
+            d3 = QStringLiteral("按钮找到=%1 enabled=%2（完成态才允许；-999 不存在任务时的形状如实印）")
+                     .arg(vbtn ? 1 : 0).arg(vbtn && vbtn->isEnabled() ? 1 : 0);
+            printf("%s [H3] 详情对话框里「校验文件完整性...」按钮存在（入口链活着，不是死 UI）\n",
+                   h3 ? "[PASS]" : "[FAIL]");
+            printf("    [H3 读数] %s\n", d3.toUtf8().constData());
+            td.hide();
+        }
+        QDir(dir).removeRecursively();
+        const bool okAll = h0 && h1 && h2a && h2b && h3 && h3b;
+        printf("%s [HASHVERIFY 汇总] h0=%d h1=%d h2a=%d h2b=%d h3=%d h3b=%d\n",
+               okAll ? "[PASS]" : "[FAIL]", h0, h1, h2a, h2b, h3, h3b);
+        return okAll ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──
