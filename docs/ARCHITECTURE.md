@@ -4037,3 +4037,14 @@ C3/C4 是用 `QMetaObject::invokeMethod` 直接驱动 handler 证的，**信号�
 ② 它的注释写着「向 GUI 问这个任务的保存目录（ipc_server 的 info 命令带路径）」但代码根本没问，直接用了注册表默认目录。
 修法候选（属作者权，等点名才做）：GUI 在状态 tick 里对已完成任务回读 `dlmgr_get_task_info().filename` 并 `setFileName`；
 或 IPC `list` 改为从引擎现取文件名。测具侧改法：先向 GUI/host 要最终落点名，再按那个名字取证。
+
+**处置进展（所有者点名后）**：测具那一半已修——`tools/sniff_e2e.py` 的取证点不再写死死名，改为
+①点击前取 GUI 已有任务 ID 集作基线、②本轮新 ID 必须不在基线内（ID 判别式）、③最终文件名向
+IPC `info <id>` 的「文件:」行现取，再只在默认目录按那一个名字比 size/sha256；新增 `gui_ipc_json()`
+是因为 `disk_e2e.gui_ipc` 只会发裸 `{"command":...}`，带编号的命令进不去。**产品那一半没动**（仍等授权）。
+两面变异证明这条新判据不是自我实现：M-⑩E 把 `ipc_server.cpp:335` 的 `.arg(row->fileName)` 换成常量假名 ⇒
+capstone 红且点名该假名（证明测具真在吃 GUI 给的名字）；M-⑩F 临时伪造"所有 ID 点击前就存在" ⇒
+capstone 红并报"不是本轮的"（证明它不会拿"名字碰巧对上"蒙混）。M-⑩F 用的 env 开关是一次性脚手架，
+已从源码删除（不留永久后门）。原文三面归档 `docs/clipboard-a3/sniff-{capstone-green,capstone-red,mut-gui-bogus-name,mut-forged-baseline}-*.txt`。
+夹具残留 `~/Downloads/dom*.mp4` 共 7 份经逐份 sha256 核对为本轮产物后按指示清除（清点档
+`sniff-dom-artifacts-before-delete.md`），用户其他文件未触碰。

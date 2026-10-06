@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -59,6 +60,45 @@ def http_json(path, timeout=5):
             return json.loads(r.read().decode("utf-8"))
     except Exception:
         return None
+
+
+def gui_ipc_json(obj):
+    """带 args 的 GUI IPC（disk_e2e.gui_ipc 只会发裸 {"command": ...}，info/cancel 这类要编号的进不去）。
+    管道名、读写与解析完全沿用产品那条通道，只是把请求体换成调用方给的 dict。"""
+    import ctypes
+    import ctypes.wintypes as wt
+    k32 = ctypes.windll.kernel32
+    k32.CreateFileW.restype = wt.HANDLE
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, wt.LPVOID,
+                                wt.DWORD, wt.DWORD, wt.HANDLE]
+    name = chr(92) * 2 + "." + chr(92) + "pipe" + chr(92) + "idm-next-ipc"
+    h = k32.CreateFileW(name, 0xC0000000, 0, None, 3, 0, None)
+    if not h or h == wt.HANDLE(-1).value:
+        return None, f"连不上 err={k32.GetLastError()}"
+    try:
+        payload = json.dumps(obj).encode("utf-8")
+        written = wt.DWORD(0)
+        if not k32.WriteFile(h, payload, len(payload), ctypes.byref(written), None):
+            return None, f"写失败 err={k32.GetLastError()}"
+        k32.FlushFileBuffers(h)
+        buf = ctypes.create_string_buffer(1 << 16)
+        got = wt.DWORD(0)
+        chunks = bytearray()
+        while True:
+            ok = k32.ReadFile(h, buf, 1 << 16, ctypes.byref(got), None)
+            if not ok or not got.value:
+                break
+            chunks += buf.raw[:got.value]
+            if len(chunks) > (1 << 20):
+                break
+        k32.DisconnectNamedPipe(h)
+    finally:
+        k32.CloseHandle(h)
+    raw = bytes(chunks)
+    try:
+        return json.loads(raw.decode("utf-8")), None
+    except Exception as e:
+        return None, f"解析失败({e}) 原始前 120={raw[:120]!r}"
 
 
 class Target:
@@ -341,13 +381,20 @@ def main():
             say("[VERDICT] 没能定位到真实控件 ⇒ 不许退回手调 API，本轮判失败"); rc = rc or 9
         else:
             ipc_before = len([x for x in read_gbk(guilog).splitlines() if "IPC 请求: add" in x])
-            # ⚠ "本轮新落的"这个判据要在**点击之前**取基线：晚一步取就可能把本轮自己写的
-            #   文件当成"点击前就在"，于是 fresh 永远 False（上一轮的 capstone 就是这么假红的）。
+            # ⚠ 取证点**不许写死死名**：同名策略会把成品落成 `dom (1).mp4`（download_core.c:1334
+            #   pick_free_filename），拿 Downloads/dom.mp4 当唯一证人 ⇒ 只要那个名字已被占过，
+            #   capstone 就恒红（本轮实测三次连撞，见 docs/clipboard-a3/sniff-capstone-red-1006-0806.txt）。
+            #   正确来源＝GUI 自己的任务行：先取本轮任务 ID，再向 info 命令问最终落点名。
+            #   基线仍在点击之前取（晚取会把本轮自己写的文件当成"点击前就在"⇒ fresh 恒 False）。
             dl_default = pathlib.Path(os.path.expanduser("~")) / "Downloads"
-            f_expected = dl_default / "dom.mp4"
-            pre_exists = f_expected.exists()
-            pre_mtime = f_expected.stat().st_mtime_ns if pre_exists else None
-            say(f"[capstone 基线] 点击前 {f_expected} 存在={pre_exists} mtime_ns={pre_mtime}")
+            rows_base, _ = task_rows_guard()
+            base_ids = []
+            for x in rows_base:
+                m = re.match(r"^#(\d+)\t", x)
+                if m:
+                    base_ids.append(int(m.group(1)))
+            baseline_desc = f"点击前 GUI 已有任务 ID={base_ids or '无'}"
+            say(f"[capstone 基线] {baseline_desc}｜默认目录={dl_default}")
             clk = pop_b.ev("(function(){var b=document.getElementById('downloadSelBtn');"
                            "if(b.disabled)return JSON.stringify({ok:false,why:'按钮是灰的'});"
                            "b.click();return JSON.stringify({ok:true});})()")
@@ -390,32 +437,59 @@ def main():
                         break
                     time.sleep(1)
                 say(f"[capstone] 任务进入『已完成』={bool(done)} 行={done[:1]}")
-                # ⚠ 这里**不能**假设文件落在哪个目录：popup 的批量发送不带 saveDir
-                #   （background.js sendToIdmNext 的 saveDir 传空 ⇒ 桌面端用自己的默认目录）。
-                #   所以证人来源是 GUI 自己的任务行 + 只在**本轮工作目录内**找同名文件；
-                #   若默认目录不在 work 之下，这一项就该判"未闭合"而不是去全盘搜。
-                # ⚠ GUI 的默认下载目录来自用户 profile / 注册表，**不随 APPDATA 隔离**
-                #   （实测落到 %USERPROFILE%\Downloads）。所以"只在 work 里找"会永远找不到，
-                #   那是测具假设错了，不是产品没落盘。正确做法：向**GUI 自己**问这个任务的保存目录
-                #   （ipc_server 的 info 命令带路径），只在那一个目录里取证。
+                # ⚠ 这里**不能**假设文件叫什么、落在哪个目录：
+                #   · 名字——同名策略会把成品落成 `dom (1).mp4`（download_core.c:1334 pick_free_filename）；
+                #   · 目录——popup 批量发送不带 saveDir（background.js sendToIdmNext 传空 ⇒ 桌面端用默认目录），
+                #     而 GUI 默认下载目录来自用户 profile / 注册表，**不随 APPDATA 隔离**（实测落到
+                #     %USERPROFILE%\Downloads ⇒ settings.cpp:16）。所以"只在 work 里找"会永远找不到，
+                #     那是测具假设错了，不是产品没落盘。
+                # 正解＝向 GUI 自己问：任务 ID 从"点击前不存在的那一行"现取，最终文件名从 info 命令现取，
+                # 然后只在那一个目录里按那一个名字取证。
                 default_dl = dl_default
                 candidates = []
                 fresh_reason = ""
+                task_id = None
+                gui_name = ""
                 for _ in range(90):
                     rows4, _ = task_rows_guard()
                     done_now = [x for x in rows4 if "dom.mp4" in x.lower() and "已完成" in x]
-                    if done_now and f_expected.exists():
-                        st = f_expected.stat()
-                        fresh = (not pre_exists) or (st.st_mtime_ns != pre_mtime)
-                        if fresh:
-                            candidates = [f_expected]
-                            fresh_reason = ("本轮新建" if not pre_exists else "mtime 已变")
-                            break
-                    time.sleep(1)
-                tmps = list(default_dl.glob("dom.mp4.idmtmp"))
+                    if not done_now:
+                        time.sleep(1)
+                        continue
+                    m = re.match(r"^#(\d+)\t", done_now[0])
+                    if not m:
+                        break
+                    cand_id = int(m.group(1))
+                    # 判别式证人：本轮新建的任务 ID 必须不在点击前的 ID 集里。
+                    # （上一版拿"同一个死名的 mtime 变没变"当证人，名字被改走时那条永远不成立。）
+                    if cand_id in base_ids:
+                        fresh_reason = f"任务 #{cand_id} 在点击前就存在（基线 {base_ids}）⇒ 不是本轮的"
+                        break
+                    task_id = cand_id
+                    # gui_ipc(command) 只发 {"command": ...}；info 的编号走 args 字段
+                    # （ipc_server.cpp:204 读 msg["args"]、:323 toInt）⇒ 这里直接带一个 JSON 对象。
+                    obj_i, err_i = gui_ipc_json({"command": "info", "args": str(task_id)})
+                    if not (obj_i or {}).get("success"):
+                        fresh_reason = f"info #{task_id} 失败（回执={str(obj_i)[:80]} err={err_i}）"
+                        break
+                    for line in str(obj_i.get("message", "")).splitlines():
+                        if line.startswith("文件:"):
+                            gui_name = line.split(":", 1)[1].strip()
+                    if not gui_name:
+                        fresh_reason = f"info #{task_id} 没给出文件名（回执={str(obj_i)[:80]}）"
+                        break
+                    f_final = default_dl / gui_name
+                    if f_final.exists():
+                        candidates = [f_final]
+                        fresh_reason = f"GUI 报的最终名「{gui_name}」（本轮新任务 #{task_id}）"
+                    else:
+                        fresh_reason = f"GUI 报的最终名「{gui_name}」但盘上没有该文件"
+                    break
+                tmps = list(default_dl.glob("dom*.idmtmp"))
                 say(f"[capstone] 取证据目录={default_dl}（GUI 默认下载目录：QStandardPaths::DownloadLocation "
                     f"走注册表，不随 APPDATA 隔离 ⇒ settings.cpp:16）")
-                say(f"[capstone] 本轮落盘的 dom.mp4={len(candidates)} 个（{fresh_reason or '未认定为本轮'}）；"
+                say(f"[capstone] 任务 ID={task_id}｜GUI 报的名=「{gui_name}」")
+                say(f"[capstone] 本轮认定的成品={len(candidates)} 个（{fresh_reason or '未认定为本轮'}）；"
                     f".idmtmp 残留={len(tmps)}")
                 caps = [bool(done), bool(candidates), not tmps]
                 if candidates:
