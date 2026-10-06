@@ -1,0 +1,51 @@
+# ACTIVATE C→B 分布档（§7-57）
+
+仓根 = D:/visual studio/lianxi/MFC/idm-next
+HEAD = a975980（ahead 127，未 push）
+ui_snapshot.exe sha12 = 1347a6af1470   （sha256sum build/ui_snapshot.exe | cut -c1-12）
+idm-next.exe      sha12 = 680ba5e7803e
+判据形状：N 轮里超 T=50ms 的轮数 ≤ K=1；窗口退出只看墙钟（默认 3000ms，IDM_DIST_WINDOW_MS 可调）
+
+## 干净面（无注入，6 轮池化，逐轮样本见 IDM_DIST_FILE）
+run1 非零=0
+run2 非零=2 vals=1,314
+run3 非零=0
+run4 非零=2 vals=1,368
+run5 非零=0
+run6 非零=0
+=> 非零轮绝大多数是 1ms 量级（Windows 消息到达）；每窗口 ≤2 发 ~300ms 的归属仍未定（见 [census]）
+worst(本轮池) = 368ms   p95(单窗口内) = 314~372ms   mean = 0~186.5ms
+超预算轮数 = 0~1 ⇒ PASS
+
+## 变异面（产品路径注入：MainWindow::onTaskProgress 睡 N ms，走真模型行）
+IDM_ATTR_SLEEP=30  非零=48 p50=34 p95=44 max=45   超预算=0  ⇒ PASS（低于 T 不该响）
+IDM_ATTR_SLEEP=60  非零=24~26 p50=66~68 p95=74~75 max=75  超预算=22~26 ⇒ FAIL
+IDM_ATTR_SLEEP=100 非零=12 p50=110 p95=114 max=114         ⇒ FAIL
+
+## 摘掉 ① 修复（IDM_ACTIVATE_MUTATE=1，测具侧反复占住整轮）
+knock1 超预算=15 max=533ms ⇒ FAIL
+knock2 超预算=18 max=163ms ⇒ FAIL
+canary 同批打开时两面都印「canary=已计入」⇒ 门的牙有证人，不是白名单
+
+## T=50ms 的夹逼推导
+干净面常态 1ms；30ms 注入 p95≈45 不响；60ms 注入 p95≈75 响 ⇒ 边界落在 (45,75)，取整 50。
+旧门 500ms 作废：它照着"IPC 阻塞常数 216ms"拍的，① 落地后那个常数已不存在。
+
+## 本轮被驳回的四条测具假设（每条都改了代码）
+1. QThread::create()->start() 同步开销占一整轮：判别式 A 面 worst=32ms / B 面 worst=0ms
+2. "采满 N 轮就走"使窗口短于产品最短节拍：实测墙钟 413ms、跑过 20 万轮、非零 0
+3. 收摊循环再泵事件把几百毫秒记在账本之外：E 段一度量到无归属的 383~415ms 红
+4. bisect 要求塌到 1/3 在多路并存时永远印"不是它"：改配对比较＋第三面排漂移
+
+## 门禁复跑（提交后，同一枚二进制 1347a6af1470）
+build_gate rc=0 ｜ freshness_gate rc=0（不合格=0）｜ host_manifest rc=0
+live_roster rc=0 ｜ probe_roster rc=0（模式 21 / CI 19 / 文档 21）｜ a_gate rc=0（有效轮 6，缺失 0）
+sniff_rules_test rc=0（PASS=12 FAIL=0）
+套件 19 模式 PASS=79 FAIL=0，日志目录：
+%TEMP%/idm-next-probes/2026-10-05/suite-postcommit-20261006T040903Z（见本文件末行说明）
+引擎自测：本轮只跑 179/1（唯一 FAIL＝既有项 [35] 探针起点=0），基线 180/0 未复算 ⇒ 不得引用为本轮通过
+
+## 仍然没验证的东西
+- 干净面那 1~2 发 ~300ms 的归属（逐个摘活动定时器都不减半 ⇒ 多路并存或根本不是定时器）
+- [census] 会明说"这一轮的 0 无人证得过"，不许读成"产品空闲"
+- CI 从未在 runner 执行；像素证人、K2、采集卡真浏览器 E2E 仍在延后队列
