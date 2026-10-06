@@ -21,6 +21,7 @@
 #include "web_server_controller.h"
 #include "appearance_controller.h"
 #include <QJsonArray>
+#include <QThread>
 #include <QJsonObject>
 #include "hls_downloader.h"
 #include "torrent_downloader.h"
@@ -382,6 +383,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_statusTimer->setInterval(250);
     connect(m_statusTimer, &QTimer::timeout, this, &MainWindow::updateStatusBar);
     m_statusTimer->start();
+
+    /* 测具种子必须在**构造期**就立起来，不能等那条 250ms 节拍。
+     * ⚠ 实测形状（ACTIVATE D 段）：探针采满 N 轮就退出，而 `processEvents(..., QDeadlineTimer(20))`
+     *   是预算制 ⇒ 窗口里那几十轮可以全是"没有到期定时器"的空轮；把注入器写在
+     *   updateStatusBar() 里就等于**永远不执行**（表现为"注入 99ms 却量到 0ms＝变异不可达"）。
+     * 这里调一次产品自己的 syncStatus()（它内部就是 recompute + updateStatusBar），
+     * 不设 IDM_ATTR_SLEEP 时零副作用。 */
+    if (qEnvironmentVariableIntValue("IDM_ATTR_SLEEP") > 0)
+        syncStatus();
 
     Log::info(QStringLiteral("主窗口初始化完成"));
     setWindowTitle(QStringLiteral("IDM Next - 全协议下载平台"));
@@ -1295,6 +1305,16 @@ void MainWindow::onAbout()
 
 void MainWindow::onTaskProgress(int taskId, qint64 downloaded, qint64 total, int speedBps)
 {
+    /* 测具专用归因钩子（IDM_ATTR_SLEEP=N ⇒ 每次进度回调在 GUI 线程上睡 N ms，不设＝零副作用）。
+     * 为什么挂在这里而不是 refreshFromEngine：全仓实测 refreshFromEngine 不在任何定时器上
+     * （只有 loadState/onStartAll/onPauseAll 三个调用点）⇒ 挂上去的变异**不可达**。
+     * onTaskProgress 是引擎 flushProgress(10Hz) 经 queued 信号进 GUI 线程的热路径。
+     * ⚠ 变异必须**走真路径**：探针环境里引擎没有活动任务 ⇒ 光戳它会在 updateProgress 的
+     *   `m_rowOf.find` 早退（第一版就是这样，注入 100ms 后 D 段 max 恒 0＝测了个寂寞）。
+     *   假任务由 updateStatusBar 里的种子建（那里保证每 250ms 必进一次），真进模型后再自驱。 */
+    static const int attrSleepMs = qEnvironmentVariableIntValue("IDM_ATTR_SLEEP");
+    if (attrSleepMs > 0 && taskId == m_attrTaskId)
+        QThread::msleep(attrSleepMs);             // 睡在真路径内（dataChanged/重绘之前）
     // 增量维护总速度缓存：仅用旧值与新值之差修正，避免 4Hz/逐信号全量 O(n) 遍历
     qint64 oldS = m_speeds.value(taskId, 0);
     qint64 ns   = (speedBps > 0) ? static_cast<qint64>(speedBps) : 0;
@@ -1570,6 +1590,31 @@ void MainWindow::syncStatus()
 
 void MainWindow::updateStatusBar()
 {
+    /* 测具种子（IDM_ATTR_SLEEP=N）：变异要可达，必须先有人把 onTaskProgress 戳起来。
+     * ⚠ 位置承重：**必须在函数最前面**。m_statusTimer 是产品自己的 250ms 节拍，
+     *   而 ACTIVATE 的 D 段实测表明——探针环境里这条槽在被采样区间内可能一次都没进过
+     *   （采满 N 轮就走）。种子若写在后面，那几行就永远不执行 ⇒ 变异不可达＝打不着靶的门。
+     *   写在最前面保证"只要这条槽跑过一次，注入器就立起来了"。 */
+    if (qEnvironmentVariableIntValue("IDM_ATTR_SLEEP") > 0 && !m_attrTicker) {
+        m_attrTicker = new QTimer(this);          // 先立旗，防下面 addTask 的同步路径递归回来
+        TaskRow tr;
+        tr.id = m_attrTaskId;
+        tr.fileName = QStringLiteral("__attr__");
+        tr.fileSize = 200000;
+        tr.downloaded = 4096;
+        tr.speedBps = 50000;
+        tr.state = 1;                             // 下载中 ⇒ 每 tick 都过 dataChanged/重绘
+        tr.statusText = QStringLiteral("下载中");
+        tr.url = QStringLiteral("attr://tick");
+        tr.lastConnection = QDateTime::currentDateTime();
+        m_taskModel->addTask(tr);                 // 真进模型 ⇒ updateProgress 不再早退
+        m_states[tr.id] = tr.state;
+        ++m_activeCount;
+        connect(m_attrTicker, &QTimer::timeout, this,
+                [this] { onTaskProgress(m_attrTaskId, 4096, 200000, 50000); });
+        m_attrTicker->start(qMax(5, qEnvironmentVariableIntValue("IDM_ATTR_TICK_MS")));
+    }
+
     // O(1)：直接读取缓存聚合值（m_totalSpeed / m_activeCount），不再遍历两张 Map
     qint64 totalSpeed = m_totalSpeed;
     int active = m_activeCount, total = m_taskModel->rowCount();

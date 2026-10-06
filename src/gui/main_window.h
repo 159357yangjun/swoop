@@ -228,6 +228,8 @@ private:
     QStandardItemModel*  m_categoryModel = nullptr;  // 左侧树模型（含分类+队列）
     QStandardItem*       m_queueParentItem = nullptr; // “下载队列”父节点
     QTimer*              m_statusTimer = nullptr;      // 状态栏低频刷新节拍（4Hz）
+    QTimer*              m_attrTicker = nullptr;       // 仅 IDM_ATTR_SLEEP 测具建的驱动定时器
+    static constexpr int m_attrTaskId = -777001;       // 测具假任务的固定 id（负数=不与引擎/媒体号段撞）
 
     qint64               m_speedEma = 0;               // 状态栏总速度 EMA 平滑值
     int                  m_sidebarTick = 0;            // 侧栏降频计数：每 4 次状态栏刷新（≈1s）重算一次分类计数

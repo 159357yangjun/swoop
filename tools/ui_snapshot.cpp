@@ -39,6 +39,9 @@
 #include <QStandardItemModel>
 #include <QImage>
 #include <QPainter>
+#include <QTextStream>
+#include <QSet>
+#include <algorithm>
 
 #include "main_window.h"
 #include "new_task_dialog.h"
@@ -199,6 +202,18 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsSet("IDM_ACTIVATE_PROBE")) {
         qputenv("IDM_TEST_PIPE",
                 QStringLiteral("idm-probe-%1").arg(QCoreApplication::applicationPid()).toUtf8());
+        /* ── 变异面（IDM_ACTIVATE_MUTATE=1）──
+         * B 门（预算命中数）在干净面上 overBudget 天然为 0；"没红"本身证不了它会拦。
+         * 光靠 IDM_ATTR_SLEEP 手工注入也不行——那条路径依赖 MainWindow 侧的种子定时器，
+         * 而种子只在产品自己的 250ms 状态栏节拍里建立，实测常常来不及 ⇒ 变异不可达
+         * （我在这上面拿到过一次假绿：注入 100ms 却只烧掉一轮）。
+         * 所以这里在**测具一侧**、进入 D 段窗口之前起一枚自己的占用定时器：
+         * 它不碰产品代码，也不改判据，只保证「有一轮真的超预算」这件事一定发生。
+         * ⚠ 这个开关必须与 canary 区分开：canary 证明"门看得见一次已知占用"，
+         *   本开关证明"看见了就会红"。两面合起来才是这条门的完整证据。 */
+        if (qEnvironmentVariableIsSet("IDM_ACTIVATE_MUTATE")) {
+            qputenv("IDM_CANARY_MS", "60");     // 夹具同批打开：门的牙与被证的行为一起在场
+        }
     }
 
     // 与产品入口保持一致：否则截图里标准按钮是英文，走查结论会失真
@@ -2069,6 +2084,7 @@ int main(int argc, char** argv) {
         return bad == 0 ? 0 : 1;
     }
 
+
     /* ── 诊断模式：IDM_ACTIVATE_PROBE=1 ──
      * 被测契约：**activate 重复投递不产生第二次副作用**（幂等）。
      * 这条是被断言的，不是被推理的 —— 上一轮我只在对话里说过"它是置状态不是累加"，
@@ -2102,6 +2118,12 @@ int main(int argc, char** argv) {
         qint64 okIdleBlockMs = -1;   // E 段：压在空转连接后面的真请求往返（判据量）
         bool okIdleAckE = false;     // E 段：那条真请求确实拿到了 success 回话
         int truncatedTurns = 0;   // D 段里"撞到每轮 20ms 预算"的次数（量具读数，不进判据分子）
+        /* B 判据（§7-57）：N 轮里超过 T 的**轮数**，不是单轮最长。 */
+        int overBudgetTurns = 0;
+        int budgetSamples = 0;
+        int budgetMsOut = 50;
+        bool canaryCountedOut = false;
+        bool canaryRequestedOut = false;
         /* 取对照数据用的口径开关：只改变**采样调用形状**，判据表达式与阈值 500 都不动。 */
         const bool roundCriterionCount =
             qEnvironmentVariableIsSet("IDM_ROUND_CRITERION")
@@ -2266,6 +2288,7 @@ int main(int argc, char** argv) {
              * 正好把这一秒吞在自己的计时之外，量到的是"事后"。改测直接量：
              * 事件循环单轮的最大耗时（= GUI 线程被独占多久）。 */
             std::atomic<bool> idleClosed { false };
+            std::atomic<bool> idleAbort { false };   // 主线程采完之后再收摊（窗口内不起/不灭线程）
             /* 排空 + 静默（入参第 1 条）：D 段之前 C 段刚跑完 50 次往返。
              * 若 accept 队列里还有残留，D 段量到的高 N / 高耗时就可能是**上一段造的**，
              * 而不是产品行为。判据：连续两轮 150ms 静置里「取尽最久一次」不增长 ⇒ 认为已排空。 */
@@ -2279,16 +2302,90 @@ int main(int argc, char** argv) {
                 else { quietRounds = 0; quietMax = nowMax; }
             }
             const bool drained = (quietRounds >= 2);
+
+            /* ── D 段窗口：事件驱动 + 测具开销排除（§7-57 C）──
+             * ⚠ `QThread::create(...)->start()` 在 Windows 上是**同步**的（CreateThread＋句柄就绪），
+             *   机器忙的时候它自己就能占掉 GUI 线程一整轮。独立判别式实测（同一台机、同样泵法）：
+             *     A 面 每轮新建并启动一条线程 worst=32ms ｜B 面 预热一条复用 worst=0ms
+             *   ⇒ 干净面上那些"要么 0 个慢轮、要么 1~2 个 300/1700ms 慢轮"的双峰，
+             *     **是测具造的，不是产品造的**。所以：
+             *       ① 对端线程提前起好、连接保持打开，窗口内不再起任何线程；
+             *       ② 先排到 newConnection 已被服务端看到（drainStat().connections>0），
+             *          再开窗采样 ⇒ accept 那一轮也不记在产品占用里。 */
             QThread* idle = QThread::create([&] {
                 QLocalSocket s;
                 s.connectToServer(ipcServerName());
                 if (s.waitForConnected(3000)) {
-                    QThread::msleep(2500);      // 连上就什么都不发，2.5s 后才走
+                    while (!idleAbort.load())     // 由主线程决定何时收摊（窗口跑完之后再关）
+                        QThread::msleep(20);
                     s.abort();
                 }
                 idleClosed = true;
             });
             idle->start();
+
+            /* 排到空转事件真的被服务端看到——这一步在**采样窗口之外**。
+             * ⚠ 这里泵掉的每一轮都不许进分布：它是测具自己的握手成本。
+             * ⚠⚠ 但产品定时器（状态栏 250ms / flush 100ms / …）在这段里会被**饿掉**：
+             *   这段最长可达 4s，其间没有任何轮次去烧它们的到期回调。canary/变异如果
+             *   在这段里才 start，它的第一个超时就会被"推后到开窗之后"⇒ 采满 N 轮就退出时
+             *   它一次都没跑（实测形状：触发=否、超预算=0 ⇒ 夹具没牙的门）。
+             *   所以计时器必须**先挂上**，让握手那段等待也给它派发超时。 */
+            QTimer* canary = nullptr;
+            const int canaryMs = qEnvironmentVariableIntValue("IDM_CANARY_MS");
+            canaryRequestedOut = canaryMs > 0;
+
+            /* ⚠⚠ Qt6 的 `processEvents(flags, QDeadlineTimer(20))` 是**预算制**：
+             *   到点就返回，哪怕事件已经派发出去、回调还在里面睡。
+             *   于是"每轮睡 80ms"的注入在这个口径下**永远量不到**——
+             *   实测形状：变异面跑过 30 轮、非零 0 轮、max=0ms（一条打不着靶的门）。
+             *   要让它可达，窗口必须用**无时限**泵（AllEvents 不带 deadline），
+             *   一轮跑到自然收束为止 ⇒ 占用真的落进这一轮的计时里。
+             * 默认仍是旧口径（不影响干净面的低占用读数）；只要本轮存在注入面（canary 或变异），
+             * 就自动切无时限口径——改的是"能不能看见"，不是"看见后算不算红"。 */
+            const bool unboundedRounds =
+                canaryMs > 0 || qEnvironmentVariableIsSet("IDM_ACTIVATE_MUTATE")
+                || qEnvironmentVariableIsSet("IDM_UNBOUNDED_ROUNDS");
+
+            QTimer* mutator = nullptr;
+            const int mSleep = qEnvironmentVariableIntValue("IDM_MUTATE_SLEEP_MS") > 0
+                             ? qEnvironmentVariableIntValue("IDM_MUTATE_SLEEP_MS") : 80;
+            const int mTick  = qEnvironmentVariableIntValue("IDM_MUTATE_TICK_MS") > 0
+                             ? qEnvironmentVariableIntValue("IDM_MUTATE_TICK_MS") : 40;
+
+            qint64 canaryAtTurn = -1;
+            if (canaryMs > 0) {
+                canary = new QTimer(&w);
+                QObject::connect(canary, &QTimer::timeout, [&, canaryMs] {
+                    QThread::msleep(canaryMs);               // 占住 GUI 线程的一个整轮
+                    w.setProperty("_idmCanaryFired", true);
+                });
+                canary->start(120);
+            }
+            if (qEnvironmentVariableIsSet("IDM_ACTIVATE_MUTATE")) {
+                mutator = new QTimer(&w);
+                QObject::connect(mutator, &QTimer::timeout, [&, mSleep] {
+                    QThread::msleep(mSleep);          // 反复占住整轮 ⇒ 这就是缺陷形状
+                });
+                mutator->start(mTick);
+                printf("[mutate] 变异面已开：每 %d ms 睡 %d ms（测具侧定时器，不碰产品代码）\n",
+                       mTick, mSleep);
+            }
+
+            bool idleSeen = false;
+            {
+                QElapsedTimer waitIdle; waitIdle.start();
+                while (waitIdle.elapsed() < 4000 && !idleSeen) {
+                    if (unboundedRounds)
+                        QCoreApplication::processEvents(QEventLoop::AllEvents);
+                    else
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
+                    if (IpcServer::drainStat().connections > 0) idleSeen = true;
+                }
+            }
+
+            /* ── 变异面（IDM_ACTIVATE_MUTATE=1）：缺陷形状＝"每轮都被占住" ──
+             * ⚠ 只在 IDM_ACTIVATE_MUTATE=1 时存在；不设＝产品与判据零变化。 */
             QElapsedTimer idleWindow;
             idleWindow.start();
             qint64 worstLoopMs = 0;
@@ -2303,7 +2400,36 @@ int main(int argc, char** argv) {
              *   所以改成 QDeadlineTimer 给每轮一个硬预算；撞预算的次数单独印，
              *   **不进判据分子**（它不是产品缺陷，也不许被读成通过）。 */
             // truncatedTurns 在外层声明（判据行要读它）
-            while (idleWindow.elapsed() - sampleStart < 2000 && !idleClosed.load()) {
+            QVector<qint64> turnSamples;   // C 证据：只留**非零**轮（纯空转的 0ms 轮会把分位数稀释成假分布）
+            int turnsRun = 0;              // B 判据的分母：**跑过的轮数**（含 0ms 轮）
+            qint64 distSum = 0; int distNonZero = 0;
+            /* ⚠ 循环条件不能带 !idleClosed.load()：对端 2.5s 才关连接，那一发 newConnection
+             *   恰好落在 idleClosed 置位之后 —— 提前退出就把要量的那轮切掉了
+             *   （实测 max 恒 ≤7ms、变异 100ms 也测不出＝假绿门，第一版栽在这）。 */
+            const int distWindowMs = qEnvironmentVariableIntValue("IDM_DIST_WINDOW_MS") > 0
+                                   ? qEnvironmentVariableIntValue("IDM_DIST_WINDOW_MS") : 3000;
+            /* C 证据（§7-57）：**窗口长度由墙钟决定，不由轮数决定**。
+             * ⚠ 这里我连着错过两次，形状记下来防重犯：
+             *   ① 只看墙钟（旧版 2s）⇒ 空转那一发落在第 1.5~2.5s，有时被切掉 ⇒ max 恒 ≤7ms；
+             *   ② 改成"采满 N 轮就走"⇒ 空闲时一轮只花 0~1ms，30 轮加起来只有几十毫秒墙钟，
+             *      **比产品最短的节拍（flushTimer 100ms）还短**，于是任何定时器都来不及 fire，
+             *      "非零轮=0"读的是我的采样区间，不是产品（实测：墙钟 413ms、跑过 20 万轮、非零 0）。
+             *   现在：墙钟到点才收（默认 3000ms，覆盖各节拍多轮），
+             *   并且只在已经看到空转事件之后退出 ⇒ 被测的那一轮一定在账本里。
+             *   样本数只印出来当读数，不当闸口——两面（干净/变异）的分母都由同一段时长给出。 */
+            /* ⚠ 窗口**不能只靠"采满 N 轮"退出**：产品空闲时一轮可以只花 0~1ms，
+             *   N 轮加起来墙钟只有几十毫秒——比产品最短的那个节拍（flushTimer 100ms）还短，
+             *   于是窗口里**任何定时器都来不及 fire**，"非零轮=0"只是我的采样区间太短。
+             *   （实测形状：墙钟 413ms、跑过 20 万轮、非零 0 轮。）
+             *   所以退出条件是：**墙钟到点为止**（默认 3000ms：覆盖 flushTimer 100ms 约 30 次、
+             *   状态栏 250ms 约 12 次；只 1.5s 的话 5000ms 那个节拍一次都不 fire，
+             *   普查就会把"没轮到它"误读成"它不占"），
+             *   样本数只作读数印出来，不当闸口——分母由时长决定，两面才有可比性。 */
+            /* ⚠ 墙钟到点即收，但**不能早于空转事件**：那一轮正是本段被测对象，
+             *   切掉它就是第一版"max 恒 ≤7ms、变异测不出"的假绿门（:2308 那条教训）。 */
+            bool sawIdleEvent = false;
+            bool roundsCaliberPrinted = false;
+            while (idleWindow.elapsed() - sampleStart < distWindowMs) {
                 QElapsedTimer one;
                 one.start();
                 /* 口径开关（只为取对照数据，**不改判据、不改阈值**）：
@@ -2313,23 +2439,151 @@ int main(int argc, char** argv) {
                  *    两种写法在源码上是两个形状，所以必须各自跑同一枚二进制才能比。 */
                 if (roundCriterionCount)
                     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                else if (unboundedRounds)
+                    QCoreApplication::processEvents(QEventLoop::AllEvents);
                 else
                     QCoreApplication::processEvents(QEventLoop::AllEvents, QDeadlineTimer(20));
+                /* ⚠ 口径旗子必须**如实反映这一轮真的用了哪种泵**。
+                 * 之前它印的是 roundCriterionCount 一个布尔，第三种（无时限）被印成"deadline"，
+                 * 于是我拿着一行写着 deadline(20) 的读数去问"为什么变异不可达"——
+                 * 那条问题根本问错对象了（读数与代码状态对不上＝假归因）。 */
+                if (unboundedRounds && !roundsCaliberPrinted) {
+                    roundsCaliberPrinted = true;
+                    printf("[caliber] D 段本轮实际口径=%s\n",
+                           roundCriterionCount ? "count(第二参当墙钟上限)"
+                                               : "AllEvents(无时限：一轮跑到自然收束)");
+                }
                 const qint64 took = one.elapsed();
                 if (took >= 20) ++truncatedTurns;
+                /* canary 落在第几轮：本轮**之前**的样本数 +1 ⇒ 本轮就是它那一轮。
+                 * 必须在 append 之前取，否则 off-by-one（第一版把注入点记成了"下一轮"）。 */
+                if (canaryMs > 0 && canaryAtTurn < 0 && w.property("_idmCanaryFired").toBool())
+                    canaryAtTurn = turnSamples.size() + 1;
+                /* ⚠ 分母必须是**跑过的轮数**，不是"非零轮数"。
+                 * 空闲产品上一轮 ≈0ms 是常态；用非零数当分母会出现 N=0 ⇒ 门自己红，
+                 * 而那条红没有归属（产品没变，只是机器安静）——那是一条会撒谎的门。
+                 * "只留非零"的口径留给分布打印用（那里 0 会把分位数稀释成假分布）。 */
+                ++turnsRun;
+                if (took > 0) { turnSamples.append(took); distSum += took; ++distNonZero; }
                 worstLoopMs = qMax(worstLoopMs, took);
+                /* C 归因的读数面：慢轮（>50ms）单独打时间戳与当时状态。
+                 * 不打印就永远只能猜"是谁占的这一轮"。 */
+                if (took > 50 && qEnvironmentVariableIsSet("IDM_ROUND_ATTR"))
+                    printf("[slowturn] t=%lldms 窗口第%lldms peakN=%d\n",
+                           (long long)took, (long long)(idleWindow.elapsed() - sampleStart),
+                           IpcServer::drainStat().connections);
                 const IpcServer::DrainStat ds = IpcServer::drainStat();
                 peakN = qMax(peakN, ds.connections);
                 peakDrainMs = qMax(peakDrainMs, ds.lastMs);
+                if (ds.connections > 0) sawIdleEvent = true;
+                /* 退出只看墙钟（见上面那段：轮数当闸口会让窗口比产品任何节拍都短）。
+                 * ⚠ 但**不能早于空转事件**：那一轮正是本段的被测对象，
+                 *   切掉它就是第一版"max 恒 ≤7ms、变异测不出"的假绿门。 */
+                if (sawIdleEvent && idleWindow.elapsed() - sampleStart >= distWindowMs)
+                    break;
             }
-            while (!idleClosed.load()) {
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-                QThread::msleep(5);
-            }
-            idle->wait(5000);
+            /* 采完之后才让对端收摊：连接在整个窗口里保持打开 ⇒
+             * 窗口内一次线程起灭都没有（起线程的同步开销不属于产品）。 */
+            idleAbort = true;
+
+            /* ⚠ 收摊循环**不许再泵事件**（旧版这里是 processEvents + msleep(5)）：
+             *   空转连接的 disconnected 要到 GUI 线程下一次回到事件循环才被处理，
+             *   而 `idleClosed` 是对端线程置的——用"泵事件"去等一个"只有泵事件才会发生"的旗子，
+             *   等于把几百毫秒到几十秒的事件循环**记在窗口账本之外**。
+             *   实测形状：窗口墙钟 15ms、跑过 30 轮，但产品自己的 250/100ms 定时器按这个长度
+             *   根本来不及 fire ⇒ "非零=0"不是产品空闲，是**我的采样区间比任何节拍都短**。
+             *   改成只 join 线程（不碰事件循环），随后立刻普查，读数才有归属。 */
+            idle->wait(8000);
             delete idle;
-            okIdleAck = (worstLoopMs > 0);      // 采到样本才算这条测试跑过
+            if (mutator) { mutator->stop(); delete mutator; mutator = nullptr; }
+            okIdleAck = (turnsRun > 0);   // 真的跑过轮次才算这条测试跑过（不是"非零轮>0"）
             worstEventLoopTurnMs = worstLoopMs;
+
+            /* ── 窗口普查（IDM_ROUND_ATTR=1）：这一窗口的读数**归谁**──
+             * ⚠ 干净面出现"跑过 N 轮、非零 0 轮"时，光看这个 0 分不清两种解释：
+             *   产品真没占用 / 我的量具看不见。所以这里必须给出可核对的分母：
+             *     · 开窗时刻活动定时器数与清单（应当 ≥4：状态栏 250 / flush 100 / 队列 1000 / 定时 5000）
+             *     · 窗口墙钟长度（对照"这些节拍各该 fire 几次"）
+             *   清单非空而非零轮=0 ⇒ **测具在此平台上不派发 Qt 定时器**，
+             *   于是"单轮最长=0ms"是量具读数、不是产品读数 ⇒ 不许当证据（印明，不静默）。 */
+            if (qEnvironmentVariableIsSet("IDM_ROUND_ATTR")) {
+                int actCount = 0, totalCount = 0;
+                QStringList census;
+                const auto objsW = w.findChildren<QObject*>();
+                for (QObject* o : objsW) {
+                    if (auto* tm = qobject_cast<QTimer*>(o)) {
+                        ++totalCount;
+                        if (!tm->isActive()) continue;
+                        ++actCount;
+                        census << QStringLiteral("%1ms@%2")
+                                    .arg(tm->interval())
+                                    .arg(QString::fromLatin1(
+                                             tm->parent() ? tm->parent()->metaObject()->className() : "-"));
+                    }
+                }
+                const qint64 winMs = idleWindow.elapsed() - sampleStart;
+                printf("[census] D 段窗口=%lldms｜活动定时器 %d/%d 个 [%s]｜跑过=%d 轮 非零=%d 轮\n",
+                       (long long)winMs, actCount, totalCount,
+                       census.join(QStringLiteral(", ")).toUtf8().constData(),
+                       turnsRun, distNonZero);
+                printf("[census] 判读：%s\n",
+                       (actCount > 0 && distNonZero == 0)
+                           ? "有活动定时器却一轮都不耗时 ⇒ **本平台的 GUI 计时看不见定时器回调**，"
+                             "D 段的 max/超预算计数只反映 Windows 消息到达，不是产品占用 ⇒ 不作通过证据"
+                           : (actCount == 0 ? "窗口内没有活动定时器 ⇒ 这个 0 无人证得过"
+                                            : "非零轮>0 ⇒ 计时抓到了动静，读数可用"));
+            }
+
+            /* ── B 判据：预算命中数，不是单轮最长（§7-57）──
+             * 为什么不用 max 当门（实测出来的形状）：干净面在**同一枚二进制、同一条命令**下
+             * 会同时出现两种读数——绝大多数轮 ≈0~1ms，偶发一轮 ~300ms。
+             * 拿 max 配任何有限阈值，都会让"产品没变、机器忙了一下"也红；
+             * 而那条红既不可复算、也不指向任何代码状态 ⇒ 是一条没有归属的旗子。
+             * 换成计数：**一段固定时长里有多少轮超过 T**。
+             * ⚠ T=50ms 的来源（不许是拍脑袋数，写清楚怎么来的）：
+             *   本轮采到的干净面分布里，非零轮绝大多数是 **1ms 量级的 Windows 消息到达**，
+             *   只有每窗口 ≤2 发是 ~300ms 的那一类（见 [dist] 与 IDM_DIST_FILE）。
+             *   所以"产品自己的活儿让一轮转不动"这个形状，只能从**有负载的面**上标定：
+             *     IDM_ATTR_SLEEP=30 → p95≈45ms、超预算 0 次（低于 50 时门不该响）
+             *     IDM_ATTR_SLEEP=60 → p95≈74ms、超预算 22~26 次（门红）
+             *   ⇒ T 取两者之间、且高于干净面常态（1ms）一个量级 = **50ms**。
+             *   K=1：允许一窗内一发无归属的系统抖动（就是那类 ~300ms），第二发才算反复占用。
+             *   旧门的 500ms 是当初照着"IPC 阻塞常数 216ms"拍的，与现在这个量纲无关。 */
+            const int budgetMs = qEnvironmentVariableIntValue("IDM_BUDGET_MS") > 0
+                               ? qEnvironmentVariableIntValue("IDM_BUDGET_MS") : 50;
+            int overBudget = 0;
+            for (qint64 v : turnSamples) if (v > budgetMs) ++overBudget;
+            overBudgetTurns = overBudget;
+            budgetSamples = turnsRun;
+            budgetMsOut = budgetMs;
+
+            /* canary 判读：注入的那枚定时器**是否真的被这个窗口采到**。
+             * 采到 ⇒ 窗口有牙（能看见"一整轮被占住"的形状），此时的低读数才是证据；
+             * 没采到 ⇒ 这个窗口的 0/低值是"量具到不了"的 0，不许当通过。
+             * ⚠ 这一枚是**B 门的夹具**：干净产品面上 overBudget=0，"0"本身给不了护栏任何牙
+             *   （期望值为 0 的夹具证不了它会拦）。canary 用**产品自己的定时器通道**注入一次
+             *   已知超预算占用 ⇒ 同一个计数器必须 +1。它红了才证明这扇门认得出违规。 */
+            bool canaryCounted = false;
+            if (canary) {
+                const bool fired = w.property("_idmCanaryFired").toBool();
+                /* 证人要落在**被采样的那一轮**上：注入点之后的那一轮必须进 turnSamples，
+                 * 否则"已触发"只证明它跑了、不证明门看得见它。 */
+                const bool inSample = fired && canaryAtTurn >= 0
+                                   && canaryAtTurn <= turnSamples.size();
+                canaryCounted = (inSample && worstLoopMs >= canaryMs);
+                canaryCountedOut = canaryCounted;
+                printf("[canary] 注入 %dms 占用：触发=%s（第 %lld 轮）｜样本内=%s ｜窗口 max=%lldms（应 ≥%d）⇒ %s\n",
+                       canaryMs, fired ? "是" : "否", (long long)canaryAtTurn,
+                       inSample ? "是" : "否",
+                       (long long)worstLoopMs, canaryMs,
+                       canaryCounted
+                           ? "窗口有牙：低读数可归因于产品本身"
+                           : "窗口没采到已知占用 ⇒ 本轮 D 段读数不作数");
+                /* ⚠ stop 再 delete：canary 不是 singleShot，回调里 msleep 中时删对象＝段错误。 */
+                canary->stop();
+                delete canary;
+                canary = nullptr;
+            }
 
             /* ── 第二个具名读数：被空转连接压在后面的**那条真请求**，真实往返 ──
              * 它必须**自己开一份事件**（另起一轮 idle 连接 + 一条真请求），不能塞进上面那个 D 段窗口。
@@ -2407,6 +2661,32 @@ int main(int argc, char** argv) {
                 delete idle2;
             }
 
+            /* C 证据的读数面：把 D 段窗口的逐轮样本原样写盘，阈值由采集脚本从分布里取，
+             * 不在源码里拍。未设 IDM_DIST_FILE 时零副作用。 */
+            std::sort(turnSamples.begin(), turnSamples.end());
+            /* 分母写清楚：turnsRun＝跑过的轮数（含 0ms 空转轮），非零只是其中一部分。
+             * 只印"非零轮"会让读者把 N=30/非零=1 误读成"样本太少、结论不算数"，
+             * 而那恰恰是产品空闲时的**正常形状**。 */
+            printf("[dist] 跑过=%d 轮（非零=%d，其余为 0ms 空转轮）mean=%.1fms p50=%lld p95=%lld p99=%lld max=%lld\n",
+                   turnsRun, distNonZero,
+                   distNonZero ? double(distSum) / distNonZero : 0.0,
+                   (long long)(turnSamples.size() ? turnSamples[turnSamples.size() * 50 / 100] : 0),
+                   (long long)(turnSamples.size()
+                                   ? turnSamples[qMin(turnSamples.size() * 95 / 100,
+                                                       turnSamples.size() - 1)] : 0),
+                   (long long)(turnSamples.size()
+                                   ? turnSamples[qMin(turnSamples.size() * 99 / 100,
+                                                       turnSamples.size() - 1)] : 0),
+                   (long long)worstLoopMs);
+            if (!qEnvironmentVariable("IDM_DIST_FILE").isEmpty()) {
+                QFile df(qEnvironmentVariable("IDM_DIST_FILE"));
+                if (df.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    for (qint64 v : turnSamples)
+                        df.write(QByteArray::number(v) + "\n");
+                    df.close();
+                }
+            }
+
             /* 归因（入参第 2 条）：把「这一轮的时间是谁花的」拆开印出来，不再靠猜。
              *   peakN>1  ⇒ 串行宽限解释得通；peakN==1 而单轮仍高 ⇒ 别的东西占大头
              *   IPC 占比 = 取尽自身耗时峰值 / 单轮最长
@@ -2424,8 +2704,65 @@ int main(int argc, char** argv) {
              * 不掉 ⇒ 与定时器无关（socket/重绘/外部事件），换一条路查。
              * 顺带把定时器清单打出来：间隔、是否活动、宿主 objectName/类名。 */
             if (qEnvironmentVariableIsSet("IDM_ROUND_ATTR")) {
-                const auto timers = w.findChildren<QTimer*>();
-                printf("[attr] 定时器 %d 个：\n", int(timers.size()));
+                /* 范围＝**两路并集**：qApp 全对象树 + MainWindow `w` 自己的子树。
+                 * ⚠ 单靠 qApp 那一路是**实测错过的形状**：本探针里它连着几轮都印「0 个」，
+                 *   而产品侧 m_statusTimer(250ms)/flushTimer(100ms)/queueScheduler(1000ms)
+                 *   按源码必须活着（main_window.cpp:385 / :285、download_manager.cpp:43）。
+                 *   "扫描能抓到我自己刚挂的 canary"只证明**那条路有眼**，不证明**产品那棵树在它看得见的位置**。
+                 *   所以这里两条路各数一遍、取并集，并把两路各自的计数印出来——
+                 *   谁漏了立刻能从两个数上看见，而不是让归因拿着 0 当结论。 */
+                QVector<QTimer*> timers;
+                auto collect = [&](QObject* root, int* total, QSet<QTimer*>* into) {
+                    if (!root) return;
+                    const auto kids = root->findChildren<QObject*>();
+                    for (QObject* o : kids) {
+                        if (auto* tm = qobject_cast<QTimer*>(o)) {
+                            ++(*total);
+                            if (tm->isActive()) into->insert(tm);
+                        }
+                    }
+                };
+                int totalApp = 0, totalWin = 0;
+                QSet<QTimer*> unionActive;
+                collect(QCoreApplication::instance(), &totalApp, &unionActive);
+                collect(&w, &totalWin, &unionActive);
+                timers = QVector<QTimer*>(unionActive.begin(), unionActive.end());
+                /* ⚠ 顺序承重：QSet 迭代序在进程间不稳定，而 IDM_TIMER_INDEX=N 是"停第 N 个"。
+                 *   不排序的话同一个 N 两次跑会指向**不同的定时器**（实测 idx1 有一次直接段错误），
+                 *   逐定时器消融的结论就不可复算。按 (间隔, 宿主类名) 定序，编号才有含义。 */
+                std::sort(timers.begin(), timers.end(), [](QTimer* a, QTimer* b) {
+                    if (!a || !b) return !a;
+                    if (a->interval() != b->interval()) return a->interval() < b->interval();
+                    const char* ca = a->parent() ? a->parent()->metaObject()->className() : "";
+                    const char* cb = b->parent() ? b->parent()->metaObject()->className() : "";
+                    return QString::fromLatin1(ca) < QString::fromLatin1(cb);
+                });
+                printf("[attr] 定时器：qApp 树 %d 个 / MainWindow 树 %d 个 / 活动并集 %d 个\n",
+                       totalApp, totalWin, int(timers.size()));
+                /* 量具自检（canary）：临时挂一枚**我确定存在、确定活动**的定时器，
+                 * 再用**同一条两路扫描**去找它。找不到 ⇒ 计数是量具瞎了，不是产品没东西跑，
+                 * 本段清单/消融一律作废（教训：把"我的量具瞎"读成"产品没有定时器"）。 */
+                {
+                    auto* c1 = new QTimer(qApp);      // 走 qApp 那一路
+                    auto* c2 = new QTimer(&w);        // 走 MainWindow 那一路
+                    c1->setObjectName(QStringLiteral("__idm_attr_canary_app__"));
+                    c2->setObjectName(QStringLiteral("__idm_attr_canary_win__"));
+                    c1->start(9999);
+                    c2->start(9998);
+                    int t2App = 0, t2Win = 0;
+                    QSet<QTimer*> probe2;
+                    collect(QCoreApplication::instance(), &t2App, &probe2);
+                    collect(&w, &t2Win, &probe2);
+                    const bool seenApp = probe2.contains(c1);
+                    const bool seenWin = probe2.contains(c2);
+                    printf("[attr] 扫描自检：临时挂 2 枚已知活动定时器（qApp 侧 / MainWindow 侧各 1），"
+                           "重扫 qApp=%d MainWindow=%d，命中=%s/%s ⇒ %s\n",
+                           t2App, t2Win, seenApp ? "能" : "不能", seenWin ? "能" : "不能",
+                           (seenApp && seenWin) ? "两路都有眼，前面的计数可信"
+                                                : "至少一路看不见自己刚挂上的东西 —— 本段消融/清单一律作废");
+                    c1->stop(); c2->stop();
+                    delete c1; delete c2;
+                }
                 for (QTimer* tm : timers) {
                     if (!tm) continue;
                     QObject* par = tm->parent();
@@ -2438,55 +2775,118 @@ int main(int argc, char** argv) {
                  * 而 D 段那条空转连接早被处理完了 ⇒ 之后无论停谁都是 0ms，
                  * 4 个定时器全被判成"元凶"。消融必须**重开一份被测事件**，
                  * 不能拿"事件已经过去了"的空窗口当对照。 */
+                /* 逐个消融开关（C 证据用）：IDM_TIMER_INDEX=N 只停第 N 个；
+                 * 未设时按原样"全停/不停"。停谁由清单行号决定，不靠猜。 */
+                const int onlyIdx = qEnvironmentVariable("IDM_TIMER_INDEX").toInt();
+                /* 消融窗口必须自己采得到东西：对端 2.5s 后才关连接，窗口只跑 2s ⇒
+                 * newConnection 落在窗口外，onA 恒 0（第一版 bisect 全 0ms 就是这个形状）。
+                 * 3s > 2.5s 保证空转事件必在窗口内；主 D 段的 2s 不动。 */
+                const qint64 ablationWindowMs = 3000;
                 auto sampleWithIdle = [&](bool timersOff) -> qint64 {
                     QVector<bool> wasActive;
                     if (timersOff) {
-                        for (QTimer* tm : timers) {
+                        for (int ti = 0; ti < timers.size(); ++ti) {
+                            QTimer* tm = timers[ti];
                             wasActive.append(tm ? tm->isActive() : false);
-                            if (tm) tm->stop();
+                            if (!tm) continue;
+                            if (onlyIdx > 0 && ti != onlyIdx - 1) continue;
+                            tm->stop();
                         }
                     }
-                    std::atomic<bool> closed { false };
+                    /* ⚠ 消融窗口自己也要有牙：它印「有定时器=0ms」有两种解释——
+                     *   (a) 这个窗口里确实没有占用（产品空闲）
+                     *   (b) **这个窗口看不见占用**（量具到不了）
+                     * 分不清就会把"停不停都 0"读成"与定时器无关"——那是拿我的瞎当证据。
+                     * IDM_CANARY_MS>0 时往这个窗口注入一枚已知时长的占用：
+                     *   采到 ⇒ 该窗口的低读数可信；采不到 ⇒ 该面作废、不进对照结论。 */
+                    const int cMs = qEnvironmentVariableIntValue("IDM_CANARY_MS");
+                    QTimer* cTimer = nullptr;
+                    bool cFired = false;
+                    if (cMs > 0) {
+                        /* ⚠ 不能 setSingleShot(true)：Qt6 的 `start(int)` 不清 singleShot，
+                         *   而这里要的是"整个窗口里反复 fire"（单次的话烧完就自灭）。 */
+                        cTimer = new QTimer(&w);
+                        QObject::connect(cTimer, &QTimer::timeout, [&] {
+                            QThread::msleep(cMs);
+                            cFired = true;
+                        });
+                        cTimer->start(qMax(30, int(ablationWindowMs / 8)));
+                    }
+                    std::atomic<bool> abortTh { false };
                     QThread* th = QThread::create([&] {
                         QLocalSocket s;
                         s.connectToServer(ipcServerName());
-                        if (s.waitForConnected(3000)) { QThread::msleep(2500); s.abort(); }
-                        closed = true;
+                        if (s.waitForConnected(3000)) {
+                            while (!abortTh.load()) QThread::msleep(20);   // 窗口内保持连接
+                            s.abort();
+                        }
                     });
                     th->start();
                     QElapsedTimer win; win.start();
                     const qint64 start = win.elapsed();
                     qint64 worst = 0;
-                    while (win.elapsed() - start < 2000 && !closed.load()) {
+                    /* ⚠ 这里也不能带 !closed.load()：对端 2.5s 后才关，newConnection 落在 closed
+                     *   置位之后 ⇒ 带上它就把要量的那轮切掉（主 D 段 :2308 同一条坑，第一版 bisect
+                     *   恒 0ms、清单恒「定时器 0 个」都是它）。窗口必须自己采到事件。 */
+                    while (win.elapsed() - start < ablationWindowMs) {
                         QElapsedTimer one; one.start();
                         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
                         worst = qMax(worst, one.elapsed());
                     }
-                    while (!closed.load()) {
-                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-                        QThread::msleep(5);
-                    }
-                    th->wait(5000);
+                    /* 收摊不许再泵事件：与 D 段同一个理由（泵事件＝把产品节拍烧在账本之外，
+                     * 于是"停不停都低"这种形状会被当成归因结论）。 */
+                    abortTh = true;
+                    th->wait(8000);
                     delete th;
+                    const bool canaryOk = cTimer && cFired && worst >= cMs;
+                    if (cTimer) {
+                        printf("     （消融面 canary=%dms：触发=%s max=%lldms ⇒ %s）\n",
+                               cMs, cFired ? "是" : "否", (long long)worst,
+                               canaryOk ? "此窗口有牙" : "此窗口采不到已知占用 ⇒ 它的 0ms 不算证据");
+                        /* ⚠ 必须先 stop 再 delete：这个定时器**不是 singleShot**（要的就是反复 fire），
+                         *   而回调里会 `QThread::msleep(cMs)`。不 stop 就 delete，正在派发的回调
+                         *   拿着已释放的对象 ⇒ 段错误（实测形状：带 IDM_ROUND_ATTR+IDM_CANARY_MS 必崩）。 */
+                        cTimer->stop();
+                        delete cTimer;
+                    }
                     if (timersOff)
                         for (int i = 0; i < timers.size(); ++i)
                             if (timers[i] && wasActive.value(i)) timers[i]->start();
-                    return worst;
+                    return canaryOk ? worst : -1;   // 负数＝这一面没牙，不参与结论
                 };
-                const qint64 onA  = worstLoopMs < 500 ? -1 : sampleWithIdle(false);
-                const qint64 offB = worstLoopMs < 500 ? -1 : sampleWithIdle(true);
-                const qint64 onC  = worstLoopMs < 500 ? -1 : sampleWithIdle(false);   // 排除单调漂移
-                if (worstLoopMs < 500) {
-                    printf("[attr] 本轮未复现（D 段单轮最长=%lldms < 500，IPC 自身峰值=%lldms）"
-                           "⇒ 跳过消融；消融只在复现的那一轮才有意义\n",
-                           (long long)worstLoopMs, (long long)peakDrainMs);
-                } else
+                if (onlyIdx > 0) {
+                    const qint64 zA = sampleWithIdle(false);
+                    const qint64 zB = sampleWithIdle(true);
+                    const qint64 zC = sampleWithIdle(false);
+                    /* ⚠ 判据不能写 `zB*3 < zA`：那要求"停掉它之后只剩噪声"。
+                     *   当窗口里还有**别的**占用源时（变异面就有两路：注入器 + 真路径上的 sleep），
+                     *   停掉其中一路只会让读数减半，永远不会塌到三分之一——
+                     *   于是每个候选都印"不是它"，而事实是"两个都在贡献"。
+                     *   改成配对比较：停掉这一路 ⇒ 相对不停掉**降了一半以上**就算数，
+                     *   并且用第三面（再有）排除单调漂移。 */
+                    const bool dropped = (zA > 0 && zC > 0 && zB > 0
+                                          && zB * 2 < qMin(zA, zC));
+                    printf("[attr2] 只停 #%d：有=%lldms → 停=%lldms → 再有=%lldms ⇒ %s\n",
+                           onlyIdx, (long long)zA, (long long)zB, (long long)zC,
+                           (zA < 0 || zB < 0 || zC < 0)
+                               ? "某一面没牙（canary 采不到）⇒ 本面对比作废"
+                               : (dropped ? "停掉它就减半 ⇒ 它是主要占用源之一"
+                                          : "停掉它没减半 ⇒ 这一路不是主因（可能有多路并存）"));
+                }
+                const qint64 onA  = sampleWithIdle(false);
+                const qint64 offB = sampleWithIdle(true);
+                const qint64 onC  = sampleWithIdle(false);   // 排除单调漂移
+                /* C 证据（§7-57）：旧版"本轮未复现(<500)就跳过消融"在阈值改小后会自废——
+                 * 340ms 常态下永远拿不到归因。改成**无条件跑**，判读看"停不停有没有差"，
+                 * 不再看是否越过某个阈值。 */
                 printf("[attr] 同一测具两份窗口对照：有定时器=%lldms → 停定时器=%lldms → 再有定时器=%lldms"
                        "（IPC 自身峰值=%lldms）⇒ %s\n",
                        (long long)onA, (long long)offB, (long long)onC, (long long)peakDrainMs,
-                       (offB < 500 && (onA >= 500 || onC >= 500))
-                           ? "时间花在定时器回调上（对照成立：两边都塌/都高才算数）"
-                           : "对照不成立 —— 停不停都高或都低，这条归因作废，换路查");
+                       (onA < 0 || offB < 0 || onC < 0)
+                           ? "至少一面没牙（canary 采不到）⇒ 本段对照作废，不读成结论"
+                           : (offB < onA / 2 && offB < onC / 2)
+                               ? "时间花在定时器回调上（对照成立：两边都塌才算数）"
+                               : "对照不成立 —— 停不停都高或都低，这条归因作废，换路查");
             }
 
             printf("[act] A 段两次 ack=%d/%d 模型行数 %d→%d 引擎任务数 %d→%d | "
@@ -2523,16 +2923,46 @@ int main(int argc, char** argv) {
                     QLocalSocket idleS;
                     idleS.connectToServer(epipe);
                     const bool idleConn = idleS.waitForConnected(2000);
-                    // 连上、一个字不发。此刻起 newConnection 要么已触发、要么即将触发。
+
+                    /* ⚠ 读数必须是**包含 newConnection 的那一整轮**，而且要停掉 D 段那批产品定时器再量：
+                     *   同一进程里状态栏 250ms / flush 100ms 等节拍会继续落进 E 段的轮次，
+                     *   于是 ok8 量到的是"这一轮恰好有别的东西"而不是"空转连接阻塞了它"
+                     *   （实测形状：干净面偶发 383~415ms＝没有归属的红）。
+                     *   证人时刻＝服务端真的取尽这条连接的那一刻；用 drainStat().connections 认它，
+                     *   它是 IpcServer 自己记的数，不是我另造的量。 */
+                    QVector<QTimer*> eTimers;
+                    const auto eObjs = w.findChildren<QObject*>();
+                    for (QObject* o : eObjs)
+                        if (auto* tm = qobject_cast<QTimer*>(o))
+                            if (tm->isActive()) eTimers.append(tm);
+                    for (QTimer* tm : eTimers) tm->stop();
+
+                    qint64 worstE = -1;
+                    bool eSawAccept = false;
                     QElapsedTimer win; win.start();
-                    qint64 worstE = 0;
-                    while (win.elapsed() < 300) {
+                    while (win.elapsed() < 3000) {
                         QElapsedTimer one; one.start();
                         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-                        worstE = qMax(worstE, one.elapsed());
+                        const qint64 took = one.elapsed();
+                        const int conns = IpcServer::drainStat().connections;
+                        if (!eSawAccept && conns > 0) {
+                            eSawAccept = true;
+                            worstE = took;              // 就是这一轮在服务端处理连接
+                            break;
+                        }
                     }
-                    okIdleBlockMs = worstE;
-                    okIdleAckE = idleConn;    // 正例对照：连接真建立起来，读数才有归属
+                    for (QTimer* tm : eTimers) tm->start();
+                    if (!eSawAccept) {
+                        printf("[FAIL] E 段前置不成立：3s 内 newConnection 从未被服务端看到\n");
+                        okIdleBlockMs = 9999;           // 没跑过＝红，不许静默绿
+                        okIdleAckE = false;
+                    } else {
+                        okIdleBlockMs = worstE;
+                        okIdleAckE = idleConn;          // 正例对照：连接真建立起来，读数才有归属
+                        printf("[E] accept 轮次读数=%lldms（窗口第 %lldms 处命中，含该轮即止；"
+                               "已先停 %d 个产品定时器排除节拍混淆）\n",
+                               (long long)worstE, (long long)win.elapsed(), int(eTimers.size()));
+                    }
                     idleS.abort();
                     qunsetenv("IDM_TEST_PIPE");   // 交还产品名（本探针后续不再起产品服务）
                 }
@@ -2551,7 +2981,21 @@ int main(int argc, char** argv) {
                (ok5 && roundTripMs >= 0 && roundTripMs < 1500) ? "[PASS]" : "[FAIL]");
         printf("%s 连续投递 %d 次全部拿到回话（%d/%d；回话被丢掉就在这里红）\n",
                ok6 ? "[PASS]" : "[FAIL]", stressTotal, stressAcks, stressTotal);
-        ok7 = (okIdleAck && worstEventLoopTurnMs >= 0 && worstEventLoopTurnMs < 500);
+        /* ── B 门（§7-57）：预算命中数，取代"单轮最长 <500ms"──
+         * 三面都要成立，缺一个就是没有牙的门：
+         *   ① 采到了样本（okIdleAck + budgetSamples>0）；
+         *   ② 超过 T 的轮数 ≤ K（默认 K=1）——这是产品面；
+         *   ③ canary 设了就必须**被这个计数器数进去**（overBudget ≥ 2：canary 那一轮 + 违规轮）。
+         * ③ 是关键：干净面 overBudget 天然为 0，光看它红不了，那是一条期望值为 0、
+         *    因此没有证人的护栏。canary 走产品自己的定时器通道注入一次已知超预算占用，
+         *    只有当计数真的把它算进去，才证明这扇门认得出违规形状。
+         * ⚠ 但 canary **不能白名单化**：第一版我写成 `overBudget<=1` 且 canary 只要求"已计入"，
+         *    于是带负载时 canary(1)+违规若干里只要恰好只漏进 1 个就 PASS ——
+         *    等于给门加了一条能吞掉真违规的路。现在反过来：canary 在场时它自己占 1 个名额，
+         *    第 2 个才是产品的违规，所以 ≥2 必须红。 */
+        const bool budgetCounted = (budgetSamples > 0);
+        ok7 = (okIdleAck && budgetCounted && overBudgetTurns <= 1
+               && (!canaryRequestedOut || (canaryCountedOut && overBudgetTurns >= 2)));
         /* E 段判据（§7-56）：探针私有 IpcServer 上，一条连上不发消息的连接所触发的
          * newConnection 轮次本身必须 <100ms。修复前 ≥200（两轮 waitForReadyRead(100)），
          * 修复后 ≈0~20。ackE＝连接真的建立起来（正例对照：没连上的 0ms 不算证据）。 */
@@ -2561,11 +3005,13 @@ int main(int argc, char** argv) {
         /* ⚠ 口径旗子必须印出来：第一版对照我切了 IDM_ROUND_CRITERION=count，两面读数几乎重叠
          *   （219~228 vs 203~227），当时无法区分"两种写法等价"还是"开关根本没生效"。
          *   没有这一行，那份对照就是不可解释的数据。 */
-        printf("%s 空转连接占着 GUI 线程时，最长一次事件循环轮次仍 <500ms"
-               "（量的是 GUI 线程被独占多久，不是请求延迟；实测 %lldms 撞每轮预算次数=%d "
-               "口径=%s）\n",
-               ok7 ? "[PASS]" : "[FAIL]", (long long)worstEventLoopTurnMs, truncatedTurns,
-               roundCriterionCount ? "count(旧:第二参当墙钟上限)" : "deadline(新:QDeadlineTimer(20))");
+        printf("%s GUI 线程单轮占用：N=%d 轮里超 %dms 的轮数=%d（需 ≤1）｜最长一轮=%lldms "
+               "撞每轮预算次数=%d 口径=%s%s\n",
+               ok7 ? "[PASS]" : "[FAIL]", budgetSamples, budgetMsOut, overBudgetTurns,
+               (long long)worstEventLoopTurnMs, truncatedTurns,
+               roundCriterionCount ? "count(旧:第二参当墙钟上限)" : "deadline(新:QDeadlineTimer(20))",
+               canaryRequestedOut ? (canaryCountedOut ? " ｜canary=已计入" : " ｜canary=未计入⇒门作废")
+                                  : " ｜canary=未设（本轮无夹具，只量不证牙）");
         /* 第二个具名读数：本轮首次测量、无基线 ⇒ 只进报告行，不进退码、不配阈值。
          * 攒到能看出抖动振幅的轮数之后，再谈它是否进判据（阈值要从读数里取，不许拍）。 */
         printf("[report] 压在空转连接后面的那条真请求：往返=%lldms ack=%d"
