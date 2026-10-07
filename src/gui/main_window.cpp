@@ -961,49 +961,78 @@ void MainWindow::dragEnterEvent(QDragEnterEvent* event)
 
 void MainWindow::dropEvent(QDropEvent* event)
 {
-    QString url;
     const QMimeData* mime = event->mimeData();
+    // U2（⑪ A4 审计）：原先只取 urls().first()，其余静默丢弃 ⇒ 拖 10 个链接只下 1 个。
+    // 现在收全：URL 面逐条取；文本面按行拆（与「批量导入」同一口径，batch_import_dialog.cpp:139）。
+    QStringList candidates;
     if (mime->hasUrls()) {
-        // 优先取第一个 URL
-        QList<QUrl> urls = mime->urls();
-        if (!urls.isEmpty())
-            url = urls.first().toString();
-    } else if (mime->hasText()) {
-        url = mime->text().trimmed();
+        for (const QUrl& u : mime->urls()) {
+            const QString s = u.toString().trimmed();
+            if (!s.isEmpty()) candidates << s;
+        }
     }
+    if (candidates.isEmpty() && mime->hasText())
+        candidates = mime->text().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
 
-    if (url.isEmpty())
-        return;
-
-    // R2（⑪ A4 审计）：拖进来的文本没有上限 ⇒ 一篇长文档会整串进单行编辑器与 URL 解析。
-    // 上限取引擎自己的 URL 缓冲大小（download_core.h:67 `char url[2048]`）——超过它的输入
-    // 本来就会被 strncpy 截成另一个 URL，与其静默截半，不如在这里明确拒掉并留下可读原因。
-    // DownloadTask 是 C 里的匿名 struct typedef（download_core.h:65-148），没有成员指针类型可写，
-    // 所以取一个实例字段算 sizeof：编译期常量、且跟着引擎缓冲一起变。
+    // R2（⑪ A4 审计）：上限取引擎自己的 URL 缓冲大小（download_core.h:67 `char url[2048]`）——
+    // 超过它的输入本来就会被 strncpy 截成另一个 URL，静默截半不如明确拒掉并留下可读原因。
+    // DownloadTask 是 C 里的匿名 struct typedef（:65-148），没有成员指针类型可写 ⇒ 用实例字段算 sizeof。
     static const DownloadTask kUrlProbe{};
     static const int kMaxDropUrlLen = static_cast<int>(sizeof(kUrlProbe.url));
-    if (url.length() >= kMaxDropUrlLen) {
-        Log::warn(QStringLiteral("拖放内容过长（%1 字符），已忽略；请改用「新建任务」粘贴实际链接")
-                      .arg(url.length()));
-        event->acceptProposedAction();   // 事件吃掉，避免拖放悬停在窗口上不放
+
+    QStringList kept;
+    int oversize = 0;
+    for (const QString& raw : candidates) {
+        const QString one = raw.trimmed();
+        if (one.isEmpty()) continue;
+        if (one.length() >= kMaxDropUrlLen) { ++oversize; continue; }
+        kept << one;
+    }
+    if (oversize > 0)
+        Log::warn(QStringLiteral("拖放中有 %1 条内容过长（>= %2 字符），已忽略；请改用「新建任务」粘贴实际链接")
+                      .arg(oversize).arg(static_cast<int>(sizeof(kUrlProbe.url))));
+    if (kept.isEmpty()) {
+        // 一条都没剩下：仍吃掉事件，避免拖放悬停在窗口上不放手
+        event->acceptProposedAction();
         return;
     }
 
-    // 弹出新建任务对话框预填链接
+    // 一次 drop **只弹一个**对话框（逐个弹 N 个窗是扰民）：预填第一条，
+    // 用户确认后其余按同一目录/线程数一并受理 —— 与「批量导入」同一条下游路径
+    // （internalAddTask(..., queue="") ⇒ 受 maxConcurrent 全局空位约束，满额则排队而不是并发炸开）。
     NewTaskDialog dlg(this, m_settings.defaultSaveDir(), m_settings.maxThreads());
-    dlg.setUrl(url);
-    if (dlg.exec() == QDialog::Accepted) {
-        NewTaskInput inp = dlg.result();
-        int id = m_taskController->internalAddTask(inp.url, inp.saveDir, inp.fileName,
+    dlg.setUrl(kept.first());
+    if (dlg.exec() != QDialog::Accepted) {
+        event->acceptProposedAction();
+        return;
+    }
+    const NewTaskInput inp = dlg.result();
+    const QString firstUrl = inp.url.trimmed();
+    int id = m_taskController->internalAddTask(firstUrl, inp.saveDir, inp.fileName,
+                             inp.threadCount > 0 ? inp.threadCount : m_settings.maxThreads(),
+                             QString());
+    if (id > 0)
+        Log::info(QStringLiteral("拖放添加任务 #%1: %2").arg(id).arg(firstUrl));
+    else
+        // R3（⑪ A4 审计）：这条入口原先只有成功分支 ⇒ 点完确定什么都没发生、
+        // 日志也区分不出"被拒"与"失败"。对齐 addTaskFromUrl 里 IPC/web 侧的形状。
+        Log::warn(QStringLiteral("拖放添加任务失败: %1").arg(firstUrl));
+
+    // 批次剩余条目：文件名一律留空让引擎从 URL 推断（手填的名字不该复用给别的 URL），
+    // 目录/线程数沿用用户在同一个对话框里确认过的值。
+    int added = (id > 0) ? 1 : 0, failed = (id > 0) ? 0 : 1;
+    for (int i = 1; i < kept.size(); ++i) {
+        const QString next = kept.at(i).trimmed();
+        if (next.isEmpty() || next == firstUrl) continue;   // 同一条不重复建
+        const int nid = m_taskController->internalAddTask(next, inp.saveDir, QString(),
                                  inp.threadCount > 0 ? inp.threadCount : m_settings.maxThreads(),
                                  QString());
-        if (id > 0)
-            Log::info(QStringLiteral("拖放添加任务 #%1: %2").arg(id).arg(inp.url));
-        else
-            // R3（⑪ A4 审计）：这条入口原先只有成功分支 ⇒ 点完确定什么都没发生、
-            // 日志也区分不出"被拒"与"失败"。对齐 addTaskFromUrl 里 IPC/web 侧的形状。
-            Log::warn(QStringLiteral("拖放添加任务失败: %1").arg(inp.url));
+        if (nid > 0) { ++added; Log::info(QStringLiteral("拖放添加任务 #%1: %2").arg(nid).arg(next)); }
+        else         { ++failed; Log::warn(QStringLiteral("拖放添加任务失败: %1").arg(next)); }
     }
+    if (kept.size() > 1)
+        Log::info(QStringLiteral("拖放批次完成: %1/%2 个任务已添加").arg(added).arg(kept.size()));
+    syncStatus();
     event->acceptProposedAction();
 }
 

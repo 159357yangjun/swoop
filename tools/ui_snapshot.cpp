@@ -41,6 +41,7 @@
 #include <QPainter>
 #include <QTextStream>
 #include <QSet>
+#include <QRegularExpression>
 #include <algorithm>
 
 #include "main_window.h"
@@ -2312,14 +2313,51 @@ int main(int argc, char** argv) {
         QDir().mkpath(dirPg);
         qputenv("IDM_DATA_DIR", dirPg.toUtf8());
 
-        // 日志捕获：Log::warn 走 qWarning ⇒ 装一个 handler 就能数到，不需要产品加计数器
+        // 日志捕获：Log::warn 走 qWarning、Log::info 走 qDebug ⇒ 装一个 handler 就能数到，
+        //   不需要产品加计数器。⚠ 只收 warn 的版本量不到 D5（批量成功支是 info）。
         static QStringList g_warns;
+        static QStringList g_infos;
         auto* oldHandler = qInstallMessageHandler([](QtMsgType t, const QMessageLogContext&, const QString& m) {
             if (t == QtWarningMsg) g_warns << m;
+            else if (t == QtInfoMsg) g_infos << m;
         });
 
-        bool d1 = false, d2 = false, d3 = false;
-        QString dd1, dd2, dd3;
+        bool d1 = false, d2 = false, d3 = false, d4 = false, d5 = false;
+        QString dd1, dd2, dd3, dd4, dd5;
+
+        // 本分支自带的 IPC 客户端：MainWindow 构造时起了真 IpcServer（管道名走 pid 隔离），
+        // 「列表里有几行」从产品自己的通道读——不猜它的数据库，也不碰私有成员
+        // （TaskListModel 是 MainWindow 成员，findChild 恒拿不到，⑫ 踩过）。
+        auto askIpcList = [](const QJsonObject& reqIn, bool* okOut, QString* msgOut) -> bool {
+            struct Res { bool done = false, replied = false; QString reply; };
+            auto res = std::make_shared<Res>();
+            QThread* client = QThread::create([res, reqIn] {
+                QLocalSocket sk;
+                sk.connectToServer(ipcServerName());
+                if (sk.waitForConnected(2000)) {
+                    sk.write(QJsonDocument(reqIn).toJson(QJsonDocument::Compact));
+                    sk.flush();
+                    if (sk.waitForBytesWritten(2000) && sk.waitForReadyRead(3000)) {
+                        res->reply = QString::fromUtf8(sk.readAll());
+                        res->replied = !res->reply.isEmpty();
+                    }
+                    sk.disconnectFromServer();
+                }
+                res->done = true;
+            });
+            client->start();
+            for (int i = 0; i < 300 && !res->done; ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+            client->wait(5000);
+            delete client;
+            if (!res->replied) return false;
+            const QJsonObject resp = QJsonDocument::fromJson(res->reply.toUtf8()).object();
+            if (okOut) *okOut = resp.value(QStringLiteral("success")).toBool(false);
+            if (msgOut) *msgOut = resp.value(QStringLiteral("message")).toString();
+            return true;
+        };
 
         MainWindow w;
         w.move(-32000, -32000);
@@ -2336,10 +2374,18 @@ int main(int argc, char** argv) {
         auto sendDrop = [&](const QMimeData* mime, DropRun& out) -> void {
             out = DropRun{};
             const QPointF at(w.geometry().center());
-            auto countDlg = []() {
+            // ⚠ 作用域（⑬ 定案的第二个测具错）：NewTaskDialog 是**栈对象**，exec() 返回后要等
+            //   外层作用域结束才析构 ⇒ 它此后一直是"可见的顶层窗口"。守卫按指针扫全部顶层窗口，
+            //   于是 D2/D3/D4 期间它去点 **D1 那个旧框** 的 OK：peak/closed/prefill 全被旧框满足，
+            //   本轮这条 drop 到底建没建任务根本没被观测到（表现为 gained=0 / modelRows=1）。
+            //   正解：先登记本轮开始前已存在的对话框，守卫与计数一律跳过它们。
+            QSet<QWidget*> preExisting;
+            for (QWidget* x : QApplication::topLevelWidgets())
+                if (qobject_cast<NewTaskDialog*>(x)) preExisting.insert(x);
+            auto countDlg = [&]() {
                 int n = 0;
                 for (QWidget* x : QApplication::topLevelWidgets())
-                    if (qobject_cast<NewTaskDialog*>(x) && x->isVisible()) ++n;
+                    if (qobject_cast<NewTaskDialog*>(x) && !preExisting.contains(x) && x->isVisible()) ++n;
                 return n;
             };
             /* 守卫拿到对话框时**必须点「确定」而不是 reject()**：
@@ -2349,6 +2395,7 @@ int main(int argc, char** argv) {
             auto grabAndClose = [&]() {
                 for (QWidget* x : QApplication::topLevelWidgets()) {
                     if (auto* d = qobject_cast<NewTaskDialog*>(x)) {
+                        if (preExisting.contains(d)) continue;   // 只碰本轮新开的框
                         if (out.prefill.isEmpty()) {
                             const QList<QLineEdit*> edits = d->findChildren<QLineEdit*>();
                             if (!edits.isEmpty()) out.prefill = edits.first()->text();
@@ -2394,21 +2441,29 @@ int main(int argc, char** argv) {
             hardStop.start(8000);
 
             // 触发排在队列里：enter+drop 都由 outer.exec() 驱动（sendEvent 直调会内联进 exec ⇒ 守卫够不着）
-            QDragEnterEvent ent(at.toPoint(), Qt::CopyAction | Qt::MoveAction, mime,
-                                Qt::LeftButton, Qt::NoModifier);
-            QDropEvent ev(at, Qt::CopyAction | Qt::MoveAction, mime,
-                          Qt::LeftButton, Qt::NoModifier);
+            // ⚠ 生命周期（⑬ 定案）：Qt6 的 QMimeData **没有公开拷贝构造**，而事件构造函数也不复制内容
+            //   （qevent.h:713/777 只存指针）。上一版把栈上的 ent/ev 交给 QueuedConnection 的 lambda ⇒
+            //   调用方一返回它们就析构，lambda 再 sendEvent 的是悬垂指针——读到的 urls 数是随机值。
+            //   正解：mime 由调用方持有并保证活到 outer.exec() 结束；两个事件也放 shared_ptr，
+            //   由 lambda 按值捕获。这里同时把 DropActions 传成单一 CopyAction
+            //   （`CopyAction|MoveAction` 是位掩码并集，不是合法 proposedAction）。
+            auto holdEnt = std::make_shared<QDragEnterEvent>(
+                at.toPoint(), Qt::CopyAction, const_cast<const QMimeData*>(mime),
+                Qt::LeftButton, Qt::NoModifier);
+            auto holdEv = std::make_shared<QDropEvent>(
+                at, Qt::CopyAction, const_cast<const QMimeData*>(mime),
+                Qt::LeftButton, Qt::NoModifier);
             bool enterAccepted = false;
-            QMetaObject::invokeMethod(&w, [&]() {
-                QApplication::sendEvent(&w, &ent);
-                enterAccepted = ent.isAccepted();
-                QApplication::sendEvent(&w, &ev);
+            QMetaObject::invokeMethod(&w, [&, holdEnt, holdEv]() {
+                QApplication::sendEvent(&w, holdEnt.get());
+                enterAccepted = holdEnt->isAccepted();
+                QApplication::sendEvent(&w, holdEv.get());
             }, Qt::QueuedConnection);
             outer.exec();
             spy.stop(); hardStop.stop();
             for (int i = 0; i < 60 && countDlg() > 0; ++i) QCoreApplication::processEvents();
             out.diag = QStringLiteral("enterAccepted=%1 dropAccepted=%2 peak=%3 closed=%4 accepted=%5")
-                           .arg(enterAccepted ? 1 : 0).arg(ev.isAccepted() ? 1 : 0)
+                           .arg(enterAccepted ? 1 : 0).arg(holdEv->isAccepted() ? 1 : 0)
                            .arg(out.peak).arg(out.closed).arg(out.accepted)
                          + (out.wrongDlg.isEmpty() ? QString() : QStringLiteral(" 冒名窗=%1").arg(out.wrongDlg));
         };
@@ -2436,13 +2491,20 @@ int main(int argc, char** argv) {
             bool warned = false;
             for (const QString& x : g_warns)
                 if (x.contains(QStringLiteral("拖放"))) { warned = true; break; }
-            // 判据：要么**根本没开对话框**（直接拒这条 drop），要么开的时候文本有界。
-            // 两种都算修好；只有"整串交出去"才算没修。
+            // ⚠ 「含拖放」这一条没牙：把 R2 的拒收摘掉后仍然有一条**别处**的拖放 warn
+            //   （MUT-D 实测 warn 行数=1、D2 照样绿）。证人必须是 R2 自己那句话。
+            bool warnedOversize = false;
+            for (const QString& x : g_warns)
+                if (x.contains(QStringLiteral("内容过长"))) { warnedOversize = true; break; }
+            // 判据：要么**根本没开对话框**（直接拒这条 drop），要么开的时候文本有界；
+            // 两种都算修好，只有"整串交出去"才算没修。**并且**必须有 R2 自己的超长告警，
+            // 否则"随便找个理由拒掉"也能蒙过（第一版就是这样让 MUT-D 溜过去的）。
             const bool refusedOrBounded = (r.peak == 0) || (!pre.isEmpty() && pre.length() <= 8192);
-            d2 = !handedOverWhole && refusedOrBounded && warned;
-            dd2 = QStringLiteral("输入长度=%1 交给对话框的长度=%2 对话框峰值=%3 有界或拒=%4 告警含「拖放」=%5｜%6")
-                      .arg(huge + 15).arg(pre.length()).arg(r.peak)
-                      .arg(refusedOrBounded ? 1 : 0).arg(warned ? 1 : 0).arg(r.diag);
+            d2 = !handedOverWhole && refusedOrBounded && warnedOversize;
+            dd2 = QStringLiteral("输入长度=%1 交给对话框的长度=%2 对话框峰值=%3 有界或拒=%4 "
+                                 "告警含「拖放」=%5 告警含「内容过长」=%6(唯一证人) warn 行数=%7｜%8")
+                      .arg(huge).arg(pre.length()).arg(r.peak).arg(refusedOrBounded ? 1 : 0)
+                      .arg(warned ? 1 : 0).arg(warnedOversize ? 1 : 0).arg(g_warns.size()).arg(r.diag);
         }
 
         // ── D3 R3：internalAddTask 真失败那一支必须有 warn ──
@@ -2480,7 +2542,146 @@ int main(int argc, char** argv) {
                                  "对话框峰值=%4 预填=「%5」warn 含「添加任务失败」=%6 本轮 warn 行数=%7｜%8")
                       .arg(filled).arg(firstRejectAt).arg(nListed).arg(r.peak)
                       .arg(r.prefill.left(40)).arg(warnedFail ? 1 : 0).arg(g_warns.size()).arg(r.diag);
-            for (int i = 0; i < nListed; ++i) dlmgr_cancel(listed[i]);   // 收摊：别把槽位留给下一段
+            // 收摊必须**清当前引擎里的全部**，不能只清进 D3 之前那一批（listed[0..nListed)）：
+            //   本轮 drop 自己又占了 1 个槽位 ⇒ 只清旧账会把那条留在引擎里，
+            //   于是后面的 D4 一进门就撞上 MAX_TASKS（实测 baseN=128、firstId=-1，
+            //   看着像"产品没遍历 URL"，其实是上一段的残留把它的 add 全拒了）。
+            int listedNow[256];
+            const int nNow = dlmgr_list(listedNow, 256);
+            for (int i = 0; i < nNow; ++i) dlmgr_cancel(listedNow[i]);
+            QCoreApplication::processEvents();
+        }
+
+        // ── D4 U2：一次拖入多个 URL ⇒ 只弹一个对话框，但每条都要受理（⑬）──
+        // 判据全是用户看得见的量：引擎条数现算增量 + 产品自己的 IPC list 行数。
+        {
+            // ⚠ 必须先清场再取基线：D3 为了造"引擎满额"把 dlmgr_add 灌到 MAX_TASKS，
+            //   它的收摊发生在 D4 **之前**，但那一刻本轮 drop 还没建任务 ⇒
+            //   不重新清空就直接量到 firstId=-1（第一版 D4 恒红的真正原因，不是产品没遍历）。
+            // ⚠ 清场必须**当场证明引擎为空**，不能假设 cancel 已生效：上一版只取消了
+            //   "进 D3 之前那一批"（nListed），而 D3 自己那条 drop 又新占 1 个槽位；
+            //   且取消是异步的（有活跃分片时走 pending_detach，要等线程结束才减 g_task_count）
+            //   ⇒ 引擎仍满额，D4 的 add 全被拒（实测 baseN=128、产品侧 firstId=-1）。
+            //   正解：泵到 dlmgr_list 归零，并把残留条数印进读数当证人（清不干净就该红并说明原因）。
+            // ⚠ 上一版的清场只 dlmgr_cancel 就完事 ⇒ 槽位其实一个都没减（实测 baseN=128）。
+            //   原因在引擎自己的语义里：dlmgr_cancel 只把 status 置为 TASK_CANCELLED，
+            //   摘槽要等 start_task_threads 的收尾；而收尾要求 `chunk_count > 0`——
+            //   D3 灌进去的任务从没 start、没有分片 ⇒ 取消后永远没人摘，队列满着。
+            //   ⚠ 公开 API 清不掉这批幻影任务，三条路都实测过：
+            //     · dlmgr_cancel 只把 status 置 TASK_CANCELLED；真正摘槽要等 worker 收尾，
+            //       而这些任务从没 start、没有 chunk ⇒ 永远没人摘（实测 list 恒 128）。
+            //     · dlmgr_remove_completed 只收 COMPLETED/FAILED 两态（:2373），对 CANCELLED 恒 0。
+            //     · dlmgr_remove 会走到 detach_slot，但 detach_slot 在"还有别的任务 worker_alive>0"
+            //       时只登记 pending_detach 不缩数组（:724），而 sweep_pending_detach_locked
+            //       唯一的驱动点是某个 worker 退场（:1430）⇒ 同样永久滞留（实测 已摘除=N 而残留仍 128）。
+            //   正解：走引擎自己的清空通道——dlmgr_load_state 在读文件之前先调 reset_all_tasks
+            //   （download_core.c:2081），memset 整个 g_tasks[] 并把 g_task_count/g_next_id 归零，
+            //   且此时所有任务已被 cancel、worker_alive==0，等待窗立刻通过。传一个不存在的路径，
+            //   load 之后返回 -1 也无妨：清空已经发生（:2086 的 fopen 失败不改队列）。
+            int leftover = -1, nCancelled = 0, nResetRounds = 0;
+            for (int round = 0; round < 10; ++round) {
+                int z[256];
+                const int nz = dlmgr_list(z, 256);
+                if (nz == 0) { leftover = 0; break; }
+                for (int i = 0; i < nz; ++i) {
+                    TaskInfo ti{};
+                    if (dlmgr_get_task_info(z[i], &ti) == 0 && ti.status != TASK_CANCELLED) {
+                        dlmgr_cancel(z[i]);
+                        ++nCancelled;
+                    }
+                }
+                dlmgr_load_state((dirPg + QStringLiteral("/_no-such-state.json")).toUtf8().constData());
+                ++nResetRounds;
+                QCoreApplication::processEvents();
+                leftover = dlmgr_list(z, 256);   // 复数：本轮结束后的真实残留
+                if (leftover == 0) break;
+                QThread::msleep(25);             // 仅在还有活跃线程要等时才睡
+            }
+            // 当场证明二分不变量还活着：数组非空却"查不到自己列出来的 id"就是已经乱序。
+            int probeId = 0, foundProbe = 1;
+            {
+                int z[256];
+                const int nz = dlmgr_list(z, 256);
+                if (nz > 0) {
+                    probeId = z[nz / 2];
+                    TaskInfo ti{};
+                    foundProbe = (dlmgr_get_task_info(probeId, &ti) == 0 && ti.task_id == probeId) ? 1 : 0;
+                }
+            }
+
+            QMimeData mime;
+            mime.setUrls({QUrl(QStringLiteral("http://ex.test/u1.zip")),
+                          QUrl(QStringLiteral("http://ex.test/u2.zip")),
+                          QUrl(QStringLiteral("http://ex.test/u3.zip"))});
+            int listedA[256];
+            const int baseN = dlmgr_list(listedA, 256);
+            DropRun r4; sendDrop(&mime, r4);
+            int listedB[256];
+            const int afterN = dlmgr_list(listedB, 256);
+            const int gained = afterN - baseN;
+
+            int modelRows = -1;
+            {
+                QJsonObject req;
+                req[QStringLiteral("command")] = QStringLiteral("list");
+                bool okL = false; QString msgL;
+                if (askIpcList(req, &okL, &msgL) && okL) {
+                    modelRows = 0;
+                    for (const QString& ln : msgL.split(QLatin1Char('\n')))
+                        if (ln.startsWith(QLatin1Char('#'))) ++modelRows;
+                }
+            }
+            d4 = (leftover == 0) && (baseN == 0) && (foundProbe == 1)
+                 && (r4.peak == 1) && (gained == 3) && (modelRows >= 3);
+            dd4 = QStringLiteral("对话框峰值=%1(期望恰 1) 引擎增量=%2(期望 3) IPC list 行数=%3(期望>=3) "
+                                 "预填长度=%4 清场残留=%5(期望0) 基线条数=%6(期望0) 本次取消=%7 清空轮数=%8 "
+                                 "乱序探针 id=%9 可查=%10(期望1，否则 find_task 二分已失效)｜%11")
+                      .arg(r4.peak).arg(gained).arg(modelRows)
+                      .arg(r4.prefill.length()).arg(leftover).arg(baseN)
+                      .arg(nCancelled).arg(nResetRounds).arg(probeId).arg(foundProbe).arg(r4.diag);
+            for (int i = 0; i < afterN; ++i) dlmgr_cancel(listedB[i]);
+
+            // ── D5：U2 的每条受理必须走 R3 已有日志通道（⑬ 任务书第 1 条硬要求）──
+            // D4 只量"条数进没进引擎"，量不出日志；把批量支的 Log::info/Log::warn 摘掉，
+            //   D4 仍然绿 ⇒ 那条要求没有牙。这里独立清一次日志窗，只数本轮 drop 产生的行。
+            // ⚠ 判据用「含该 URL 的行数」而不是 warn/info 总数：总数会被上一段(D3)留下的
+            //   满额告警混进来，而 URL 串只有本次这三条会写。
+            {
+                int listedC[256];
+                const int nBefore = dlmgr_list(listedC, 256);
+                for (int i = 0; i < nBefore; ++i) dlmgr_remove(listedC[nBefore - 1 - i]);
+                QCoreApplication::processEvents();
+
+                g_warns.clear(); g_infos.clear();
+                QMimeData m5;
+                m5.setUrls({QUrl(QStringLiteral("http://ex.test/d5a.zip")),
+                            QUrl(QStringLiteral("http://ex.test/d5b.zip")),
+                            QUrl(QStringLiteral("http://ex.test/d5c.zip"))});
+                DropRun r5; sendDrop(&m5, r5);
+                // ⚠ 判据**不能**写成"有一行含该 URL"：TaskController::internalAddTask 自己就
+                //   会 Log::info「添加任务 #N (队列:…): <url>」（task_controller.cpp:228），
+                //   于是摘掉 dropEvent 里的逐条日志后 D5 仍然绿（实测 info 行数=5、三条 URL
+                //   全被控制器那侧命中）。第一版因此是一句没牙的断言。
+                //   正解：只认 **dropEvent 自己的前缀**「拖放添加任务」，并且要求命中的是
+                //   **不同的 id**（同一条重复出现不算三条）。控制器侧失败不写日志
+                //   （:198 直接 return -1）⇒ 失败支的「拖放添加任务失败」仍是唯一证人。
+                QStringList hitIds;
+                const QRegularExpression re(QStringLiteral("拖放添加任务 #(\\d+):"));
+                QStringList all5; all5 << g_infos << g_warns;
+                for (const QString& ln : all5) {
+                    auto it = re.globalMatch(ln);
+                    while (it.hasNext()) hitIds << it.next().captured(1);
+                }
+                QSet<QString> uniq; for (const QString& s : hitIds) uniq << s;
+                bool batchLine = false;
+                for (const QString& ln : all5)
+                    if (ln.contains(QStringLiteral("拖放批次完成"))) { batchLine = true; break; }
+                d5 = (r5.peak == 1) && (uniq.size() == 3) && batchLine;
+                dd5 = QStringLiteral("对话框峰值=%1(期望恰 1) 「拖放添加任务」去重 id 数=%2(期望 3) "
+                                     "命中次数=%3 批次汇总行=%4(期望 1) info 行数=%5 warn 行数=%6｜%7")
+                          .arg(r5.peak).arg(uniq.size()).arg(hitIds.size()).arg(batchLine ? 1 : 0)
+                          .arg(g_infos.size()).arg(g_warns.size()).arg(r5.diag);
+            }
         }
 
         w.hide();
@@ -2495,6 +2696,12 @@ int main(int argc, char** argv) {
         printf("%s [D3] R3：新增任务失败那一支 ⇒ 必须有一条 warn（对齐 IPC 侧形状）\n",
                d3 ? "[PASS]" : "[FAIL]");
         printf("    [D3 读数] %s\n", dd3.toUtf8().constData());
+        printf("%s [D4] U2：一次拖入 3 个 URL ⇒ 只弹一个对话框但三条都进引擎与列表\n",
+               d4 ? "[PASS]" : "[FAIL]");
+        printf("    [D4 读数] %s\n", dd4.toUtf8().constData());
+        printf("%s [D5] U2 日志面：每条受理（含批量支）都要在 R3 已有通道里留下一行\n",
+               d5 ? "[PASS]" : "[FAIL]");
+        printf("    [D5 读数] %s\n", dd5.toUtf8().constData());
 
         // exe 身份印进探针自己的输出：⑫ 实测 M-C 与 M-D 两面**红的是同一个判据、读数逐字相同**，
         // 两份归档文件因此字节一致——光看日志分不出是哪枚二进制跑的。带上自身哈希后，
@@ -2509,9 +2716,9 @@ int main(int argc, char** argv) {
             }
             printf("    [DRAGDROP 身份] exe_sha12=%s\n", h.toUtf8().constData());
         }
-        const bool okDd = d1 && d2 && d3;
-        printf("%s [DRAGDROP 汇总] d1=%d d2=%d d3=%d\n",
-               okDd ? "[PASS]" : "[FAIL]", d1, d2, d3);
+        const bool okDd = d1 && d2 && d3 && d4 && d5;
+        printf("%s [DRAGDROP 汇总] d1=%d d2=%d d3=%d d4=%d d5=%d\n",
+               okDd ? "[PASS]" : "[FAIL]", d1, d2, d3, d4, d5);
         QDir(dirPg).removeRecursively();
         return okDd ? 0 : 1;
     }

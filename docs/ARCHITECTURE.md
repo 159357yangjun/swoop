@@ -1710,7 +1710,7 @@ chunk_count=10 chunks_done=0；.idmtmp 41943040 -> 41943040（长度不作证人
 | IDM_PATHGUARD_PROBE | 待修型（刻意不进闸门名单） | 否 | 3 |
 | IDM_HASHVERIFY_PROBE | 断言型 | 是 | 7 |
 | IDM_CLIPBOARD_PROBE | 断言型 | 是 | 5 |
-| IDM_DRAGDROP_PROBE | 断言型 | 是 | 3 |
+| IDM_DRAGDROP_PROBE | 断言型 | 是 | 5 |
 <!-- PROBE-ROSTER-END -->
 
 「待修型」这一类的存在理由：**红门不许进 CI 闸门名单**（否则 CI 永远红、真回归被淹没），
@@ -4134,3 +4134,58 @@ PASS=92 FAIL=2（唯一红＝IDM_PATHGUARD_PROBE，按设计），`ui_snapshot.e
 **六、名单与门禁**：`IDM_DRAGDROP_PROBE` 进 §1.4 表与 CI 闸门名单（模式 24→25、CI 名单 21→22），
 `TOTAL_PASS` 钉到 ≥70（本机 22 个闸门模式现算 **95** 条，余量 25；套件总数 96 里含红门 PATHGUARD 自己那条 G3，
 所以两个号分别是 95/96，别混）。roster 夹具仍 16/16。
+
+### 2026-10-06 15:3x（第 68 条）— ⑬ A4 U2 修复 + 台账口径订正 + R1 定案：D4/D5 两条新断言、七枚变异、公开 API 擦不掉幻影任务这件事
+
+**一、U2 修的是什么**：`dropEvent` 原先 `url = mime->urls().first()`，其余**静默丢弃** ⇒ 用户拖 10 个链接只下 1 个、
+而且没有任何一句话告诉他另外 9 个没了。现在 URL 面逐条收、文本面按行拆（与「批量导入」同口径
+`batch_import_dialog.cpp:139`），R2 上限改为**逐条**判（超长的那几条单独计数、批次层面报一次「有 N 条内容过长」，
+不因一条坏数据丢掉整批），一次 drop **仍只弹一个**对话框；确认后其余按同一目录/线程数一并受理，
+文件名一律留空让引擎按各自 URL 推断（手填的名字不该复用给别的 URL），重复 URL 跳过不重建，
+每条走 R3 已有日志通道，末尾补 `拖放批次完成: added/total`。
+
+**二、选型：遍历全部，不采用"取第一个 + Log::info 告知忽略"**。任务书给了两个候选，后者只是把缺陷改得更礼貌——
+日志不在主界面上，用户看不到，行为仍然丢数据；而"扰民"这个成本其实不存在（批量路径不弹第二个窗）。
+⚠ 同时纠正我上一轮写进 §7-66/审计表的错话：**`queue=""` 不绕过 `maxConcurrent`**。控制器用的是
+`startNow = queue.isEmpty() && m_queueScheduler->hasFreeSlot()`（`task_controller.cpp:101/153/173/214/261`），
+`hasFreeSlot()` 拿运行数比 `qMax(1, m_maxConcurrent())`（`queue_scheduler.cpp:38-48`，默认 4 `settings.h:174`）
+⇒ `queue=""` 只表示"不受队列归属限制"，满额的条目留在列表里等位。
+
+**三、清场：公开 API 擦不掉 D3 留下的 128 条幻影任务**（D4 连红三轮的真因，与产品无关）。三条路都实测否证：
+`dlmgr_cancel` 只置状态、摘槽要等 worker 收尾而收尾要求 `chunk_count>0`（这些任务从没 start）；
+`dlmgr_remove_completed()` 只收 COMPLETED/FAILED（`download_core.c:2373`），对 CANCELLED 恒 0；
+`dlmgr_remove()`→`detach_slot` 在"还有别人 `worker_alive>0`"时只登记 `pending_detach`，
+而 `sweep_pending_detach_locked` 的唯一驱动点是某个 worker 退场（`:1430`）⇒ 倒序摘也实测 `已摘除=5120` 而残留仍 128。
+正解是走引擎自己的清空通道：`dlmgr_load_state(<不存在的路径>)` 在读文件之前先调 `reset_all_tasks`（`:2081`）
+做 `memset(g_tasks)`+`g_task_count=0`+`g_next_id=1`，随后 `fopen` 失败返回 -1 也不影响清空已经发生。
+读数行印 `清场残留/基线条数/清空轮数`，清不干净就让 D4 红并说明为什么红。
+
+**四、两条没牙的判据被变异当场抓出来**（都是我的测具错，不是产品的错）：
+① D2 原判据 `告警含「拖放」`——我先跑了一枚把守卫写成 `one.length() >= 0` 的**坏变异**（语义反转成"全拒"），
+D1/D3/D4/D5 一起红、**D2 反而绿**：它接受"根本没开对话框"当"有界"的替代，而那条 warn 来自别处。
+改成钉 R2 自己那句「内容过长」后，MUT-F（只摘上限）与 MUT-G（保留拒收、只摘 warn）**各自只红 D2**。
+② D5 第一版判据"有一行含该 URL"——`TaskController::internalAddTask` 自己就
+`Log::info("添加任务 #N (队列:…): url")`（`task_controller.cpp:228`），摘掉 `dropEvent` 里的逐条日志后 D5 仍然绿
+（实测 info 行数=5、三条 URL 全被控制器那侧命中）。改成只认 **dropEvent 自己的前缀** + **去重 id 计数**才有区分度。
+
+**五、七枚变异**（详表与原文在 `docs/drag-a4-u2/README.md`，每面带自己的 `exe_sha12`）：
+MUT-A U2 回退成只取第一条 ⇒ D4+D5 红；MUT-B 批量支两种日志都摘 ⇒ 只 D5 红；MUT-C 只摘成功日志 ⇒ 只 D5 红；
+MUT-F 只摘 R2 逐条上限 ⇒ 只 D2 红（`交给对话框的长度=32767`＝修复前真实形状）；MUT-G 保留拒收只摘其 warn ⇒ 只 D2 红；
+MUT-H 只摘批次汇总行 ⇒ 只 D5 红。**作废一枚**：首版 R2 变异写成 `>= 0` 把守卫反转，不是受控变异，
+但它值回票价——正是它暴露了 D2 没牙。**未被变异证明的护栏**（不占功）：D4 的 `乱序探针 可查=` 只在残留≠0 时有信息量，
+属诊断行；`本次取消=` 无断言依赖。
+
+**六、台账口径**：`coverage-audit-1006.md:22`（A4 记 A）与 `:61`（拖放整体记"否"）的矛盾按两层口径消解——
+**A=现实影响的行为缺陷**（R2/R3 已修、G1 未修随 A1）、**B=验证完整性缺口**（U1 暂缓、U2 覆盖侧由 D4/D5 补上）、
+**已查不是缺陷**（R1、C1、C2、file:// 主护栏）。⑦ 台账本体不改写（那是一手记录），订正只落在
+`docs/drag-audit-1006.md` §2/§4。**R1 定案为"已查不是缺陷"、不改代码**：下游 `NewTaskDialog::onAccepted` 用
+`QUrl(StrictMode)` 只放过 http/https+host 非空（`new_task_dialog.cpp:350-352`）、aria2/magnet（:346）、
+磁盘真实存在且 `.torrent` 结尾（:353-354）三支，否则明确弹错并 return（:355-358）；R2 又关掉了唯一的物理伤害面
+（MB 级字符串进单行编辑器）；而在上游收窄谓词会把 magnet/ftp/.torrent 三条合法支路在"能不能放手"这步砍掉，
+等于把下游的分类复制一份到上游、两处规则从此必须同步。**边界**：这条定案只证到"accept 之后不会造成错误下载或卡界面"，
+没证"任何文本拖进来体验都好"（会弹一个错误框，设计态），也没实测过真实桌面文件拖入。
+**U1 标"已登记，待后续"**：D1~D5 已真发 `QDropEvent`，但 U1 原意还含真实桌面文件 `file://` 与跨进程 drop，offscreen 给不了。
+
+**七、名单与门禁**：`IDM_DRAGDROP_PROBE` 断言 3→5（§1.4 表同步），CI 闸门名单不变（模式已在册，无新增）⇒ `TOTAL_PASS` 那个号不动（现算仍 **95**，阈值 ≥70）。
+本轮 src/ 改动只落在 `MainWindow::dropEvent` 一个函数体内（`git diff -U0` 十个 hunk 全在该函数），
+零诊断残留；所有变异产物已从盘上撤下并与开工前的 U2 备份逐字节同哈希（`1e846630adc6`）。
