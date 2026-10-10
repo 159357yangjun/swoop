@@ -12,6 +12,8 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
   const events = { created: listener(), message: listener() };
   const calls = { native: 0, cancel: [], erase: [], dialogs: 0, nativeActions: [] };
   const local = {};
+  const SESSION_A = '11111111-1111-4111-8111-111111111111';
+  let guiSession = SESSION_A;
   const item = { id: 73, tabId, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
   if (omitTabId) delete item.tabId;
   const noop = listener();
@@ -23,9 +25,12 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
         calls.native++;
         calls.nativeActions.push(_payload.action);
         queueMicrotask(() => callback(_payload.action === 'get_task_status'
-          ? { success: true, taskId: _payload.taskId, state: 4,
-              stateText: '失败', error: 'HTTP 404', message: '任务失败' }
+          ? (_payload.sessionId === guiSession
+              ? { success: true, taskId: _payload.taskId, sessionId: guiSession, state: 4,
+                  stateText: '失败', error: 'HTTP 404', message: '任务失败' }
+              : { success: false, message: 'old desktop session' })
           : { success: accepted, taskId: accepted ? acceptedTaskId : null,
+              sessionId: accepted ? guiSession : null,
               message: accepted ? 'accepted' : 'failed' }));
       },
       sendMessage() { return Promise.resolve(); }
@@ -70,6 +75,7 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
                      { filename: 'background.js' });
   return {
     item, calls,
+    setGuiSession(value) { guiSession = value; },
     async message(msg, fromPopup = true, overrideSender = null) {
       return new Promise(resolve => {
         const sender = overrideSender || (fromPopup
@@ -312,4 +318,17 @@ test('manual send without task ID is explicitly not tracked', async () => {
   assert.equal(result.taskId, null);
   const history = await h.message({ action: 'getRecentHandoffs' });
   assert.equal(history.items.length, 0);
+});
+
+test('desktop process restart rejects reused integer ID from old handoff', async () => {
+  const h = make();
+  await h.start();
+  const original = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(original.items[0].taskId, 47);
+  assert.equal(original.items[0].sessionId, '11111111-1111-4111-8111-111111111111');
+  h.setGuiSession('22222222-2222-4222-8222-222222222222');
+  const status = await h.message({ action: 'getHandoffStatus', taskId: 47 });
+  assert.equal(status.success, false);
+  assert.match(status.message, /old desktop session/);
+  assert.deepEqual(h.calls.erase, []);
 });
