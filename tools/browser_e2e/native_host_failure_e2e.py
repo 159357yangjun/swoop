@@ -115,7 +115,10 @@ def main() -> int:
             task_id = add.get("taskId")
             session_id = add.get("sessionId")
             if add.get("success") is not True or type(task_id) is not int or task_id <= 0:
-                raise AssertionError(f"GUI failed to return a real accepted task ID: {add!r}")
+                raise AssertionError(
+                    f"GUI failed to return a real accepted task ID: {add!r}; "
+                    f"GUI process exit code={proc.poll()!r}"
+                )
             if not isinstance(session_id, str) or len(session_id) < 32:
                 raise AssertionError(f"GUI failed to return a session identity: {add!r}")
             print(f"[PASS] real Native Host accepted exactly one task id={task_id} session_token_present")
