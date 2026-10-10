@@ -316,8 +316,9 @@ jobs:
           # 「IPC server 已启动，监听 idm-next-ipc」和「IPC 请求: activate → 成功」两句话
           # 就是分诊依据：两句都有 = 交接成功；只有前一句 = 请求根本没被读走。
           $env:QT_LOGGING_TO_CONSOLE = '1'
-          $logDir = Join-Path $env:TEMP ('idm-ipc-' + [guid]::NewGuid().ToString('N'))
-          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          # Initialized separately for each repeated race. Keep one immutable
+          # installer/dist executable across all runs for comparable evidence.
+          $logDir = $null
 
           function Get-StreamTail([string]$path) {
             if (-not (Test-Path -LiteralPath $path)) { return '<没有输出文件>' }
@@ -424,8 +425,17 @@ jobs:
             return [pscustomobject]@{ Name = $Tag; Proc = $p; Out = $out; Err = $err }
           }
 
-          # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
-          $t0 = Get-Date
+          # Hard-gate three independent starts of the *same packaged binary*.
+          # 1st = cold post-packaging start, 2nd/3rd = fresh process starts.
+          # Original 20s observation, 15s startup readiness, 5s steady-state,
+          # exit-code checks, and single-send behavior remain unmodified.
+          for ($trial = 1; $trial -le 3; $trial++) {
+            $logDir = Join-Path $env:TEMP ('idm-ipc-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+            $script:timings = @()
+            Write-Host "STARTUP_RACE_REPETITION=$trial/3 (same packaged binary)"
+            # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
+            $t0 = Get-Date
           $first = Start-Logged 'first'
           $second = Start-Logged 'second'
           $byId = @{}
@@ -516,10 +526,13 @@ jobs:
             }
             Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
           }
+          Write-Host "STARTUP_RACE_REPETITION=$trial/3 PASS"
+          }
 
       - name: Real Native Host and GUI 404 failure status
         shell: pwsh
         run: |
+          # Integration gate: all three strict startup races above must pass first.
           # Exercises packaged idm-next.exe + idm-next-host.exe + actual HTTP
           # error path, with one-shot add (no duplicate-risk retry).
           # Not a browser toolbar UI test: that is separately gated above.
