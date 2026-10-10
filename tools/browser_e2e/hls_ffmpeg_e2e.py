@@ -28,6 +28,14 @@ from native_host_failure_e2e import host_call
 class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append(self.path)
+        if self.path.split("?", 1)[0] == "/gated.m3u8":
+            with self.server.playlist_lock:
+                self.server.playlist_requests += 1
+                first = self.server.playlist_requests == 1
+            if first:
+                self.server.playlist_requested.set()
+                if not self.server.playlist_release.wait(timeout=25):
+                    raise AssertionError("Gated HLS manifest was not released")
         if self.path.split("?", 1)[0] == "/delayed/seg001.ts":
             self.server.slow_segment_requested.set()
             if not self.server.slow_segment_release.wait(timeout=25):
@@ -74,6 +82,11 @@ def build_fixture(ffmpeg: str, root: Path) -> None:
     (root / "late.m3u8").write_text(
         "\n".join(("delayed/" + line if line.startswith("seg") and
                     line.endswith(".ts") else line) for line in playlist.splitlines()) + "\n",
+        encoding="utf-8")
+    high_text = (root / "high" / "index.m3u8").read_text(encoding="utf-8")
+    (root / "gated.m3u8").write_text(
+        "\n".join(("high/" + line if line.startswith("seg") and
+                    line.endswith(".ts") else line) for line in high_text.splitlines()) + "\n",
         encoding="utf-8")
     (root / "broken.m3u8").write_text(
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n"
@@ -224,6 +237,10 @@ def main() -> int:
         server.requests = []
         server.slow_segment_requested = threading.Event()
         server.slow_segment_release = threading.Event()
+        server.playlist_lock = threading.Lock()
+        server.playlist_requests = 0
+        server.playlist_requested = threading.Event()
+        server.playlist_release = threading.Event()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -369,6 +386,29 @@ def main() -> int:
             if list(output_dir.rglob(".idm-next-hls-*")):
                 raise AssertionError("Canceled HLS left partial FFmpeg stages")
             print("[PASS] HLS cancel: state remains canceled after stale completion, no final MP4")
+
+            # Hold the first manifest until pause/resume invalidates its
+            # generation. The resumed download must ignore that old reply.
+            gated_id, gated_session = submit_once(
+                host, dist, base + "/gated.m3u8", "manifest-restart.mp4", output_dir)
+            try:
+                if not server.playlist_requested.wait(timeout=20):
+                    raise AssertionError("Gated manifest request did not arrive")
+                cli_control(gui, dist, "pause", gated_id)
+                poll_state(host, dist, gated_id, gated_session, 2)
+                cli_control(gui, dist, "start", gated_id)
+            finally:
+                server.playlist_release.set()
+            gated_state = poll_terminal(host, dist, gated_id, gated_session)
+            if gated_state.get("state") != 3:
+                raise AssertionError(f"Stale manifest callback corrupted restart: {gated_state!r}")
+            inspect_mp4(ffprobe, ffmpeg, output_dir, "manifest-restart.mp4", 320, 192,
+                        public / "high" / "index.m3u8")
+            if server.playlist_requests < 2:
+                raise AssertionError("Interrupted manifest was never refetched")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Manifest restart left staging files")
+            print("[PASS] HLS stale pre-manifest response ignored after resume")
 
             missing_id, missing_session = submit_once(
                 host, dist, base + "/broken.m3u8",
