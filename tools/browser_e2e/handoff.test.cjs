@@ -54,11 +54,11 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
                      { filename: 'background.js' });
   return {
     item, calls,
-    async message(msg, fromPopup = true) {
+    async message(msg, fromPopup = true, overrideSender = null) {
       return new Promise(resolve => {
-        const sender = fromPopup
-          ? { id: 'mock-extension' } // real popup: sender.url may be absent
-          : { id: 'mock-extension', tab: { id: 19 }, url: 'https://example.test/page' };
+        const sender = overrideSender || (fromPopup
+          ? { id: 'mock-extension' } // toolbar popup: optional sender.url, no tab
+          : { id: 'mock-extension', tab: { id: 19 }, url: 'https://example.test/page' });
         const keep = events.message.fn(msg, sender, resolve);
         assert.equal(keep, true);
       });
@@ -217,4 +217,14 @@ test('popup takeover rejects browser content-script senders even from our extens
   assert.equal(result.success, false);
   assert.equal(h.calls.native, 0);
   assert.deepEqual(h.calls.cancel, []);
+});
+
+test('verified popup.html opened in extension tab can request explicit takeover', async () => {
+  const h = make({ confirm: true, omitTabId: true });
+  const trusted = { id: 'mock-extension', tab: { id: 77 },
+                    url: 'chrome-extension://mock-extension/popup.html' };
+  const result = await h.message({ action: 'takeoverBrowserDownload', id: 73 }, true, trusted);
+  assert.equal(result.success, true);
+  assert.equal(h.calls.native, 1);
+  assert.deepEqual(h.calls.cancel, [73]);
 });
