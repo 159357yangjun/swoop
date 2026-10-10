@@ -88,7 +88,9 @@ static void traceForward(const char* stage, const QLocalSocket& socket,
     // A GUI-subsystem .exe can redirect stderr to CONOUT$ even when CI supplied
     // file handles; opt-in tracing to a dedicated per-trial file survives this.
     const QByteArray err = socket.errorString().toUtf8();
-    const QByteArray line = QByteArray::asprintf(
+    char textBuffer[1024];
+    const int formatted = std::snprintf(
+        textBuffer, sizeof(textBuffer),
         "FORWARD_TRACE stage=%s elapsed_ms=%lld bytes=%lld"
         " pending=%lld available=%lld state=%d error=%d"
         " wait=%d error_text=%s\n",
@@ -98,6 +100,8 @@ static void traceForward(const char* stage, const QLocalSocket& socket,
         static_cast<long long>(socket.bytesAvailable()),
         static_cast<int>(socket.state()), static_cast<int>(socket.error()),
         waitResult, err.constData());
+    if (formatted < 0) return;
+    const QByteArray line(textBuffer);
 
     if (consoleTrace) {
         std::fwrite(line.constData(), 1, static_cast<size_t>(line.size()), stderr);
