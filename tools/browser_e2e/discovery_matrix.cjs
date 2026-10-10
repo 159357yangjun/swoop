@@ -168,22 +168,29 @@ async function runTrial(exe, label, index, base) {
     // Prove that a real MV3 worker can stop and be reactivated, not merely
     // send a message to an already-running worker.
     const cdp = await context.newCDPSession(popup);
+    const workerUrl = 'chrome-extension://' + ID + '/background.js';
+    let activeVersion = null;
+    let sawStopped = false;
+    let sawRestarted = false;
+    cdp.on('ServiceWorker.workerVersionUpdated', message => {
+      for (const v of message.versions || []) {
+        if (v.scriptURL !== workerUrl) continue;
+        if (v.runningStatus === 'running') {
+          activeVersion = v.versionId;
+          if (sawStopped) sawRestarted = true;
+        }
+        if (v.runningStatus === 'stopped') sawStopped = true;
+      }
+    });
     await cdp.send('ServiceWorker.enable');
-    const before = await waitFor(async () =>
-      context.serviceWorkers().find(w => w.url().startsWith('chrome-extension://' + ID + '/')),
-      name + ' original service worker');
-    await before.evaluate(() => { globalThis.__discoveryInstanceMarker = 'pre-stop'; });
-    await cdp.send('ServiceWorker.stopWorker', { scopeURL: 'chrome-extension://' + ID + '/' });
-    await waitFor(async () => {
-      try { await before.evaluate(() => 'alive'); return false; } catch { return true; }
-    }, name + ' service worker stop');
+    await waitFor(() => activeVersion, name + ' original running service worker');
+    // Current CDP stopWorker requires versionId (NOT scopeURL; scopeURL is
+    // used by startWorker). Require an actual stopped-state event as proof.
+    await cdp.send('ServiceWorker.stopWorker', { versionId: activeVersion });
+    await waitFor(() => sawStopped, name + ' service worker stopped-state event');
     const wake = await openScenario('wake', 'wake-' + index);
     await verify(wake, ['/early.mp4']);
-    const after = await waitFor(async () =>
-      context.serviceWorkers().find(w => w.url().startsWith('chrome-extension://' + ID + '/')),
-      name + ' restarted service worker');
-    assert.equal(await after.evaluate(() => globalThis.__discoveryInstanceMarker),
-                 undefined, name + ' old worker survived stop');
+    await waitFor(() => sawRestarted, name + ' service worker restarted-state event');
 
     // DOM mutation without HTTP fetch must be detected by the content script.
     const dynamic = await openScenario('dynamic', 'dynamic-' + index);
