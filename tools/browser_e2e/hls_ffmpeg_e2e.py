@@ -132,6 +132,7 @@ def cli_control(gui: Path, dist: Path, action: str, task_id: int) -> None:
     # remains a hard failure; callers MUST then confirm the exact task state
     # through the separate real Native Host / session-bound task_status API.
     run([str(gui), "--cli", action, str(task_id)], timeout=15)
+    print(f"[CLI] {action} task={task_id} rc=0; verify via Native Host task_status")
 
 
 def poll_state(host: Path, dist: Path, task_id: int, session: str,
