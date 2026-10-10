@@ -640,11 +640,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.action === 'takeoverBrowserDownload') {
         // 执行只能来自扩展自己的 popup，不接受网页内容脚本指定要取消的 ID。
-        // MessageSender.url is optional for extension pages; do not require it.
-        // Internal popup messages carry our extension ID and no sender.tab.
-        // Content scripts carry sender.tab and cannot take over a different download.
-        if (sender.tab || sender.id !== chrome.runtime.id ||
-            !Number.isSafeInteger(msg.id) || msg.id < 0) {
+        // The toolbar popup may have no sender.tab. The E2E harness (and a user
+        // opening popup.html in an extension-owned tab) DO have sender.tab.
+        // Authenticate either the exact extension popup URL, or the extension's
+        // own no-tab sender. A webpage content script has a different URL.
+        const trustedPopup = sender.url === chrome.runtime.getURL('popup.html') ||
+            (!sender.tab && sender.id === chrome.runtime.id);
+        if (!trustedPopup || !Number.isSafeInteger(msg.id) || msg.id < 0) {
             sendResponse({ success: false, message: '无效的浏览器下载接管请求' });
             return false;
         }
