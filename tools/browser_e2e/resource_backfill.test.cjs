@@ -105,7 +105,8 @@ test('concurrent per-tab resources are not overwritten by storage.session read-m
     // committed writes while the fifteenth is still pending. Wait for actual
     // completion within a bounded 3-second budget; still require ALL 15.
     let list = [];
-    const deadline = Date.now() + 3000;
+    const waitStartedAt = Date.now();
+    const deadline = waitStartedAt + 3000;
     do {
         list = h.resources.get('tab_17') || [];
         if (list.length === 15) break;
@@ -113,6 +114,8 @@ test('concurrent per-tab resources are not overwritten by storage.session read-m
     } while (Date.now() < deadline);
     assert.equal(list.length, 15, 'lost URL from concurrent storage writes');
     assert.equal(new Set(list.map(r => r.url)).size, 15);
+    console.log('[PASS] 15 serialized tab resource writes completed within',
+                Date.now() - waitStartedAt, 'ms');
 });
 
 test('URL and headers share one entry, enhancing MIME and length without duplicates', async () => {
