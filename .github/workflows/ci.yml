@@ -555,6 +555,25 @@ jobs:
           python tools/browser_e2e/native_host_failure_e2e.py --dist installer/dist
           if ($LASTEXITCODE -ne 0) { throw 'Real Native Host 404 failure E2E failed' }
 
+      - name: Real HLS/FFmpeg final MP4 and failure E2E
+        shell: pwsh
+        run: |
+          # Test an actual packaged GUI + Native Host, local HLS server, and
+          # FFmpeg-generated TS segments. Never accept a missing media toolkit.
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or
+              -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed' }
+            $env:PATH = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                        [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:PATH
+          }
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or
+              -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            throw 'FFmpeg/FFprobe still missing after explicit setup'
+          }
+          python tools/browser_e2e/hls_ffmpeg_e2e.py --dist installer/dist
+          if ($LASTEXITCODE -ne 0) { throw 'Real packaged HLS/FFmpeg E2E failed' }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
