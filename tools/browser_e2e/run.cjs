@@ -63,10 +63,23 @@ async function runOne(exe, label, mode, baseUrl) {
                                       confirmEnabled: m === 'no-source-confirm' || m === 'manual-dismiss' });
     }, mode);
 
-    const worker = context.serviceWorkers().find(w => w.url().startsWith('chrome-extension://' + ID + '/'))
-      || await context.waitForEvent('serviceworker', {
-        predicate: w => w.url().startsWith('chrome-extension://' + ID + '/'), timeout: 12000
-      });
+    // Service workers can be suspended/restarted between browser scenarios.
+    // A target URL alone is not proof that the extension APIs are initialized.
+    let worker = null;
+    for (let attempt = 0; attempt < 40 && !worker; attempt++) {
+      await popup.evaluate(() => new Promise(resolve => chrome.runtime.sendMessage(
+        { action: 'getIntercept' }, response => resolve(response || null))));
+      for (const candidate of context.serviceWorkers()) {
+        if (!candidate.url().startsWith('chrome-extension://' + ID + '/')) continue;
+        try {
+          const ready = await candidate.evaluate(() => typeof chrome !== 'undefined'
+            + && !!(chrome.runtime && chrome.runtime.sendNativeMessage));
+          if (ready) { worker = candidate; break; }
+        } catch { /* target was replaced: retry after waking the extension */ }
+      }
+      if (!worker) await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    assert.ok(worker, 'extension service worker never exposed nativeMessaging API');
     // Instrument only the native API boundary. For "offline" we call the REAL native API,
     // which must return a missing-host error on a clean CI runner. The delayed-accept mode
     // simulates the host reply to exercise the browser-finishes-first race, not host IPC.
