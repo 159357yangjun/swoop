@@ -135,3 +135,19 @@ test('headers alone may insert media when URL event was missed; text is excluded
     assert.equal(list.length, 1);
     assert.equal(list[0].url, 'https://media.example/file-no-extension');
 });
+
+test('plain-text URL with query ending in .mp4 is not mistaken for media', async () => {
+    const h = backgroundHarness();
+    const bait = 'https://site.example/not-media.txt?token=cold&next=video.mp4';
+    h.before({ tabId: 27, url: bait, initiator: 'https://site.example' });
+    h.headers({ tabId: 27, url: bait, responseHeaders: [
+        { name: 'Content-Type', value: 'text/plain' }
+    ] });
+    // Still detect the genuine video next to the negative control.
+    const real = 'https://site.example/early.mp4?token=cold';
+    h.before({ tabId: 27, url: real, initiator: 'https://site.example' });
+    await delay(90);
+    const list = h.resources.get('tab_27') || [];
+    assert.equal(list.length, 1, 'query-string bait was misclassified as a download');
+    assert.equal(list[0].url, real);
+});
