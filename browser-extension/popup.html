@@ -85,6 +85,16 @@
         <div id="browserCapturesList"></div>
     </section>
 
+    <!-- 最近转交到桌面端的任务；状态按 taskId 向当前 GUI 实时查询。 -->
+    <section class="browser-captures" id="recentHandoffs" hidden>
+        <div class="browser-captures-head">
+            <strong>最近转交 · IDM Next</strong>
+            <button type="button" id="refreshHandoffsBtn" class="ibtn" title="刷新转交历史">↻</button>
+        </div>
+        <p>“已接收”不代表文件完成。点击“查看状态”获取桌面端当前结果；失败请在桌面端重试。</p>
+        <div id="recentHandoffsList"></div>
+    </section>
+
     <!-- 资源列表 -->
     <div class="list" id="resourceList"></div>
 
