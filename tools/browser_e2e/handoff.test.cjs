@@ -56,8 +56,9 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
     item, calls,
     async message(msg, fromPopup = true) {
       return new Promise(resolve => {
-        const sender = fromPopup ? { url: 'chrome-extension://mock-extension/popup.html' }
-                                 : { tab: { id: 19 }, url: 'https://example.test/page' };
+        const sender = fromPopup
+          ? { id: 'mock-extension' } // real popup: sender.url may be absent
+          : { id: 'mock-extension', tab: { id: 19 }, url: 'https://example.test/page' };
         const keep = events.message.fn(msg, sender, resolve);
         assert.equal(keep, true);
       });
@@ -205,6 +206,15 @@ test('stale or finished download cannot be transferred from popup', async () => 
   const h = make({ state: 'complete', confirm: true, omitTabId: true });
   const res = await h.message({ action: 'takeoverBrowserDownload', id: 73 });
   assert.equal(res.success, false);
+  assert.equal(h.calls.native, 0);
+  assert.deepEqual(h.calls.cancel, []);
+});
+
+
+test('popup takeover rejects browser content-script senders even from our extension', async () => {
+  const h = make({ confirm: true, omitTabId: true });
+  const result = await h.message({ action: 'takeoverBrowserDownload', id: 73 }, false);
+  assert.equal(result.success, false);
   assert.equal(h.calls.native, 0);
   assert.deepEqual(h.calls.cancel, []);
 });
