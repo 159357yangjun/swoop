@@ -143,7 +143,9 @@ def main() -> int:
                     # Verify the network layer's real status code survives engine → GUI → host.
                     if "404" not in last["error"]:
                         raise AssertionError(f"HTTP 404 reason was lost or replaced: {last!r}")
-                    print("[PASS] real engine reports HTTP 404 reason through Native Host")
+                    if (Path(scratch) / "not-found.zip").exists():
+                        raise AssertionError("HTTP 404 produced a falsely completed final file")
+                    print("[PASS] real engine reports HTTP 404 reason through Native Host; no final file")
                     return 0
                 if last.get("success") is True and last.get("state") == 3:
                     raise AssertionError(f"HTTP 404 incorrectly became a completed download: {last!r}")
