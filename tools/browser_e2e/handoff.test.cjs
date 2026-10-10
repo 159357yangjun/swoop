@@ -17,6 +17,7 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
   const chrome = {
     runtime: {
       id: 'mock-extension', lastError: null, onInstalled: noop, onMessage: events.message,
+      getURL(path) { return 'chrome-extension://mock-extension/' + path; },
       sendNativeMessage(_host, _payload, callback) {
         calls.native++;
         queueMicrotask(() => callback({ success: accepted, message: accepted ? 'accepted' : 'failed' }));
@@ -29,7 +30,11 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
     },
     downloads: {
       onCreated: events.created,
-      async search({ id }) { return id === item.id ? [{ ...item }] : []; },
+      async search(query) {
+        if (Object.hasOwn(query, 'id')) return query.id === item.id ? [{ ...item }] : [];
+        if (query.state === 'in_progress') return item.state === 'in_progress' ? [{ ...item }] : [];
+        return [{ ...item }];
+      },
       cancel(id, callback) { calls.cancel.push(id); callback(); },
       erase({ id }, callback) { calls.erase.push(id); callback(); }
     },
@@ -49,6 +54,14 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
                      { filename: 'background.js' });
   return {
     item, calls,
+    async message(msg, fromPopup = true) {
+      return new Promise(resolve => {
+        const sender = fromPopup ? { url: 'chrome-extension://mock-extension/popup.html' }
+                                 : { tab: { id: 19 }, url: 'https://example.test/page' };
+        const keep = events.message.fn(msg, sender, resolve);
+        assert.equal(keep, true);
+      });
+    },
     async start() {
       await events.created.fn(item);
       await new Promise(resolve => setImmediate(resolve));
@@ -142,4 +155,56 @@ test('actual Chrome DownloadItem omits tabId: confirmation must fail closed', as
   assert.equal(h.calls.native, 0);
   assert.deepEqual(h.calls.cancel, []);
   assert.deepEqual(h.calls.erase, []);
+});
+
+test('live browser-download list exposes only eligible in-progress items', async () => {
+  const h = make({ confirm: true, omitTabId: true });
+  const res = await h.message({ action: 'getBrowserDownloads' });
+  assert.equal(res.success, true);
+  assert.equal(res.items.length, 1);
+  assert.equal(res.items[0].id, 73);
+  const completed = make({ state: 'complete' });
+  const done = await completed.message({ action: 'getBrowserDownloads' });
+  assert.equal(done.items.length, 0);
+});
+
+test('explicit popup takeover accepts once before canceling browser download', async () => {
+  const h = make({ confirm: true, omitTabId: true });
+  const res = await h.message({ action: 'takeoverBrowserDownload', id: 73 });
+  assert.equal(res.success, true);
+  assert.equal(res.browserCanceled, true);
+  assert.equal(h.calls.native, 1);
+  assert.deepEqual(h.calls.cancel, [73]);
+  assert.deepEqual(h.calls.erase, [73]);
+});
+
+test('explicit popup takeover failure preserves original browser download', async () => {
+  const h = make({ accepted: false, confirm: true, omitTabId: true });
+  const res = await h.message({ action: 'takeoverBrowserDownload', id: 73 });
+  assert.equal(res.success, false);
+  assert.deepEqual(h.calls.cancel, []);
+  assert.deepEqual(h.calls.erase, []);
+});
+
+test('content script cannot forge a popup takeover ID', async () => {
+  const h = make({ confirm: true, omitTabId: true });
+  // This rejection happens synchronously, unlike the valid async popup path.
+  const h2 = make({ confirm: true, omitTabId: true });
+  const denial = await new Promise(resolve => {
+    // Source verification is explicit in the product handler, not in a UI mock.
+    const fake = { action: 'takeoverBrowserDownload', id: 73 };
+    // exercise via harness method with tab-backed sender; it replies immediately
+    h2.message(fake, false).then(resolve);
+  });
+  assert.equal(denial.success, false);
+  assert.equal(h2.calls.native, 0);
+  assert.deepEqual(h2.calls.cancel, []);
+});
+
+test('stale or finished download cannot be transferred from popup', async () => {
+  const h = make({ state: 'complete', confirm: true, omitTabId: true });
+  const res = await h.message({ action: 'takeoverBrowserDownload', id: 73 });
+  assert.equal(res.success, false);
+  assert.equal(h.calls.native, 0);
+  assert.deepEqual(h.calls.cancel, []);
 });
