@@ -332,7 +332,15 @@
         document.querySelectorAll('a[href]').forEach(a => {
             const href = a.href;
             if (!href || foundUrls.has(href)) return;
-            if (!pattern.test(href)) return;
+            // The query may contain a different extension (e.g. text.txt?next=video.mp4).
+            // Classify HTTP(S) anchors by pathname, not by incidental parameters.
+            let candidate = href;
+            try {
+                const parsed = new URL(href, window.location.href);
+                if (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+                    candidate = parsed.pathname;
+            } catch { /* let existing URL validation handle bad links */ }
+            if (!pattern.test(candidate)) return;
 
             foundUrls.add(href);
             const text = a.textContent.trim();

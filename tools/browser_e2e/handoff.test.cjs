@@ -108,7 +108,7 @@ test('host failure never cancels browser download', async () => {
 });
 test('host acceptance retires only in-progress original', async () => {
   const h = make(); await h.start();
-  assert.deepEqual(h.calls.cancel, [73]); assert.deepEqual(h.calls.erase, [73]);
+  assert.deepEqual(h.calls.cancel, [73]); assert.deepEqual(h.calls.erase, []);
 });
 test('completed browser download stays intact', async () => {
   const h = make({ state: 'complete' }); await h.start();
@@ -198,7 +198,7 @@ test('explicit popup takeover accepts once before canceling browser download', a
   assert.equal(res.browserCanceled, true);
   assert.equal(h.calls.native, 1);
   assert.deepEqual(h.calls.cancel, [73]);
-  assert.deepEqual(h.calls.erase, [73]);
+  assert.deepEqual(h.calls.erase, []);
 });
 
 test('explicit popup takeover failure preserves original browser download', async () => {
@@ -330,5 +330,16 @@ test('desktop process restart rejects reused integer ID from old handoff', async
   const status = await h.message({ action: 'getHandoffStatus', taskId: 47 });
   assert.equal(status.success, false);
   assert.match(status.message, /old desktop session/);
+  assert.deepEqual(h.calls.erase, []);
+});
+
+test('plain text download query bait never triggers automatic browser takeover', async () => {
+  const h = make({ intercept: true });
+  h.item.url = 'https://site.example/notes.txt?token=a&next=video.mp4';
+  h.item.filename = 'notes.txt';
+  h.item.mime = 'text/plain';
+  await h.start();
+  assert.equal(h.calls.native, 0, 'query bait must not reach Native Host');
+  assert.deepEqual(h.calls.cancel, []);
   assert.deepEqual(h.calls.erase, []);
 });
