@@ -459,7 +459,7 @@ jobs:
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
             $env:IDM_FORWARD_TRACE_FILE = Join-Path $logDir 'forward.trace'
             # Distinguish no IPC activity from a trace-file creation failure.
-            New-Item -ItemType File -LiteralPath $env:IDM_FORWARD_TRACE_FILE -Force | Out-Null
+            New-Item -ItemType File -Path $env:IDM_FORWARD_TRACE_FILE -Force | Out-Null
             $script:timings = @()
             Write-Host "STARTUP_RACE_REPETITION=$trial/3 (same packaged binary)"
             # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
