@@ -113,6 +113,28 @@ def submit_once(host: Path, dist: Path, url: str, name: str,
     return task_id, session
 
 
+def cli_control(gui: Path, dist: Path, action: str, task_id: int) -> None:
+    result = run([str(gui), "--cli", action, str(task_id)], timeout=15)
+    if "任务" not in (result.stdout + result.stderr):
+        raise AssertionError(f"CLI {action} did not acknowledge task {task_id}: "
+                             f"{result.stdout!r} {result.stderr!r}")
+
+
+def poll_state(host: Path, dist: Path, task_id: int, session: str,
+               desired: int, timeout: float = 20) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict = {}
+    while time.monotonic() < deadline:
+        last = host_call(host, dist, {
+            "action": "get_task_status", "taskId": task_id,
+            "sessionId": session
+        }, timeout=8)
+        if (last.get("success") is True and last.get("state") == desired):
+            return last
+        time.sleep(0.3)
+    raise AssertionError(f"Expected state {desired} for task {task_id}, got {last!r}")
+
+
 def poll_terminal(host: Path, dist: Path, task_id: int,
                   session: str, timeout: float = 85) -> dict:
     end = time.monotonic() + timeout
@@ -291,6 +313,53 @@ def main() -> int:
             if hashlib.sha256(late.read_bytes()).hexdigest() != late_sha:
                 raise AssertionError("Late-created user file was overwritten")
             print("[PASS] late HLS output race preserved original and removed stage")
+
+            # Pause and immediately resume while real FFmpeg is still waiting
+            # on a blocked TS response. The old FFmpeg generation must exit
+            # before restarting, and no old callback may publish/mark failure.
+            server.slow_segment_requested.clear()
+            server.slow_segment_release.clear()
+            paused_id, paused_session = submit_once(
+                host, dist, base + "/late.m3u8", "pause-restart.mp4", output_dir)
+            try:
+                if not server.slow_segment_requested.wait(timeout=20):
+                    raise AssertionError("Paused FFmpeg never requested gated segment")
+                cli_control(gui, dist, "pause", paused_id)
+                poll_state(host, dist, paused_id, paused_session, 2)
+                if list(output_dir.rglob("pause-restart.mp4")):
+                    raise AssertionError("Paused HLS unexpectedly published a final file")
+                cli_control(gui, dist, "start", paused_id)
+            finally:
+                server.slow_segment_release.set()
+            paused_final = poll_terminal(host, dist, paused_id, paused_session)
+            if paused_final.get("state") != 3:
+                raise AssertionError(f"Rapid pause/resume failed to complete: {paused_final!r}")
+            inspect_mp4(ffprobe, ffmpeg, output_dir, "pause-restart.mp4", 320, 192,
+                        public / "high" / "index.m3u8")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Pause/resume left old FFmpeg stages behind")
+            print("[PASS] HLS pause→immediate resume: one completed MP4, correct frames, no stale stages")
+
+            # Cancel during active segment I/O; a canceled old callback must
+            # never turn this task into FAILED or COMPLETED after cancellation.
+            server.slow_segment_requested.clear()
+            server.slow_segment_release.clear()
+            cancel_id, cancel_session = submit_once(
+                host, dist, base + "/late.m3u8", "cancel-inflight.mp4", output_dir)
+            try:
+                if not server.slow_segment_requested.wait(timeout=20):
+                    raise AssertionError("Canceled FFmpeg never requested gated segment")
+                cli_control(gui, dist, "cancel", cancel_id)
+                poll_state(host, dist, cancel_id, cancel_session, 5)
+            finally:
+                server.slow_segment_release.set()
+            time.sleep(1.2)
+            poll_state(host, dist, cancel_id, cancel_session, 5)
+            if list(output_dir.rglob("cancel-inflight.mp4")):
+                raise AssertionError("Canceled HLS published a partial final MP4")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Canceled HLS left partial FFmpeg stages")
+            print("[PASS] HLS cancel: state remains canceled after stale completion, no final MP4")
 
             missing_id, missing_session = submit_once(
                 host, dist, base + "/broken.m3u8",
