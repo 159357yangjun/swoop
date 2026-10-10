@@ -438,7 +438,7 @@ void TaskController::restartTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) hd->resume();  // HLS 无断点续传，重新下载
+        if (auto* hd = m_hlsTasks.value(id)) hd->restart(); // Explicit restart after cancel/failure
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
         m_model->updateStatus(id, 1);
         if (m_syncStatus) m_syncStatus();
