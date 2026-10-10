@@ -298,40 +298,59 @@ function flashBadge(success) {
     }, 1500);
 }
 
-// 核心：监听浏览器新建下载，命中规则则取消浏览器默认下载并转发到 IDM Next
+// 浏览器下载属于用户已有的后备通道。桌面端明确接收前，绝不能取消/erase。
+// 注意“任务已添加”不是“文件已经完成”；失败任务仍需在桌面端可见且可重试。
+// 若用户在确认卡片里拒绝/关闭，浏览器原下载继续，不会丢失。
+async function retireBrowserDownloadAfterAccept(item, result) {
+    flashBadge(!!(result && result.success));
+    if (!result || !result.success) return false;
+    try {
+        // 如果浏览器已经下载完成，保留已完成文件；宁可有两份，也不删除数据。
+        const matches = await chrome.downloads.search({ id: item.id });
+        const live = matches.find(x => x.id === item.id && x.url === item.url);
+        if (!live || live.state !== 'in_progress') return false;
+        const canceled = await new Promise(resolve => {
+            chrome.downloads.cancel(item.id, () => resolve(!chrome.runtime.lastError));
+        });
+        if (!canceled) return false;
+        // erase 只清理浏览器下载记录；已确定 cancel 成功才执行。
+        chrome.downloads.erase({ id: item.id }, () => { void chrome.runtime.lastError; });
+        return true;
+    } catch (e) {
+        console.warn('[IDM Next] 已接收任务，但浏览器原下载未能取消:', e);
+        return false;
+    }
+}
+
+// 匹配下载时，先征询/提交给桌面端；只有接受后才转移所有权。
 chrome.downloads.onCreated.addListener(async (item) => {
     const settings = await getInterceptSettings();
     if (!shouldIntercept(item, settings)) return;
-
     const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
-
-    // 取消并抹除浏览器自身的下载（防止重复落盘）
-    chrome.downloads.cancel(item.id, () => { void chrome.runtime.lastError; });
-    chrome.downloads.erase({ id: item.id }, () => { void chrome.runtime.lastError; });
-
-    // 读取“下载前确认”设置：开启则在页面内弹出选择卡片（多种选择）；
-    // 关闭则按原行为静默直接下载（仍无需用户手动添加）。
     const confirm = await getConfirmSettings();
+
     if (confirm.enabled && item.tabId >= 0) {
-        // 尝试在来源标签页注入确认卡片；content script 不可用时回退静默直发
+        // 确认卡片关闭/拒绝时浏览器原下载保持原样。
         chrome.tabs.sendMessage(item.tabId, {
             action: 'showCaptureDialog',
             resource: {
                 url: item.url,
-                filename: filename,
+                filename,
+                browserDownloadId: item.id,
                 type: inferType(item.url),
                 size: (item.fileSize && item.fileSize > 0) ? item.fileSize : -1,
                 initiator: item.url
             }
         }, (resp) => {
-            if (chrome.runtime.lastError) {
-                // 该页面无 content script（如 chrome://、部分特殊页）→ 静默直发
-                sendToIdmNext(item.url, filename).then(r => flashBadge(r.success));
+            if (chrome.runtime.lastError || !resp || resp.ok !== true) {
+                // 注入失败时沿用旧策略：自动发送，但仍要等宿主接收后才取消。
+                sendToIdmNext(item.url, filename).then(result =>
+                    retireBrowserDownloadAfterAccept(item, result));
             }
-            // 若 content script 成功接管，卡片内的“立即下载/加入队列”会自行发 downloadWithOptions
         });
     } else {
-        sendToIdmNext(item.url, filename).then(result => flashBadge(result.success));
+        sendToIdmNext(item.url, filename).then(result =>
+            retireBrowserDownloadAfterAccept(item, result));
     }
 });
 
@@ -687,7 +706,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             saveDir: msg.saveDir || '',
             queued: !!msg.queued,
             format: msg.format || ''
-        }).then(result => sendResponse(result));
+        }).then(async result => {
+            // 只有自动接管确认卡片携带浏览器下载 ID；手动 popup 不触及浏览器任务。
+            if (Number.isSafeInteger(msg.browserDownloadId) && sender.tab && sender.tab.id >= 0) {
+                try {
+                    const matches = await chrome.downloads.search({ id: msg.browserDownloadId });
+                    const original = matches.find(x =>
+                        x.id === msg.browserDownloadId &&
+                        x.url === msg.url &&
+                        x.tabId === sender.tab.id);
+                    if (original) await retireBrowserDownloadAfterAccept(original, result);
+                } catch (e) {
+                    console.warn('[IDM Next] 浏览器原下载保持不变:', e);
+                }
+            }
+            sendResponse(result);
+        });
         return true;
     }
 
