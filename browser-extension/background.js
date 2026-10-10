@@ -303,12 +303,42 @@ function flashBadge(success) {
     }, 1500);
 }
 
+// Only verifiable task IDs may supersede a browser download. A native
+// success without a task ID (e.g. CLI fallback) can never cancel the original.
+let handoffJournalWrite = Promise.resolve();
+function trustedPopupSender(sender) {
+    return sender && (sender.url === chrome.runtime.getURL('popup.html') ||
+        (!sender.tab && sender.id === chrome.runtime.id));
+}
+function rememberHandoff(item, taskId) {
+    handoffJournalWrite = handoffJournalWrite.catch(() => {}).then(async () => {
+        const stored = await chrome.storage.local.get('recentHandoffs');
+        const prior = Array.isArray(stored.recentHandoffs) ? stored.recentHandoffs : [];
+        const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
+        const record = {
+            taskId, browserDownloadId: item.id,
+            filename: filename.slice(0, 180), at: Date.now()
+        };
+        const recentHandoffs = [record, ...prior.filter(x => x.taskId !== taskId)].slice(0, 12);
+        await chrome.storage.local.set({ recentHandoffs });
+        return true;
+    });
+    return handoffJournalWrite.catch(err => {
+        console.warn('[IDM Next] 无法持久化接管记录；浏览器原下载将保留:', err);
+        return false;
+    });
+}
+
 // 浏览器下载属于用户已有的后备通道。桌面端明确接收前，绝不能取消/erase。
 // 注意“任务已添加”不是“文件已经完成”；失败任务仍需在桌面端可见且可重试。
 // 若用户在确认卡片里拒绝/关闭，浏览器原下载继续，不会丢失。
 async function retireBrowserDownloadAfterAccept(item, result) {
     flashBadge(!!(result && result.success));
     if (!result || !result.success) return false;
+    // A positive task ID is required for later status lookup. CLI fallback
+    // currently returns no ID; preserve browser download in that case.
+    if (!Number.isSafeInteger(result.taskId) || result.taskId <= 0) return false;
+    if (!await rememberHandoff(item, result.taskId)) return false;
     try {
         // 如果浏览器已经下载完成，保留已完成文件；宁可有两份，也不删除数据。
         const matches = await chrome.downloads.search({ id: item.id });
@@ -318,8 +348,8 @@ async function retireBrowserDownloadAfterAccept(item, result) {
             chrome.downloads.cancel(item.id, () => resolve(!chrome.runtime.lastError));
         });
         if (!canceled) return false;
-        // erase 只清理浏览器下载记录；已确定 cancel 成功才执行。
-        chrome.downloads.erase({ id: item.id }, () => { void chrome.runtime.lastError; });
+        // Deliberately keep the canceled entry in browser history. Users need
+        // a visible fallback when the desktop task later fails or disappears.
         return true;
     } catch (e) {
         console.warn('[IDM Next] 已接收任务，但浏览器原下载未能取消:', e);
@@ -542,7 +572,12 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                 if (chrome.runtime.lastError) {
                     resolve({ success: false, message: chrome.runtime.lastError.message });
                 } else if (response && response.success) {
-                    resolve({ success: true, message: response.message || '已添加到 IDM Next' });
+                    resolve({
+                        success: true,
+                        taskId: Number.isSafeInteger(response.taskId) && response.taskId > 0
+                            ? response.taskId : null,
+                        message: response.message || '已添加到 IDM Next'
+                    });
                 } else {
                     resolve({ success: false, message: (response && response.message) || 'IDM Next 未响应' });
                 }
@@ -649,8 +684,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // opening popup.html in an extension-owned tab) DO have sender.tab.
         // Authenticate either the exact extension popup URL, or the extension's
         // own no-tab sender. A webpage content script has a different URL.
-        const trustedPopup = sender.url === chrome.runtime.getURL('popup.html') ||
-            (!sender.tab && sender.id === chrome.runtime.id);
+        const trustedPopup = trustedPopupSender(sender);
         if (!trustedPopup || !Number.isSafeInteger(msg.id) || msg.id < 0) {
             sendResponse({ success: false, message: '无效的浏览器下载接管请求' });
             return false;
@@ -668,12 +702,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({
                 success: !!result.success,
                 accepted: !!result.success,
+                taskId: result.taskId || null,
                 browserCanceled: canceled,
                 message: result.success
                     ? (canceled ? 'IDM Next 已接收，浏览器原下载已取消'
                                 : 'IDM Next 已接收；浏览器下载仍在进行或已完成，请检查重复文件')
                     : (result.message || '桌面端未接收；浏览器会继续下载')
             });
+        }).catch(e => sendResponse({ success: false, message: String(e) }));
+        return true;
+    }
+
+    if (msg.action === 'getRecentHandoffs') {
+        if (!trustedPopupSender(sender)) {
+            sendResponse({ success: false, items: [] }); return false;
+        }
+        chrome.storage.local.get('recentHandoffs').then(data =>
+            sendResponse({ success: true,
+                items: Array.isArray(data.recentHandoffs) ? data.recentHandoffs.slice(0, 5) : [] })
+        ).catch(e => sendResponse({ success: false, items: [], message: String(e) }));
+        return true;
+    }
+    if (msg.action === 'getHandoffStatus') {
+        if (!trustedPopupSender(sender) || !Number.isSafeInteger(msg.taskId) || msg.taskId <= 0) {
+            sendResponse({ success: false, message: '无效的任务状态请求' });
+            return false;
+        }
+        chrome.storage.local.get('recentHandoffs').then(data => {
+            const records = Array.isArray(data.recentHandoffs) ? data.recentHandoffs : [];
+            if (!records.some(x => x.taskId === msg.taskId)) {
+                sendResponse({ success: false, message: '任务不在接管历史中' });
+                return;
+            }
+            chrome.runtime.sendNativeMessage(NATIVE_HOST,
+                { action: 'get_task_status', taskId: msg.taskId }, response => {
+                    if (chrome.runtime.lastError) {
+                        sendResponse({ success: false, message: '桌面端无法查询：' + chrome.runtime.lastError.message });
+                    } else {
+                        sendResponse(response && typeof response.success === 'boolean'
+                            ? response : { success: false, message: '桌面端未返回有效任务状态' });
+                    }
+                });
         }).catch(e => sendResponse({ success: false, message: String(e) }));
         return true;
     }
