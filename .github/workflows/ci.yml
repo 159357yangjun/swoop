@@ -18,6 +18,7 @@ jobs:
         run: |
           node --check browser-extension/background.js
           node --check browser-extension/content.js
+          node --check tools/browser_e2e/run.cjs
           node --test tools/browser_e2e/handoff.test.cjs
 
       - name: Real Chrome/Edge takeover fallback (offline native host)
