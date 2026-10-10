@@ -477,14 +477,15 @@ static QJsonObject handleGetStatus()
 // Native status is a fresh GUI snapshot, NOT a promise of completion or
 // a substitute for persisted files. Do not fall back to CLI, which has no
 // authoritative task model when GUI is absent.
-static QJsonObject handleTaskStatus(int taskId)
+static QJsonObject handleTaskStatus(int taskId, const QString& sessionId)
 {
-    if (taskId <= 0)
+    if (taskId <= 0 || sessionId.isEmpty())
         return {{QStringLiteral("success"), false},
                 {QStringLiteral("message"), QStringLiteral("无效任务 ID")}};
     QJsonObject req;
     req["command"] = QStringLiteral("task_status");
     req["taskId"] = taskId;
+    req["sessionId"] = sessionId;
     bool connected = false;
     QJsonObject result = forwardToGui(req, &connected);
     if (!connected)
@@ -534,7 +535,8 @@ int main(int argc, char* argv[])
         } else if (action == QStringLiteral("get_status")) {
             response = handleGetStatus();
         } else if (action == QStringLiteral("get_task_status")) {
-            response = handleTaskStatus(msg.value(QStringLiteral("taskId")).toInt(-1));
+            response = handleTaskStatus(msg.value(QStringLiteral("taskId")).toInt(-1),
+                                        msg.value(QStringLiteral("sessionId")).toString());
         } else {
             response["success"] = false;
             response["message"] = QStringLiteral("未知操作: ") + action;
