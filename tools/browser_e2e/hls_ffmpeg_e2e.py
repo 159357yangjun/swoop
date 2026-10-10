@@ -357,7 +357,7 @@ def main() -> int:
                         public / "high" / "index.m3u8")
             if list(output_dir.rglob(".idm-next-hls-*")):
                 raise AssertionError("Pause/resume left old FFmpeg stages behind")
-            print("[PASS] HLS pause→immediate resume: one completed MP4, correct frames, no stale stages")
+            print("[PASS] HLS pause then immediate resume: one completed MP4, correct frames, no stale stages")
             # Late controls against a completed task must not lie about status
             # or change a validated final output.
             cli_control(gui, dist, "pause", paused_id)
