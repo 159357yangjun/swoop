@@ -35,6 +35,13 @@ async function browsers() {
   return [['Edge', edge], ['Chrome for Testing', installed.executablePath]];
 }
 async function httpServer() {
+  // Keep the explicit-popup fixture in_progress until the click actually
+  // reaches Native Messaging; a timer-only fixture may finish while CI
+  // installs/wakes the MV3 worker, causing an unrelated false-red.
+  const pendingSlow = new Set();
+  const releaseSlowDownloads = () => {
+    for (const sendRest of [...pendingSlow]) sendRest();
+  };
   const server = http.createServer((req, res) => {
     if (req.url === '/early.mp4') {
       res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': payload.length,
@@ -56,17 +63,16 @@ async function httpServer() {
                            'Content-Length': payload.length,
                            'Cache-Control': 'no-store' });
       if (slow) {
-        let at = 0;
-        const timer = setInterval(() => {
-          if (res.destroyed || at >= payload.length) {
-            clearInterval(timer);
-            if (!res.destroyed) res.end();
-            return;
-          }
-          res.write(payload.subarray(at, at + 4096));
-          at += 4096;
-        }, 80);
-        res.on('close', () => clearInterval(timer));
+        res.write(payload.subarray(0, 4096));
+        let released = false;
+        const finish = () => {
+          if (released) return;
+          released = true;
+          pendingSlow.delete(finish);
+          if (!res.destroyed) res.end(payload.subarray(4096));
+        };
+        pendingSlow.add(finish);
+        res.once('close', () => { released = true; pendingSlow.delete(finish); });
       } else res.end(payload);
     } else if (req.url === '/index.html' || req.url === '/slow.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -78,9 +84,9 @@ async function httpServer() {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  return { server, port: server.address().port };
+  return { server, port: server.address().port, releaseSlowDownloads };
 }
-async function runOne(exe, label, mode, baseUrl) {
+async function runOne(exe, label, mode, baseUrl, releaseSlowDownloads) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'idm-next-intercept-e2e-'));
   let context;
   try {
@@ -203,8 +209,12 @@ async function runOne(exe, label, mode, baseUrl) {
         const matches = await chrome.downloads.search({ state: 'in_progress' });
         return matches.map(x => ({ id: x.id, state: x.state, filename: x.filename }));
       });
+      assert.ok(before.length > 0, 'explicit handoff fixture did not stay in_progress');
       await transfer.first().click();
       await popup.waitForTimeout(350);
+      // A real browser download stays live through the handoff click, then
+      // completes by itself after the Native Host rejects the transfer.
+      releaseSlowDownloads();
       const ui = {
         toast: await popup.locator('#toast').innerText(),
         buttons: await transfer.allInnerTexts(),
@@ -279,18 +289,20 @@ async function runOne(exe, label, mode, baseUrl) {
                 ' bytes=' + actual.length + ' sha256=' + actualSha.slice(0, 16) +
                 ' state=' + record.state);
   } finally {
+    releaseSlowDownloads(); // free the download on assertions/errors too
     if (context) await context.close();
     fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 400 });
   }
 }
 (async () => {
   const found = await browsers();
-  const { server, port } = await httpServer();
+  const { server, port, releaseSlowDownloads } = await httpServer();
   console.log('SERVER_READY port=' + port + ' size=' + payload.length + ' sha256=' + sourceSha);
   try {
     for (const [label, exe] of found)
       for (const mode of ['offline', 'no-source-confirm', 'manual-dismiss', 'browser-first', 'popup-takeover-offline', 'media-backfill'])
-        await runOne(exe, label, mode, 'http://127.0.0.1:' + port);
+        await runOne(exe, label, mode, 'http://127.0.0.1:' + port,
+                     releaseSlowDownloads);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
