@@ -91,7 +91,7 @@ static void traceForward(const char* stage, const QLocalSocket& socket,
     const QByteArray line = QByteArray::asprintf(
         "FORWARD_TRACE stage=%s elapsed_ms=%lld bytes=%lld"
         " pending=%lld available=%lld state=%d error=%d"
-        " wait=%d error_text=%s\\n",
+        " wait=%d error_text=%s\n",
         stage, static_cast<long long>(ms),
         static_cast<long long>(bytes),
         static_cast<long long>(socket.bytesToWrite()),
