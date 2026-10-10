@@ -196,14 +196,27 @@ static QJsonObject forwardToGui(const QJsonObject& req, bool* connected)
     // the queue within the original TOTAL 2s budget; never resend a request.
     QElapsedTimer writeClock;
     writeClock.start();
-    while (sock.bytesToWrite() > 0) {
-        const int remaining = 2000 - static_cast<int>(writeClock.elapsed());
-        if (remaining <= 0 ||
-                (!sock.waitForBytesWritten(remaining) && sock.bytesToWrite() > 0)) {
-            return {{QStringLiteral("success"), false},
-                    {QStringLiteral("message"),
-                     QStringLiteral("IPC 请求发送状态不明，请在桌面端检查任务，勿自动重试")}};
+    // A false wait is not evidence that all remaining writes failed. Follow
+    // the already-used cli_forward / socket_drain pattern: check actual queued
+    // bytes repeatedly, within the SAME total 2s budget, without resending.
+    while (sock.bytesToWrite() > 0 && writeClock.elapsed() < 2000) {
+        if (sock.state() != QLocalSocket::ConnectedState)
+            break;
+        sock.waitForBytesWritten(100);
+    }
+    if (sock.bytesToWrite() > 0) {
+        QJsonObject failure {
+            {QStringLiteral("success"), false},
+            {QStringLiteral("message"),
+             QStringLiteral("IPC 请求发送状态不明，请在桌面端检查任务，勿自动重试")}
+        };
+        // CI-only diagnostics; never log request URL, filename or payload.
+        if (qEnvironmentVariableIsSet("IDM_NATIVE_HOST_TRACE")) {
+            failure[QStringLiteral("pendingBytes")] = static_cast<double>(sock.bytesToWrite());
+            failure[QStringLiteral("elapsedMs")] = static_cast<double>(writeClock.elapsed());
+            failure[QStringLiteral("socketError")] = sock.errorString();
         }
+        return failure;
     }
 
     QJsonObject response;
