@@ -310,13 +310,13 @@ function trustedPopupSender(sender) {
     return sender && (sender.url === chrome.runtime.getURL('popup.html') ||
         (!sender.tab && sender.id === chrome.runtime.id));
 }
-function rememberHandoff(item, taskId) {
+function rememberHandoff(item, taskId, sessionId) {
     handoffJournalWrite = handoffJournalWrite.catch(() => {}).then(async () => {
         const stored = await chrome.storage.local.get('recentHandoffs');
         const prior = Array.isArray(stored.recentHandoffs) ? stored.recentHandoffs : [];
         const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
         const record = {
-            taskId, browserDownloadId: item.id,
+            taskId, sessionId, browserDownloadId: item.id,
             filename: filename.slice(0, 180), at: Date.now()
         };
         const recentHandoffs = [record, ...prior.filter(x => x.taskId !== taskId)].slice(0, 12);
@@ -337,8 +337,9 @@ async function retireBrowserDownloadAfterAccept(item, result) {
     if (!result || !result.success) return false;
     // A positive task ID is required for later status lookup. CLI fallback
     // currently returns no ID; preserve browser download in that case.
-    if (!Number.isSafeInteger(result.taskId) || result.taskId <= 0) return false;
-    if (!await rememberHandoff(item, result.taskId)) return false;
+    if (!Number.isSafeInteger(result.taskId) || result.taskId <= 0 ||
+        typeof result.sessionId !== 'string' || !result.sessionId) return false;
+    if (!await rememberHandoff(item, result.taskId, result.sessionId)) return false;
     try {
         // 如果浏览器已经下载完成，保留已完成文件；宁可有两份，也不删除数据。
         const matches = await chrome.downloads.search({ id: item.id });
@@ -574,14 +575,16 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                 } else if (response && response.success) {
                     const taskId = Number.isSafeInteger(response.taskId) && response.taskId > 0
                         ? response.taskId : null;
-                    if (!taskId) {
+                    const sessionId = typeof response.sessionId === 'string' &&
+                        /^[a-f0-9-]{32,36}$/i.test(response.sessionId) ? response.sessionId : null;
+                    if (!taskId || !sessionId) {
                         // Some CLI fallback paths cannot return a persistent ID.
                         resolve({ success: true, taskId: null, tracked: false,
-                            message: '桌面端报告已接收，但无可追踪任务 ID；原浏览器下载会保留' });
+                            message: '桌面端报告已接收，但没有有效任务身份；浏览器原下载会保留' });
                     } else {
                         // Also cover manual resource sends, not just takeovers.
-                        rememberHandoff({ id: null, filename, url }, taskId).then(tracked =>
-                            resolve({ success: true, taskId, tracked,
+                        rememberHandoff({ id: null, filename, url }, taskId, sessionId).then(tracked =>
+                            resolve({ success: true, taskId, sessionId, tracked,
                                 message: tracked ? (response.message || '已添加到 IDM Next')
                                     : '任务已接收，但扩展无法保存查询记录；请在桌面端查看' }));
                     }
@@ -737,12 +740,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         chrome.storage.local.get('recentHandoffs').then(data => {
             const records = Array.isArray(data.recentHandoffs) ? data.recentHandoffs : [];
-            if (!records.some(x => x.taskId === msg.taskId)) {
-                sendResponse({ success: false, message: '任务不在接管历史中' });
+            const record = records.find(x => x.taskId === msg.taskId);
+            if (!record || typeof record.sessionId !== 'string' || !record.sessionId) {
+                sendResponse({ success: false, message: '任务身份不完整，不能确认状态' });
                 return;
             }
             chrome.runtime.sendNativeMessage(NATIVE_HOST,
-                { action: 'get_task_status', taskId: msg.taskId }, response => {
+                { action: 'get_task_status', taskId: msg.taskId,
+                  sessionId: record.sessionId }, response => {
                     if (chrome.runtime.lastError) {
                         sendResponse({ success: false, message: '桌面端无法查询：' + chrome.runtime.lastError.message });
                     } else {
