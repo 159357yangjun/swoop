@@ -8,7 +8,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, confirm = false, intercept = true, state = 'in_progress' } = {}) {
+function make({ accepted = true, confirm = false, intercept = true, dialogOK = true, state = 'in_progress' } = {}) {
   const events = { created: listener(), message: listener() };
   const calls = { native: 0, cancel: [], erase: [], dialogs: 0 };
   const item = { id: 73, tabId: 19, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
@@ -34,7 +34,7 @@ function make({ accepted = true, confirm = false, intercept = true, state = 'in_
     },
     tabs: {
       onRemoved: noop, onUpdated: noop,
-      sendMessage(_id, _msg, callback) { calls.dialogs++; callback({ ok: true }); },
+      sendMessage(_id, _msg, callback) { calls.dialogs++; callback({ ok: dialogOK }); },
       query(_query, callback) { callback([]); }
     },
     webRequest: { onBeforeRequest: noop, onHeadersReceived: noop },
@@ -114,4 +114,12 @@ test('automatic takeover is opt-in: disabled leaves browser untouched', async ()
   assert.equal(h.calls.native, 0);
   assert.deepEqual(h.calls.cancel, []);
   assert.deepEqual(h.calls.erase, []);
+});
+
+test('failed confirmation card never bypasses user approval', async () => {
+  const h = make({ confirm: true, dialogOK: false });
+  await h.start();
+  assert.equal(h.calls.dialogs, 1);
+  assert.equal(h.calls.native, 0);
+  assert.deepEqual(h.calls.cancel, []);
 });
