@@ -573,6 +573,9 @@ jobs:
               -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
             throw 'FFmpeg/FFprobe still missing after explicit setup'
           }
+          # Windows runner's legacy console code page cannot print Unicode
+          # FFmpeg/GUI diagnostics. Preserve the real assertions and emit UTF-8.
+          $env:PYTHONIOENCODING = 'utf-8'
           python tools/browser_e2e/hls_ffmpeg_e2e.py --dist installer/dist
           if ($LASTEXITCODE -ne 0) { throw 'Real packaged HLS/FFmpeg E2E failed' }
 
