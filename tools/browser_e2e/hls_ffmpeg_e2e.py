@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import http.server
 import json
 import os
@@ -116,7 +117,8 @@ def poll_terminal(host: Path, dist: Path, task_id: int,
 
 
 def inspect_mp4(ffprobe: str, ffmpeg: str, root: Path,
-                name: str, width: int, height: int) -> tuple[Path, float]:
+                name: str, width: int, height: int,
+                source_playlist: Path) -> tuple[Path, float]:
     paths = list(root.rglob(name))
     if len(paths) != 1:
         raise AssertionError(f"Expected exactly one final {name}, found {paths!r}")
@@ -141,6 +143,20 @@ def inspect_mp4(ffprobe: str, ffmpeg: str, root: Path,
     # Decode all streams, not just probe a container header.
     run([ffmpeg, "-v", "error", "-xerror", "-nostdin", "-i",
          str(output), "-f", "null", "-"], timeout=25)
+    # Container metadata and stream dimensions do not prove the *contents*
+    # survived remux. Compare the decoded video pixel bytes with the selected
+    # source playlist (independent of MP4 timestamps and container metadata).
+    def decoded_sha256(video: Path) -> str:
+        proc = subprocess.run(
+            [ffmpeg, "-v", "error", "-xerror", "-nostdin", "-i",
+             str(video), "-map", "0:v:0", "-pix_fmt", "yuv420p",
+             "-f", "rawvideo", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25, check=True)
+        if not proc.stdout:
+            raise AssertionError(f"No decoded frames from {video}")
+        return hashlib.sha256(proc.stdout).hexdigest()
+    if decoded_sha256(output) != decoded_sha256(source_playlist):
+        raise AssertionError(f"Decoded frames differ from HLS source for {name}")
     return output, duration
 
 
@@ -193,11 +209,13 @@ def main() -> int:
                 state = poll_terminal(host, dist, task_id, session_id)
                 if state.get("state") != 3:
                     raise AssertionError(f"Expected completed HLS MP4, got {state!r}")
+                chosen = "high" if not bandwidth else "low"
                 output, duration = inspect_mp4(
-                    ffprobe, ffmpeg, output_dir, filename, width, height)
+                    ffprobe, ffmpeg, output_dir, filename, width, height,
+                    public / chosen / "index.m3u8")
                 print(f"[PASS] real HLS: task={task_id} variant={bandwidth or 'highest'} "
                       f"size={output.stat().st_size} width={width} height={height} "
-                      f"duration={duration:.3f}s decoded=true")
+                      f"duration={duration:.3f}s decoded=true frame_sha256=match")
             missing_id, missing_session = submit_once(
                 host, dist, base + "/broken.m3u8",
                 "broken.mp4", output_dir)
