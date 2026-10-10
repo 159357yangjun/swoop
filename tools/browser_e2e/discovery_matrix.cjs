@@ -55,16 +55,16 @@ function fixture(req, res) {
     let paths = [];
     if (scenario === 'cold' || scenario === 'wake')
       paths = ['/early.mp4?token=' + token, '/early.mp4?token=' + token,
-               '/not-media.txt?next=video.mp4&token=' + token];
+               '/not-media.txt?token=' + token + '&next=video.mp4'];
     else if (scenario === 'multi-a')
       paths = ['/early.mp4?token=' + token, '/stream?token=' + token,
-               '/not-media.txt?next=video.mp4&token=' + token];
+               '/not-media.txt?token=' + token + '&next=video.mp4'];
     else if (scenario === 'multi-b')
       paths = ['/early.mp4?token=' + token, '/track.mp3?token=' + token,
-               '/not-media.txt?next=video.mp4&token=' + token];
+               '/not-media.txt?token=' + token + '&next=video.mp4'];
     else if (scenario === 'multi-c')
       paths = ['/early.mp4?token=' + token, '/playlist.m3u8?token=' + token,
-               '/not-media.txt?next=video.mp4&token=' + token];
+               '/not-media.txt?token=' + token + '&next=video.mp4'];
     else if (scenario !== 'dynamic') {
       res.writeHead(404); res.end('unknown scenario'); return;
     }
@@ -155,7 +155,7 @@ async function runTrial(exe, label, index, base) {
       }
       // A query parameter ending in video.mp4 MUST NOT promote a text/plain response to media.
       const negatives = rows.filter(r => r.url.includes('/not-media.txt'));
-      counters.negatives++;
+      if (!tabInfo.token.startsWith('dynamic-')) counters.negatives++;
       counters.falsePositives += negatives.length;
       assert.equal(negatives.length, 0,
                    name + ' classified plain text as media: ' + JSON.stringify(negatives));
