@@ -324,6 +324,12 @@ void TaskController::pauseTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
+        // A completed/failed task must not be relabeled PAUSED just because a
+        // late UI/CLI command arrived after the terminal completion event.
+        bool running = false;
+        for (const TaskRow& row : m_model->tasks())
+            if (row.id == id) { running = row.state == 1; break; }
+        if (!running) return;
         if (auto* hd = m_hlsTasks.value(id)) hd->pause();
         m_setState(id, 2);
         m_model->updateStatus(id, 2);
@@ -367,6 +373,10 @@ void TaskController::resumeTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
+        bool paused = false;
+        for (const TaskRow& row : m_model->tasks())
+            if (row.id == id) { paused = row.state == 2; break; }
+        if (!paused) return;
         if (auto* hd = m_hlsTasks.value(id)) hd->resume();
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
         m_model->updateStatus(id, 1);
@@ -404,6 +414,10 @@ void TaskController::cancelTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
+        bool active = false;
+        for (const TaskRow& row : m_model->tasks())
+            if (row.id == id) { active = row.state == 1 || row.state == 2; break; }
+        if (!active) return;
         if (auto* hd = m_hlsTasks.value(id)) hd->cancel();
         m_setState(id, 5);
         m_model->updateStatus(id, 5);
