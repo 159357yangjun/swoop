@@ -74,6 +74,17 @@
     <!-- 类型筛选（计数由 JS 填） -->
     <nav class="chips" id="chips"></nav>
 
+    <!-- 下载管理器候选：不猜来源标签，不自动打断浏览器下载。
+         只提供用户主动选择的接管入口。 -->
+    <section class="browser-captures" id="browserCaptures" hidden>
+        <div class="browser-captures-head">
+            <strong>浏览器正在下载</strong>
+            <button type="button" id="refreshCapturesBtn" class="ibtn" title="刷新浏览器下载">↻</button>
+        </div>
+        <p>转交前浏览器继续下载。只有 IDM Next 接收任务后才尝试停止原下载。</p>
+        <div id="browserCapturesList"></div>
+    </section>
+
     <!-- 资源列表 -->
     <div class="list" id="resourceList"></div>
 
