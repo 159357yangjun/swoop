@@ -750,9 +750,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                   sessionId: record.sessionId }, response => {
                     if (chrome.runtime.lastError) {
                         sendResponse({ success: false, message: '桌面端无法查询：' + chrome.runtime.lastError.message });
+                    } else if (response && response.success) {
+                        const verified = response.taskId === msg.taskId &&
+                            response.sessionId === record.sessionId;
+                        sendResponse(verified ? response :
+                            { success: false, message: '桌面端任务身份与接管记录不一致' });
                     } else {
-                        sendResponse(response && typeof response.success === 'boolean'
-                            ? response : { success: false, message: '桌面端未返回有效任务状态' });
+                        sendResponse(response && response.success === false ? response :
+                            { success: false, message: '桌面端未返回有效任务状态' });
                     }
                 });
         }).catch(e => sendResponse({ success: false, message: String(e) }));
