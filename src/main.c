@@ -17,7 +17,6 @@
 #include "engine/http.h"
 #include "common/util.h"
 #include "common/ipcmsg.h"
-#include "selftest_run.h"
 
 const wchar_t *g_class_name = IDM_WINDOW_CLASS;
 
@@ -104,7 +103,8 @@ static int wait_and_forward_to_existing(const wchar_t *url, DWORD timeout_ms)
 int WINAPI WinMain(HINSTANCE h, HINSTANCE hp, LPSTR cmd, int show)
 {
     (void)hp;
-    if (strstr(cmd, "--selftest")) return run_selftest();
+    /* 自测不再挂在发行的 swoop.exe 上：脚手架（含监听 18099 的本地测试服务）
+       已从 $(OBJS) 摘掉，跑自测请用 ./swoop_selftest.exe（README、CI、release 同一路径）。 */
 
     wchar_t starturl[4096];
     extract_url_w(GetCommandLineW(), starturl, sizeof starturl / sizeof starturl[0]);
