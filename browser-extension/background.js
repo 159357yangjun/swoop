@@ -64,6 +64,18 @@ const MEDIA_MIME_PREFIXES = ['video/', 'audio/'];
 // 嗅探到的资源上限（防止内存爆炸）
 const MAX_RESOURCES_PER_TAB = 200;
 
+// For HTTP(S) only the pathname contains the file type. Query parameters
+// such as `?next=video.mp4` are not evidence that a text file is a video.
+// Keep opaque/non-HTTP schemes intact (e.g. magnet: and ed2k:).
+function urlPathForPattern(url) {
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+            return parsed.pathname;
+    } catch { /* use original for nonstandard links */ }
+    return url;
+}
+
 // ── 资源存储 ──────────────────────────────────
 // A network URL event, its response headers, and the content script may arrive
 // simultaneously. storage.session read/modify/write is NOT atomic: serialize by tab.
@@ -137,6 +149,7 @@ async function clearResources(tabId) {
  * 推断资源类型
  */
 function inferType(url) {
+    url = urlPathForPattern(url);
     if (/^(magnet:|ed2k:|thunder:)/i.test(url)) return 'magnet';
     if (/\.torrent/i.test(url)) return 'torrent';
     if (/\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)/i.test(url)) return 'video';
@@ -172,17 +185,8 @@ chrome.webRequest.onBeforeRequest.addListener(
         if (details.tabId < 0) return;
 
         const url = details.url;
-        // Match extensions against the HTTP URL *pathname*, not its query.
-        // A plain text URL such as /notes.txt?next=video.mp4 must never be
-        // reported as a video merely because an unrelated parameter ends in .mp4.
-        // Keep the original URL for recording and non-HTTP schemes.
-        let patternTarget = url;
-        try {
-            const parsed = new URL(url);
-            if (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-                patternTarget = parsed.pathname;
-        } catch { /* retain original candidate for unusual schemes */ }
-        const matched = FILE_PATTERNS.some(pattern => pattern.test(patternTarget));
+        const matched = FILE_PATTERNS.some(pattern =>
+            pattern.test(urlPathForPattern(url)));
         if (!matched) return;
 
         addResource(details.tabId, {
@@ -297,7 +301,7 @@ function shouldIntercept(item, settings) {
     const mime = (item.mime || '').toLowerCase();
     if (mime === 'text/html' || mime === 'application/xhtml+xml') return false;
     const name = item.filename || url;
-    return INTERCEPT_PATTERNS.some(p => p.test(name) || p.test(url));
+    return INTERCEPT_PATTERNS.some(p => p.test(name) || p.test(urlPathForPattern(url)));
 }
 
 // 全局 badge 闪烁反馈（接管成功/失败），避免与按标签页的资源计数 badge 冲突
