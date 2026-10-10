@@ -154,10 +154,20 @@ async function runOne(exe, label, mode, baseUrl) {
       await transfer.first().waitFor({ timeout: 12000 });
       const text = await transfer.first().innerText();
       assert.match(text, /转交 IDM Next/);
+      const before = await popup.evaluate(async () => {
+        const matches = await chrome.downloads.search({ state: 'in_progress' });
+        return matches.map(x => ({ id: x.id, state: x.state, filename: x.filename }));
+      });
       await transfer.first().click();
-      await popup.locator('#browserCaptures .browser-capture-send').first()
-        .waitFor({ state: 'visible', timeout: 12000 });
-      console.log('[POPUP_CLICK] ' + label + ' mode=' + mode + ' clicked=true');
+      await popup.waitForTimeout(350);
+      const ui = {
+        toast: await popup.locator('#toast').innerText(),
+        buttons: await transfer.allInnerTexts(),
+        listVisible: await popup.locator('#browserCaptures').isVisible()
+      };
+      console.log('[POPUP_CLICK] ' + label + ' mode=' + mode +
+                  ' clicked=true before=' + JSON.stringify(before) +
+                  ' after=' + JSON.stringify(ui));
     }
 
     if (mode === 'no-source-confirm' || mode === 'manual-dismiss') {
