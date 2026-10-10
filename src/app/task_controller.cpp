@@ -62,7 +62,7 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
     if (archiveByType && m_settings && m_settings->autoArchiveByType() && !dir.isEmpty()) {
         FileType ft = FileType::Other;
         if (VideoDownloader::isVideoUrl(url)
-                || url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive)
+                || HlsDownloader::isHlsUrl(url)
                 || url.endsWith(QStringLiteral(".mpd"),  Qt::CaseInsensitive)) {
             ft = FileType::Video;  // 视频站点 URL 无扩展名，单独判定
         } else {
@@ -128,7 +128,7 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
     }
 
     // ── HLS（M3U8）：交给原生 HlsDownloader（自建解析 + ffmpeg 合并），不依赖 yt-dlp
-    if (url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive)) {
+    if (HlsDownloader::isHlsUrl(url)) {
         int id = m_videoIdSeq++;  // 与视频/引擎任务区分的编号偏移
         auto* hd = new HlsDownloader(this);
         hd->setTaskId(id);
@@ -165,8 +165,10 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
         req.fileName  = name;
         req.threadCount = threads > 0 ? threads : m_settings->maxThreads();
         req.isMagnet  = false;
+        // Native Host / browser passes the requested HLS variant bandwidth
+        // in "format"; the HLS backend consumes "hlsVariant".
         if (!format.isEmpty())
-            req.extra.insert(QStringLiteral("format"), format);
+            req.extra.insert(QStringLiteral("hlsVariant"), format);
         if (startNow) {
             hd->start(req);
             if (m_cancelAutoPower) m_cancelAutoPower();
