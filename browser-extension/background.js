@@ -333,7 +333,7 @@ function rememberHandoff(item, taskId) {
 // 注意“任务已添加”不是“文件已经完成”；失败任务仍需在桌面端可见且可重试。
 // 若用户在确认卡片里拒绝/关闭，浏览器原下载继续，不会丢失。
 async function retireBrowserDownloadAfterAccept(item, result) {
-    flashBadge(!!(result && result.success));
+    flashBadge(!!(result && result.success && result.tracked));
     if (!result || !result.success) return false;
     // A positive task ID is required for later status lookup. CLI fallback
     // currently returns no ID; preserve browser download in that case.
@@ -572,12 +572,19 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                 if (chrome.runtime.lastError) {
                     resolve({ success: false, message: chrome.runtime.lastError.message });
                 } else if (response && response.success) {
-                    resolve({
-                        success: true,
-                        taskId: Number.isSafeInteger(response.taskId) && response.taskId > 0
-                            ? response.taskId : null,
-                        message: response.message || '已添加到 IDM Next'
-                    });
+                    const taskId = Number.isSafeInteger(response.taskId) && response.taskId > 0
+                        ? response.taskId : null;
+                    if (!taskId) {
+                        // Some CLI fallback paths cannot return a persistent ID.
+                        resolve({ success: true, taskId: null, tracked: false,
+                            message: '桌面端报告已接收，但无可追踪任务 ID；原浏览器下载会保留' });
+                    } else {
+                        // Also cover manual resource sends, not just takeovers.
+                        rememberHandoff({ id: null, filename, url }, taskId).then(tracked =>
+                            resolve({ success: true, taskId, tracked,
+                                message: tracked ? (response.message || '已添加到 IDM Next')
+                                    : '任务已接收，但扩展无法保存查询记录；请在桌面端查看' }));
+                    }
                 } else {
                     resolve({ success: false, message: (response && response.message) || 'IDM Next 未响应' });
                 }
