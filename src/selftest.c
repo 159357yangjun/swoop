@@ -1,6 +1,7 @@
 #include "selftest_run.h"
 #include "engine/category.h"
 #include "engine/download.h"
+#include "engine/taskstore.h"
 #include "engine/torrent.h"
 #include <windows.h>
 #include <wchar.h>
@@ -216,6 +217,78 @@ bail:
 done:
     DeleteFileW(base);
     DeleteFileW(alt);
+    return rc;
+}
+
+
+/* A persisted partial file can be replaced by a same-sized unrelated file.
+   Loading/restoring must NOT write ranges into that unrelated user's file. */
+int test_resume_replaced_after_restore(void)
+{
+    wchar_t dir[MAX_PATH], path[MAX_PATH], db[MAX_PATH], new_path[MAX_PATH] = L"";
+    if (!GetTempPathW(MAX_PATH, dir)) return 181;
+    _snwprintf(path, MAX_PATH, L"%sswoop-replaced-partial.bin", dir);
+    _snwprintf(db, MAX_PATH, L"%sswoop-replaced-partial.dat", dir);
+    path[MAX_PATH - 1] = db[MAX_PATH - 1] = 0;
+    DeleteFileW(path); DeleteFileW(db);
+    int rc = 0;
+    download_task_t *t = task_create("http://127.0.0.1:18099/bigfile", path, 1);
+    if (!t) return 182;
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { rc = 183; goto done; }
+    LARGE_INTEGER sz; sz.QuadPart = 1048576;
+    if (!SetFilePointerEx(h, sz, NULL, FILE_BEGIN) || !SetEndOfFile(h)) rc = 184;
+    CloseHandle(h);
+    if (rc) goto done;
+    t->status = DL_PAUSED; t->total = 1048576; t->downloaded = 131072;
+    t->seg_count = 1; t->seg_len[0] = 1048576; t->seg_written[0] = 131072;
+    download_task_t *list[1] = { t };
+    if (taskstore_save(db, list, 1) != 1) { rc = 185; goto done; }
+    task_free(t); t = NULL;
+
+    if (!DeleteFileW(path)) { rc = 186; goto done; }
+    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { rc = 187; goto done; }
+    const char foreign[] = "FOREIGN-DATA";
+    DWORD wrote = 0;
+    LARGE_INTEGER off; off.QuadPart = 131072;
+    if (!SetFilePointerEx(h, off, NULL, FILE_BEGIN) ||
+        !WriteFile(h, foreign, sizeof foreign, &wrote, NULL) ||
+        wrote != sizeof foreign ||
+        !SetFilePointerEx(h, sz, NULL, FILE_BEGIN) || !SetEndOfFile(h)) rc = 188;
+    CloseHandle(h);
+    if (rc) goto done;
+
+    download_task_t *loaded[2] = { NULL, NULL };
+    int n = 0;
+    if (taskstore_load(db, loaded, 2, &n) != 0 || n != 1) { rc = 189; goto loaded_done; }
+    if (task_start(loaded[0]) != 0) { rc = 190; goto loaded_done; }
+    if (_wcsicmp(loaded[0]->outfile, path) == 0) { rc = 191; goto loaded_done; }
+    wcsncpy(new_path, loaded[0]->outfile, MAX_PATH - 1);
+    new_path[MAX_PATH - 1] = 0;
+    for (int i = 0; i < 2000 && loaded[0]->status == DL_DOWNLOADING; i++) {
+        task_tick(loaded[0], GetTickCount()); Sleep(10);
+    }
+    if (loaded[0]->status != DL_COMPLETE) rc = 192;
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) rc = 193;
+    else {
+        char buf[sizeof foreign] = {0};
+        DWORD got = 0;
+        if (!SetFilePointerEx(h, off, NULL, FILE_BEGIN) ||
+            !ReadFile(h, buf, sizeof buf, &got, NULL) ||
+            got != sizeof foreign || memcmp(buf, foreign, sizeof foreign) != 0) rc = 194;
+        CloseHandle(h);
+    }
+loaded_done:
+    if (loaded[0]) task_free(loaded[0]);
+done:
+    if (t) task_free(t);
+    if (new_path[0]) DeleteFileW(new_path);
+    DeleteFileW(path); DeleteFileW(db);
     return rc;
 }
 
