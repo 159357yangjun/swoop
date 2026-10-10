@@ -532,34 +532,67 @@ void HlsDownloader::onSegFinished()
 
 void HlsDownloader::concatSegments()
 {
-    QString out = outputPath(QStringLiteral("ts"));
-    QFile outF(out);
-    if (!outF.open(QIODevice::WriteOnly)) {
-        finish(false, QStringLiteral("无法创建输出文件：%1").arg(out));
+    // The manual TS fallback must never truncate or publish a partial final file.
+    QFile outF(m_stagedOutputPath);
+    if (!outF.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        finish(false, QStringLiteral("无法创建安全临时输出：%1").arg(m_stagedOutputPath));
         return;
     }
-    for (const auto& s : m_segments) {
-        QFile in(s.file);
-        if (in.open(QIODevice::ReadOnly)) {
-            // 流式拷贝：8KB 缓冲逐块写入，避免把整个分片读进内存（大分片也只占固定内存）
-            static const qint64 kBuf = 8192;
-            QByteArray buf;
-            buf.resize(static_cast<int>(kBuf));
-            qint64 n;
-            while ((n = in.read(buf.data(), kBuf)) > 0)
-                outF.write(buf.data(), n);
-            in.close();
+    QString error;
+    for (const auto& seg : m_segments) {
+        QFile in(seg.file);
+        if (!in.open(QIODevice::ReadOnly)) {
+            error = QStringLiteral("无法读取 HLS 分片：%1").arg(seg.file);
+            break;
         }
+        char buffer[8192];
+        qint64 n = 0;
+        while ((n = in.read(buffer, sizeof(buffer))) > 0) {
+            if (outF.write(buffer, n) != n) {
+                error = QStringLiteral("写入 HLS 临时输出失败：%1").arg(m_stagedOutputPath);
+                break;
+            }
+        }
+        if (n < 0 && error.isEmpty())
+            error = QStringLiteral("读取 HLS 分片失败：%1").arg(seg.file);
+        if (!error.isEmpty()) break;
     }
+    if (!outF.flush() && error.isEmpty())
+        error = QStringLiteral("刷新 HLS 临时输出失败：%1").arg(m_stagedOutputPath);
     outF.close();
-
-    // 清理临时分片
-    for (const auto& s : m_segments)
-        QFile::remove(s.file);
+    if (error.isEmpty())
+        publishStagedOutput(&error);
+    if (!error.isEmpty()) {
+        finish(false, error);
+        return;
+    }
+    for (const auto& seg : m_segments)
+        QFile::remove(seg.file);
     QDir().rmdir(m_workDir);
-
-    Log::info(QStringLiteral("HlsDownloader 拼接完成: %1").arg(out));
+    Log::info(QStringLiteral("HlsDownloader 拼接完成: %1").arg(m_finalOutputPath));
     finish(true, QString());
+}
+
+bool HlsDownloader::publishStagedOutput(QString* error)
+{
+    const QFileInfo staged(m_stagedOutputPath);
+    if (!staged.isFile() || staged.size() <= 0) {
+        *error = QStringLiteral("HLS 输出不存在或为空，拒绝标记下载完成");
+        return false;
+    }
+    const QFileInfo target(m_finalOutputPath);
+    if (target.exists() || target.isSymLink()) {
+        *error = QStringLiteral("目标文件已存在，拒绝覆盖：%1").arg(m_finalOutputPath);
+        return false;
+    }
+    // QFile::rename refuses to replace an existing destination. Both paths
+    // are on the same volume; no copy-over-existing fallback is permitted.
+    if (!QFile::rename(m_stagedOutputPath, m_finalOutputPath)) {
+        *error = QStringLiteral("发布 HLS 文件失败（文件已存在或权限不足）：%1")
+                     .arg(m_finalOutputPath);
+        return false;
+    }
+    return true;
 }
 
 void HlsDownloader::emitProgress()
@@ -574,6 +607,8 @@ void HlsDownloader::finish(bool success, const QString& err)
     if (m_finished)
         return;
     m_finished = true;
+    // Remove partial staged output before broadcasting terminal state.
+    m_outputStage.reset();
 
     if (success) {
         Log::info(QStringLiteral("HlsDownloader 下载完成: %1").arg(m_url));
