@@ -81,7 +81,7 @@ public:
     // 从 URL 添加任务（IPC/剪贴板/拖放共用）
     // queue 非空 → 加入指定队列（延迟启动）；空 → 立即开始
     // format 仅视频任务使用（yt-dlp -f 格式码），空=最佳画质
-    void addTaskFromUrl(const QString& url, const QString& filename = QString(),
+    int addTaskFromUrl(const QString& url, const QString& filename = QString(),
                         const QString& dir = QString(), int threads = 0,
                         const QString& queue = QString(),
                         const QString& format = QString());
