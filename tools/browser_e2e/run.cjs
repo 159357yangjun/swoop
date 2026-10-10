@@ -35,7 +35,7 @@ async function httpServer() {
       res.end(payload);
     } else if (req.url === '/index.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<!doctype html><html><body><a id="go" href="/file.zip">Download</a></body></html>');
+      res.end('<!doctype html><html><body><a id="go" download="file.zip" href="/file.zip">Download</a></body></html>');
     } else { res.writeHead(404); res.end('missing'); }
   });
   await new Promise((resolve, reject) => {
@@ -89,11 +89,32 @@ async function runOne(exe, label, mode, baseUrl) {
 
     const page = await context.newPage();
     await page.goto(baseUrl + '/index.html', { waitUntil: 'domcontentloaded' });
+    await page.locator('#idm-next-tokens').waitFor({ state: 'attached', timeout: 12000 });
+    const sourceTab = await popup.evaluate(async (url) => {
+      const tabs = await chrome.tabs.query({});
+      return tabs.find(x => x.url === url) || null;
+    }, baseUrl + '/index.html');
+    assert.ok(sourceTab && sourceTab.id >= 0, 'source page has no browser tab ID');
+    const contentReady = await popup.evaluate(async (tabId) => {
+      return await new Promise(resolve => chrome.tabs.sendMessage(
+        tabId, { action: 'showToast', message: 'E2E ready' },
+        resp => resolve(!chrome.runtime.lastError && !!(resp && resp.ok))));
+    }, sourceTab.id);
+    assert.equal(contentReady, true, 'content script could not receive the probe');
+    console.log('[PRE] ' + label + ' ' + mode + ' sourceTab=' + sourceTab.id);
     const pending = page.waitForEvent('download', { timeout: 15000 });
     await page.locator('#go').click();
     const download = await pending;
 
     if (mode === 'dismiss') {
+      const diagnostic = await popup.evaluate(async (url) => {
+        const all = await chrome.downloads.search({});
+        const item = all.find(x => x.url === url);
+        return item ? { id: item.id, tabId: item.tabId, state: item.state } : null;
+      }, baseUrl + '/file.zip');
+      console.log('[CAPTURE_PRE] ' + label + ' download=' + JSON.stringify(diagnostic) +
+                  ' sourceTab=' + sourceTab.id +
+                  ' contentMarker=' + await page.locator('#idm-next-tokens').count());
       // This is the ACTUAL content-script UI, not a mocked onMessage callback.
       await page.locator('#idm-next-capture').waitFor({ timeout: 12000 });
       await page.locator('#idm-next-capture .idm-cap-cancel').click();
