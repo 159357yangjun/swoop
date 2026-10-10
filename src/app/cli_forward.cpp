@@ -130,6 +130,8 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
     // Qt write queue before the wait began. That is NOT a failed write.
     // The client previously returned Failure while bytesToWrite()==0 and the
     // GUI had already processed activate (CI trace 38037010590).
+    // This branch still fails closed if any bytes remain after the original
+    // 2000ms budget; it never resends the request or infers a successful task.
     const bool drained = (accepted == data.size()) &&
                          drainSocketBeforeClose(&socket, 2000);
     traceForward("drain_request", socket, traceClock.elapsed(),
