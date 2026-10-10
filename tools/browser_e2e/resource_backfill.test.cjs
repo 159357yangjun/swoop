@@ -100,8 +100,17 @@ test('concurrent per-tab resources are not overwritten by storage.session read-m
         h.before({ tabId: 17, url: 'https://media.example/clip' + i + '.mp4',
                    initiator: 'https://site.example' });
     }
-    await delay(430);
-    const list = h.resources.get('tab_17') || [];
+    // The serialized async storage queue has no synchronous completion
+    // signal in this harness. Under loaded Windows CI 430ms can observe 14
+    // committed writes while the fifteenth is still pending. Wait for actual
+    // completion within a bounded 3-second budget; still require ALL 15.
+    let list = [];
+    const deadline = Date.now() + 3000;
+    do {
+        list = h.resources.get('tab_17') || [];
+        if (list.length === 15) break;
+        await delay(20);
+    } while (Date.now() < deadline);
     assert.equal(list.length, 15, 'lost URL from concurrent storage writes');
     assert.equal(new Set(list.map(r => r.url)).size, 15);
 });
