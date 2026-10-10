@@ -227,11 +227,11 @@ chrome.webRequest.onHeadersReceived.addListener(
 );
 
 // ── 接管浏览器默认下载（chrome.downloads API）──
-// 初始化默认设置：默认开启“自动接管浏览器下载”与“下载前确认”
+// 默认保守：资源发现保持开启，但自动接管必须用户主动启用；确认仍默认开启。
 chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.get(['interceptEnabled', 'confirmEnabled'], (r) => {
         if (r.interceptEnabled === undefined)
-            chrome.storage.local.set({ interceptEnabled: true });
+            chrome.storage.local.set({ interceptEnabled: false });
         if (r.confirmEnabled === undefined)
             chrome.storage.local.set({ confirmEnabled: true });
     });
@@ -243,7 +243,7 @@ chrome.runtime.onInstalled.addListener(() => {
  */
 async function getInterceptSettings() {
     const r = await chrome.storage.local.get(['interceptEnabled']);
-    return { enabled: r.interceptEnabled !== false }; // 缺省视为开启
+    return { enabled: r.interceptEnabled === true }; // 缺省视为关闭，避免未经确认转移下载所有权
 }
 
 /**
