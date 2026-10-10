@@ -197,6 +197,8 @@ def main() -> int:
                                 stdout=gui_out, stderr=gui_err, env=env)
         try:
             wait_gui(host, dist, proc)
+            task_ids: set[int] = set()
+            gui_session: str | None = None
             for filename, bandwidth, width, height in (
                 ("automatic.mp4", "", 320, 192),
                 ("low-choice.mp4", "200000", 160, 96),
@@ -206,6 +208,12 @@ def main() -> int:
                 url = base + "/master.m3u8?token=local-test"
                 task_id, session_id = submit_once(
                     host, dist, url, filename, output_dir, bandwidth)
+                if task_id in task_ids:
+                    raise AssertionError(f"Different HLS tasks reused one task ID: {task_id}")
+                task_ids.add(task_id)
+                if gui_session is not None and session_id != gui_session:
+                    raise AssertionError("HLS GUI session changed between tasks")
+                gui_session = session_id
                 state = poll_terminal(host, dist, task_id, session_id)
                 if state.get("state") != 3:
                     raise AssertionError(f"Expected completed HLS MP4, got {state!r}")
@@ -219,6 +227,8 @@ def main() -> int:
             missing_id, missing_session = submit_once(
                 host, dist, base + "/broken.m3u8",
                 "broken.mp4", output_dir)
+            if missing_id in task_ids or missing_session != gui_session:
+                raise AssertionError("Failed HLS task reused another ID or GUI session changed")
             failure = poll_terminal(host, dist, missing_id, missing_session)
             if failure.get("state") != 4:
                 raise AssertionError(f"Missing HLS segment must fail: {failure!r}")
