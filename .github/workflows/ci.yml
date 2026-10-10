@@ -28,6 +28,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'run.cjs syntax check failed' }
           node --check tools/browser_e2e/discovery_matrix.cjs
           if ($LASTEXITCODE -ne 0) { throw 'discovery_matrix.cjs syntax check failed' }
+          python -m py_compile tools/browser_e2e/hls_ffmpeg_e2e.py
+          if ($LASTEXITCODE -ne 0) { throw 'HLS/FFmpeg E2E Python syntax check failed' }
           node --test tools/browser_e2e/handoff.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Browser handoff Node tests failed' }
           node --test tools/browser_e2e/resource_backfill.test.cjs
