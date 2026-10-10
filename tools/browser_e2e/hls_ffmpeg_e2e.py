@@ -28,6 +28,10 @@ from native_host_failure_e2e import host_call
 class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append(self.path)
+        if self.path.split("?", 1)[0] == "/delayed/seg001.ts":
+            self.server.slow_segment_requested.set()
+            if not self.server.slow_segment_release.wait(timeout=25):
+                raise AssertionError("Delayed segment was never released by test")
         super().do_GET()
 
     def log_message(self, *_args):
@@ -60,6 +64,17 @@ def build_fixture(ffmpeg: str, root: Path) -> None:
         "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=320x192\nhigh/index.m3u8\n",
         encoding="utf-8",
     )
+    # A deterministic publishing race: FFmpeg starts downloading, then the
+    # E2E creates the final filename while a real TS request is blocked.
+    delayed = root / "delayed"
+    delayed.mkdir()
+    for segment in (root / "high").glob("seg*.ts"):
+        shutil.copy2(segment, delayed / segment.name)
+    playlist = (root / "high" / "index.m3u8").read_text(encoding="utf-8")
+    (root / "late.m3u8").write_text(
+        "\n".join(("delayed/" + line if line.startswith("seg") and
+                    line.endswith(".ts") else line) for line in playlist.splitlines()) + "\n",
+        encoding="utf-8")
     (root / "broken.m3u8").write_text(
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n"
         "#EXTINF:2.0,\nmissing.ts\n#EXT-X-ENDLIST\n", encoding="utf-8"
@@ -185,6 +200,8 @@ def main() -> int:
         handler = functools.partial(FixtureHandler, directory=str(public))
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         server.requests = []
+        server.slow_segment_requested = threading.Event()
+        server.slow_segment_release = threading.Event()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -199,6 +216,7 @@ def main() -> int:
             wait_gui(host, dist, proc)
             task_ids: set[int] = set()
             gui_session: str | None = None
+            actual_final_dir: Path | None = None
             for filename, bandwidth, width, height in (
                 ("automatic.mp4", "", 320, 192),
                 ("low-choice.mp4", "200000", 160, 96),
@@ -221,9 +239,59 @@ def main() -> int:
                 output, duration = inspect_mp4(
                     ffprobe, ffmpeg, output_dir, filename, width, height,
                     public / chosen / "index.m3u8")
+                if actual_final_dir is not None and output.parent != actual_final_dir:
+                    raise AssertionError("Unexpected HLS archive destination changed")
+                actual_final_dir = output.parent
                 print(f"[PASS] real HLS: task={task_id} variant={bandwidth or 'highest'} "
                       f"size={output.stat().st_size} width={width} height={height} "
                       f"duration={duration:.3f}s decoded=true frame_sha256=match")
+            assert actual_final_dir is not None
+            def assert_no_staging_or_extra(name: str) -> None:
+                leftovers = list(output_dir.rglob(".idm-next-hls-*"))
+                if leftovers:
+                    raise AssertionError(f"HLS staging was not cleaned: {leftovers!r}")
+                results = list(output_dir.rglob(name))
+                if len(results) != 1:
+                    raise AssertionError(f"Expected exactly one protected {name}, got {results!r}")
+
+            # Collision present BEFORE FFmpeg is launched: reject the download
+            # without modifying the pre-existing user's file.
+            existing = actual_final_dir / "already-there.mp4"
+            sentinel = b"IDM-NEXT-DO-NOT-REPLACE-" * 47
+            existing.write_bytes(sentinel)
+            existing_sha = hashlib.sha256(existing.read_bytes()).hexdigest()
+            occupied_id, occupied_session = submit_once(
+                host, dist, base + "/master.m3u8", existing.name, output_dir)
+            occupied = poll_terminal(host, dist, occupied_id, occupied_session)
+            if occupied.get("state") != 4 or "已存在" not in str(occupied.get("error")):
+                raise AssertionError(f"Preexisting output was not safely rejected: {occupied!r}")
+            assert_no_staging_or_extra(existing.name)
+            if hashlib.sha256(existing.read_bytes()).hexdigest() != existing_sha:
+                raise AssertionError("Preexisting MP4 bytes were overwritten")
+            print("[PASS] preexisting HLS output preserved; failed status and reason correct")
+
+            # Collision DURING real FFmpeg download, after the playlist was
+            # accepted, while the HTTP segment is deliberately held.
+            late = actual_final_dir / "race-protected.mp4"
+            server.slow_segment_requested.clear()
+            server.slow_segment_release.clear()
+            late_id, late_session = submit_once(
+                host, dist, base + "/late.m3u8", late.name, output_dir)
+            try:
+                if not server.slow_segment_requested.wait(timeout=20):
+                    raise AssertionError("FFmpeg did not request the delayed TS segment")
+                late.write_bytes(sentinel)
+                late_sha = hashlib.sha256(late.read_bytes()).hexdigest()
+            finally:
+                server.slow_segment_release.set()
+            late_state = poll_terminal(host, dist, late_id, late_session)
+            if late_state.get("state") != 4 or "已存在" not in str(late_state.get("error")):
+                raise AssertionError(f"Late output collision was not safely rejected: {late_state!r}")
+            assert_no_staging_or_extra(late.name)
+            if hashlib.sha256(late.read_bytes()).hexdigest() != late_sha:
+                raise AssertionError("Late-created user file was overwritten")
+            print("[PASS] late HLS output race preserved original and removed stage")
+
             missing_id, missing_session = submit_once(
                 host, dist, base + "/broken.m3u8",
                 "broken.mp4", output_dir)
@@ -234,10 +302,15 @@ def main() -> int:
                 raise AssertionError(f"Missing HLS segment must fail: {failure!r}")
             if not isinstance(failure.get("error"), str) or not failure["error"].strip():
                 raise AssertionError(f"HLS failure reason missing from GUI IPC: {failure!r}")
+            if list(output_dir.rglob("broken.mp4")):
+                raise AssertionError("Failed HLS stream exposed a partial final MP4")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Failed HLS stream left a staging directory")
             print(f"[PASS] missing HLS segment fails and propagates reason: "
                   f"task={missing_id} state=4 error_present=true")
             for required in ("/master.m3u8", "/high/index.m3u8",
-                             "/low/index.m3u8", "/broken.m3u8", "/missing.ts"):
+                             "/low/index.m3u8", "/late.m3u8",
+                             "/delayed/seg001.ts", "/broken.m3u8", "/missing.ts"):
                 if not any(r.split("?")[0] == required for r in server.requests):
                     raise AssertionError(f"HTTP server never observed {required!r}")
             print("[PASS] real HLS manifests, selected variants and missing segment "
