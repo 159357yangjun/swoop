@@ -13,6 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Browser handoff regression (Node, no browser profile)
+        shell: pwsh
+        run: |
+          node --check browser-extension/background.js
+          node --check browser-extension/content.js
+          node --test browser-extension/tests/handoff.test.cjs
+
       - name: Set up MSYS2 + Qt 6 toolchain
         uses: msys2/setup-msys2@v2
         with:
