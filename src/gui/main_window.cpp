@@ -1304,9 +1304,8 @@ void MainWindow::onTaskCompleted(int taskId, bool success, const QString& error)
     if (!success) {
         // 失败原因必须同时落到任务行上，不能只在托盘气泡里说一次就没了：
         // 用户过一会儿回来翻列表，只看到「失败」却查不到为什么，等于没有诊断信息。
-        // 媒体后端（yt-dlp / aria2 / ffmpeg）的原因由各自 completed 信号带过来；
-        // 引擎任务的原因由 4Hz 循环从 error_msg 回填，这里不碰，免得把更精确的
-        // 引擎原因冲成泛化提示。
+        // 媒体后端由 completed 信号携带原因；HTTP 引擎由 DownloadManager
+        // 从 TaskInfo 提取真实错误，不能等状态已更新后再靠 4Hz 跃迁检测。
         if (isStreamTask(taskId)) {
             QString why = error.trimmed();
             if (why.isEmpty()) {
@@ -1317,6 +1316,17 @@ void MainWindow::onTaskCompleted(int taskId, bool success, const QString& error)
                 else
                     why = QStringLiteral("aria2 后端失败（请确认 aria2c 可用，并检查磁力/种子链接）");
             }
+            m_taskModel->setErrorMsg(taskId, why);
+        } else {
+            QString why = error.trimmed();
+            // 兼容其他尚未携带错误文本的完成信号调用方；只在失败事件做一次查询。
+            if (why.isEmpty()) {
+                TaskInfo info{};
+                if (dlmgr_get_task_info(taskId, &info) == 0 && info.status == TASK_FAILED)
+                    why = QString::fromUtf8(info.error_msg).trimmed();
+            }
+            if (why.isEmpty())
+                why = QStringLiteral("下载失败（引擎未提供具体原因，请查看日志并重试）");
             m_taskModel->setErrorMsg(taskId, why);
         }
         // 视频/HLS 任务失败：给出可操作的提示
@@ -1421,12 +1431,16 @@ void MainWindow::refreshFromEngine()
                 m_taskModel->updateProgress(ids[i], info.downloaded, (int)info.speed_bps);
                 m_taskModel->setProtocol(ids[i], proto);
             }
-            // 失败原因只在「状态跃迁进出失败态」时同步一次：
-            // 放进上面 4Hz 的差量更新里会让每 tick 都做一次字符串比较，没必要。
-            if (info.status == 4 && prevState != 4)
-                m_taskModel->setErrorMsg(ids[i], QString::fromUtf8(info.error_msg).trimmed());
-            else if (info.status != 4 && prevState == 4)
+            // 失败原因可能晚于状态信号出现（也可能在 GUI 首次刷新前已失败）。
+            // 对失败任务持续校准真实引擎原因；setErrorMsg 自己会跳过相同内容。
+            // 仅处理 FAILED 行，不给所有下载中的任务增加字符串比较。
+            if (info.status == 4) {
+                const QString engineError = QString::fromUtf8(info.error_msg).trimmed();
+                if (!engineError.isEmpty())
+                    m_taskModel->setErrorMsg(ids[i], engineError);
+            } else if (prevState == 4) {
                 m_taskModel->setErrorMsg(ids[i], QString());
+            }
             // 服务器限流倒计时：引擎存的是绝对截止时刻，读侧每次换算成剩余秒数，
             // 所以这一句每 tick 刷一次就是活倒计时。
             // ⚠️ 不能塞进上面的 isStale 差量里——等待期间速度为 0、进度不动，
@@ -1458,6 +1472,8 @@ void MainWindow::refreshFromEngine()
         row.statusText     = row.notice.isEmpty() ? TaskListModel::stateText(info.status)
                                                   : row.notice;
         row.protocol       = QString::fromUtf8(info.http_version);
+        if (info.status == 4)
+            row.errorMsg = QString::fromUtf8(info.error_msg).trimmed();
         m_taskModel->addTask(row);
 
         m_speeds[ids[i]] = 0;

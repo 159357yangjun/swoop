@@ -17,6 +17,7 @@
 //       不弹控制台黑窗，stdio 句柄由浏览器继承。
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QLocalSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -181,14 +182,45 @@ static QJsonObject forwardToGui(const QJsonObject& req, bool* connected)
         return QJsonObject();   // GUI 未运行
     *connected = true;
 
-    QByteArray data = QJsonDocument(req).toJson(QJsonDocument::Compact);
-    sock.write(data);
+    const QByteArray data = QJsonDocument(req).toJson(QJsonDocument::Compact);
+    if (sock.write(data) != data.size())
+        return {{QStringLiteral("success"), false},
+                {QStringLiteral("message"),
+                 QStringLiteral("IPC 请求发送失败，任务状态未知，请在桌面端核对，勿自动重试")}};
     sock.flush();
-    if (!sock.waitForBytesWritten(2000))
-        return QJsonObject();
+
+    // waitForBytesWritten() can return false when the write queue has ALREADY
+    // drained. Returning an empty object in that case loses a valid add ack
+    // (real packaged Native Host 404 E2E reproduced this exact shape: {}).
+    // Also, true means SOME bytes were written, not necessarily all. Drain
+    // the queue within the original TOTAL 2s budget; never resend a request.
+    QElapsedTimer writeClock;
+    writeClock.start();
+    // A false wait is not evidence that all remaining writes failed. Follow
+    // the already-used cli_forward / socket_drain pattern: check actual queued
+    // bytes repeatedly, within the SAME total 2s budget, without resending.
+    while (sock.bytesToWrite() > 0 && writeClock.elapsed() < 2000) {
+        if (sock.state() != QLocalSocket::ConnectedState)
+            break;
+        sock.waitForBytesWritten(100);
+    }
+    if (sock.bytesToWrite() > 0) {
+        QJsonObject failure {
+            {QStringLiteral("success"), false},
+            {QStringLiteral("message"),
+             QStringLiteral("IPC 请求发送状态不明，请在桌面端检查任务，勿自动重试")}
+        };
+        // CI-only diagnostics; never log request URL, filename or payload.
+        if (qEnvironmentVariableIsSet("IDM_NATIVE_HOST_TRACE")) {
+            failure[QStringLiteral("pendingBytes")] = static_cast<double>(sock.bytesToWrite());
+            failure[QStringLiteral("elapsedMs")] = static_cast<double>(writeClock.elapsed());
+            failure[QStringLiteral("socketError")] = sock.errorString();
+        }
+        return failure;
+    }
 
     QJsonObject response;
-    if (sock.waitForReadyRead(3000)) {
+    if (sock.bytesAvailable() > 0 || sock.waitForReadyRead(3000)) {
         QByteArray resp = sock.readAll();
         QJsonDocument doc = QJsonDocument::fromJson(resp);
         if (doc.isObject())

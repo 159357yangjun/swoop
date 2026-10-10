@@ -517,6 +517,15 @@ jobs:
             Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Real Native Host and GUI 404 failure status
+        shell: pwsh
+        run: |
+          # Exercises packaged idm-next.exe + idm-next-host.exe + actual HTTP
+          # error path, with one-shot add (no duplicate-risk retry).
+          # Not a browser toolbar UI test: that is separately gated above.
+          python tools/browser_e2e/native_host_failure_e2e.py --dist installer/dist
+          if ($LASTEXITCODE -ne 0) { throw 'Real Native Host 404 failure E2E failed' }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
