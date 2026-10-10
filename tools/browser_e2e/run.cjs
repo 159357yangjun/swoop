@@ -60,7 +60,7 @@ async function runOne(exe, label, mode, baseUrl) {
     assert.equal(extensionId, ID, 'wrong extension loaded');
     await popup.evaluate(async (m) => {
       await chrome.storage.local.set({ interceptEnabled: true,
-                                      confirmEnabled: m === 'dismiss' });
+                                      confirmEnabled: m === 'no-source-confirm' || m === 'manual-dismiss' });
     }, mode);
 
     const worker = context.serviceWorkers().find(w => w.url().startsWith('chrome-extension://' + ID + '/'))
@@ -106,19 +106,34 @@ async function runOne(exe, label, mode, baseUrl) {
     await page.locator('#go').click();
     const download = await pending;
 
-    if (mode === 'dismiss') {
+    if (mode === 'no-source-confirm' || mode === 'manual-dismiss') {
       const diagnostic = await popup.evaluate(async (url) => {
         const all = await chrome.downloads.search({});
         const item = all.find(x => x.url === url);
         return item ? { id: item.id, tabId: item.tabId, state: item.state } : null;
       }, baseUrl + '/file.zip');
-      console.log('[CAPTURE_PRE] ' + label + ' download=' + JSON.stringify(diagnostic) +
-                  ' sourceTab=' + sourceTab.id +
-                  ' contentMarker=' + await page.locator('#idm-next-tokens').count());
-      // This is the ACTUAL content-script UI, not a mocked onMessage callback.
-      await page.locator('#idm-next-capture').waitFor({ timeout: 12000 });
-      await page.locator('#idm-next-capture .idm-cap-cancel').click();
-      await page.locator('#idm-next-capture').waitFor({ state: 'hidden', timeout: 12000 });
+      console.log('[CAPTURE_PRE] ' + label + ' mode=' + mode + ' download=' + JSON.stringify(diagnostic));
+      assert.ok(diagnostic && Number.isSafeInteger(diagnostic.id), 'download item missing');
+      assert.equal(diagnostic.tabId, undefined, 'DownloadItem unexpectedly includes tabId');
+      if (mode === 'no-source-confirm') {
+        // Genuine onCreated, no tabId: fail closed without inventing a source tab.
+        await page.waitForTimeout(300);
+        assert.equal(await page.locator('#idm-next-capture').count(), 0,
+                     'automatic confirmation must not target an unverified tab');
+      } else {
+        // Separate real content UI test: explicit tab-targeted message simulates
+        // the capture-card entry, then an ACTUAL DOM click dismisses the card.
+        // Does not claim that downloads.onCreated knows this tab.
+        const ack = await popup.evaluate(({ tabId, url, id }) => new Promise(resolve => {
+          chrome.tabs.sendMessage(tabId, { action: 'showCaptureDialog',
+            resource: { url, filename: 'file.zip', browserDownloadId: id } },
+            response => resolve(!chrome.runtime.lastError && !!(response && response.ok)));
+        }), { tabId: sourceTab.id, url: baseUrl + '/file.zip', id: diagnostic.id });
+        assert.equal(ack, true, 'explicit capture card could not reach content script');
+        await page.locator('#idm-next-capture').waitFor({ timeout: 12000 });
+        await page.locator('#idm-next-capture .idm-cap-cancel').click();
+        await page.locator('#idm-next-capture').waitFor({ state: 'hidden', timeout: 12000 });
+      }
     }
     const failure = await download.failure();
     assert.equal(failure, null, 'browser default download must finish: ' + failure);
@@ -135,9 +150,9 @@ async function runOne(exe, label, mode, baseUrl) {
       await new Promise(resolve => setTimeout(resolve, 350));
     const observed = await worker.evaluate(() => globalThis.__handoffE2E);
     assert.ok(observed, 'instrumentation missing (worker restarted?)');
-    if (mode === 'dismiss') {
+    if (mode === 'manual-dismiss' || mode === 'no-source-confirm') {
       assert.equal(observed.calls.filter(x => x === 'add_download').length, 0,
-                   'dismiss should not call the native download API');
+                   'unconfirmed browser download must not reach native host');
     } else {
       assert.ok(observed.calls.includes('add_download'),
                 'real downloads.onCreated handler did not call native API');
@@ -166,7 +181,7 @@ async function runOne(exe, label, mode, baseUrl) {
   console.log('SERVER_READY port=' + port + ' size=' + payload.length + ' sha256=' + sourceSha);
   try {
     for (const [label, exe] of found)
-      for (const mode of ['offline', 'dismiss', 'browser-first'])
+      for (const mode of ['offline', 'no-source-confirm', 'manual-dismiss', 'browser-first'])
         await runOne(exe, label, mode, 'http://127.0.0.1:' + port);
   } finally {
     await new Promise(resolve => server.close(resolve));
