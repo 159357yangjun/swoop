@@ -9,5 +9,6 @@ int run_selftest(void);
    必须由 run_selftest() 调用：它依赖自测本地 HTTP 服务已经起来了。 */
 int test_race_at_start(void);
 int test_resume_replaced_after_restore(void);
+int test_resume_unchanged_after_restore(void);
 
 #endif
