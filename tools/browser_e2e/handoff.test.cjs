@@ -290,3 +290,26 @@ test('status query rejects untracked task IDs', async () => {
   assert.equal(reply.success, false);
   assert.equal(h.calls.native, prevNative);
 });
+
+test('manually sent resource also leaves a queryable task record', async () => {
+  const h = make({ confirm: true });
+  const accepted = await h.message({ action: 'download', url: h.item.url, filename: 'file.zip' });
+  assert.equal(accepted.success, true);
+  assert.equal(accepted.taskId, 47);
+  assert.equal(accepted.tracked, true);
+  const history = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(history.items[0].taskId, 47);
+  const state = await h.message({ action: 'getHandoffStatus', taskId: 47 });
+  assert.equal(state.state, 4);
+  assert.equal(state.error, 'HTTP 404');
+});
+
+test('manual send without task ID is explicitly not tracked', async () => {
+  const h = make({ acceptedTaskId: null });
+  const result = await h.message({ action: 'download', url: h.item.url, filename: 'file.zip' });
+  assert.equal(result.success, true);
+  assert.equal(result.tracked, false);
+  assert.equal(result.taskId, null);
+  const history = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(history.items.length, 0);
+});
