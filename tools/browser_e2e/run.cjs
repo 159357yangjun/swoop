@@ -36,15 +36,29 @@ async function browsers() {
 }
 async function httpServer() {
   const server = http.createServer((req, res) => {
-    if (req.url === '/file.zip') {
+    if (req.url === '/file.zip' || req.url === '/slow.zip') {
+      const slow = req.url === '/slow.zip';
       res.writeHead(200, { 'Content-Type': 'application/zip',
-                           'Content-Disposition': 'attachment; filename="file.zip"',
+                           'Content-Disposition': 'attachment; filename="' + (slow ? 'slow' : 'file') + '.zip"',
                            'Content-Length': payload.length,
                            'Cache-Control': 'no-store' });
-      res.end(payload);
-    } else if (req.url === '/index.html') {
+      if (slow) {
+        let at = 0;
+        const timer = setInterval(() => {
+          if (res.destroyed || at >= payload.length) {
+            clearInterval(timer);
+            if (!res.destroyed) res.end();
+            return;
+          }
+          res.write(payload.subarray(at, at + 4096));
+          at += 4096;
+        }, 80);
+        res.on('close', () => clearInterval(timer));
+      } else res.end(payload);
+    } else if (req.url === '/index.html' || req.url === '/slow.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<!doctype html><html><body><a id="go" download="file.zip" href="/file.zip">Download</a></body></html>');
+      const slow = req.url === '/slow.html';
+      res.end('<!doctype html><html><body><a id="go" download="' + (slow ? 'slow' : 'file') + '.zip" href="/' + (slow ? 'slow' : 'file') + '.zip">Download</a></body></html>');
     } else { res.writeHead(404); res.end('missing'); }
   });
   await new Promise((resolve, reject) => {
@@ -110,13 +124,16 @@ async function runOne(exe, label, mode, baseUrl) {
       };
     }, mode);
 
+    const explicitPopup = mode === 'popup-takeover-offline';
+    const pagePath = explicitPopup ? '/slow.html' : '/index.html';
+    const filePath = explicitPopup ? '/slow.zip' : '/file.zip';
     const page = await context.newPage();
-    await page.goto(baseUrl + '/index.html', { waitUntil: 'domcontentloaded' });
+    await page.goto(baseUrl + pagePath, { waitUntil: 'domcontentloaded' });
     await page.locator('#idm-next-tokens').waitFor({ state: 'attached', timeout: 12000 });
     const sourceTab = await popup.evaluate(async (url) => {
       const tabs = await chrome.tabs.query({});
       return tabs.find(x => x.url === url) || null;
-    }, baseUrl + '/index.html');
+    }, baseUrl + pagePath);
     assert.ok(sourceTab && sourceTab.id >= 0, 'source page has no browser tab ID');
     const contentReady = await popup.evaluate(async (tabId) => {
       return await new Promise(resolve => chrome.tabs.sendMessage(
@@ -128,6 +145,20 @@ async function runOne(exe, label, mode, baseUrl) {
     const pending = page.waitForEvent('download', { timeout: 15000 });
     await page.locator('#go').click();
     const download = await pending;
+
+    if (explicitPopup) {
+      // Genuine popup DOM + real browser downloads API. Native Host is absent:
+      // a click must request handoff, report failure, preserve browser task.
+      await popup.reload({ waitUntil: 'domcontentloaded' });
+      const transfer = popup.locator('#browserCaptures .browser-capture-send');
+      await transfer.first().waitFor({ timeout: 12000 });
+      const text = await transfer.first().innerText();
+      assert.match(text, /转交 IDM Next/);
+      await transfer.first().click();
+      await popup.locator('#browserCaptures .browser-capture-send').first()
+        .waitFor({ state: 'visible', timeout: 12000 });
+      console.log('[POPUP_CLICK] ' + label + ' mode=' + mode + ' clicked=true');
+    }
 
     if (mode === 'no-source-confirm' || mode === 'manual-dismiss') {
       const diagnostic = await popup.evaluate(async (url) => {
@@ -179,11 +210,11 @@ async function runOne(exe, label, mode, baseUrl) {
     } else {
       assert.ok(observed.calls.includes('add_download'),
                 'real downloads.onCreated handler did not call native API');
-      if (mode === 'offline')
+      if (mode === 'offline' || explicitPopup)
         assert.ok(observed.errors.length > 0, 'native host was not actually unavailable');
     }
     const live = await popup.evaluate(async () => chrome.downloads.search({}));
-    const record = live.find(x => x.url === baseUrl + '/file.zip');
+    const record = live.find(x => x.url === baseUrl + filePath);
     assert.ok(record && record.state === 'complete',
               'original browser download record missing/canceled/erased');
     console.log('[PASS] ' + label + ' ' + mode +
@@ -201,7 +232,7 @@ async function runOne(exe, label, mode, baseUrl) {
   console.log('SERVER_READY port=' + port + ' size=' + payload.length + ' sha256=' + sourceSha);
   try {
     for (const [label, exe] of found)
-      for (const mode of ['offline', 'no-source-confirm', 'manual-dismiss', 'browser-first'])
+      for (const mode of ['offline', 'no-source-confirm', 'manual-dismiss', 'browser-first', 'popup-takeover-offline'])
         await runOne(exe, label, mode, 'http://127.0.0.1:' + port);
   } finally {
     await new Promise(resolve => server.close(resolve));
