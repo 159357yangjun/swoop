@@ -413,6 +413,13 @@ jobs:
           # 红的时候才能真正看到是哪条断言、哪个进程、哪句 stderr。
           function Fail-WithLogs([string]$message, $entries) {
             $parts = @($message)
+            # Read the opt-in file trace, not the redirected GUI-subsystem stderr.
+            # Socket timing/state only; no task URLs or request payloads.
+            if ($env:IDM_FORWARD_TRACE_FILE -and
+                (Test-Path -LiteralPath $env:IDM_FORWARD_TRACE_FILE)) {
+              $parts += ("--- IPC forward socket trace ---`n" +
+                         (Get-StreamTail $env:IDM_FORWARD_TRACE_FILE))
+            }
             foreach ($e in $entries) {
               if (-not $e) { continue }
               $parts += ("--- {0} stdout ---`n{1}" -f $e.Name, (Get-StreamTail $e.Out))
@@ -450,6 +457,7 @@ jobs:
           for ($trial = 1; $trial -le 3; $trial++) {
             $logDir = Join-Path $env:TEMP ('idm-ipc-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+            $env:IDM_FORWARD_TRACE_FILE = Join-Path $logDir 'forward.trace'
             $script:timings = @()
             Write-Host "STARTUP_RACE_REPETITION=$trial/3 (same packaged binary)"
             # 故意近同时启动两个 GUI，覆盖“二者都还没建立 QLocalServer”的竞态。
@@ -542,6 +550,7 @@ jobs:
             foreach ($p in $pair) {
               if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
+            Remove-Item Env:IDM_FORWARD_TRACE_FILE -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
           }
           Write-Host "STARTUP_RACE_REPETITION=$trial/3 PASS"
