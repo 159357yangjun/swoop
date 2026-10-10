@@ -103,6 +103,7 @@ void HlsDownloader::start(const DownloadRequest& req)
 void HlsDownloader::pause()
 {
     if (m_merge && m_merge->state() == QProcess::Running) {
+        m_paused = true;
         m_merge->terminate();
         emit stateChanged(m_taskId, 2);  // PAUSED
         return;
@@ -135,6 +136,8 @@ void HlsDownloader::cancel()
         m_keyReply->abort();
     for (auto& s : m_segments)
         if (s.reply) s.reply->abort();
+    if (!m_merge || m_merge->state() == QProcess::NotRunning)
+        m_outputStage.reset();
     emit stateChanged(m_taskId, 5);  // CANCELLED
 }
 
@@ -295,26 +298,37 @@ void HlsDownloader::beginDownload()
 {
     m_started = true;
     emit stateChanged(m_taskId, 1);
-    if (isFfmpegAvailable()) {
-        startFfmpegDownload();            // ffmpeg 自带 AES-128 解密 + MP4 转封装
-    } else if (m_encrypted) {
-        fetchKey();                       // 无 ffmpeg：纯 C++ 拉密钥 → 解密下载
-    } else {
-        startManualDownload();
+    const bool useFfmpeg = isFfmpegAvailable();
+    const QString ext = useFfmpeg ? QStringLiteral("mp4") : QStringLiteral("ts");
+    m_finalOutputPath = outputPath(ext);
+    const QFileInfo target(m_finalOutputPath);
+    if (target.exists() || target.isSymLink()) {
+        finish(false, QStringLiteral("目标文件已存在，已保留原文件：%1").arg(m_finalOutputPath));
+        return;
     }
+    // Stage in a private directory on the target volume. Tools must never
+    // open the user's visible final path before full completion.
+    m_outputStage = std::make_unique<QTemporaryDir>(
+        QDir(m_saveDir).filePath(QStringLiteral(".idm-next-hls-XXXXXX")));
+    if (!m_outputStage->isValid()) {
+        finish(false, QStringLiteral("无法创建 HLS 安全临时目录：%1").arg(m_saveDir));
+        return;
+    }
+    m_stagedOutputPath = QDir(m_outputStage->path()).filePath(
+        QStringLiteral("output.") + ext);
+    if (useFfmpeg) startFfmpegDownload();
+    else if (m_encrypted) fetchKey();
+    else startManualDownload();
 }
 
 void HlsDownloader::startFfmpegDownload()
 {
-    QString out = outputPath(QStringLiteral("mp4"));
-    QDir().mkpath(QFileInfo(out).absolutePath());
-
     QStringList args;
-    args << QStringLiteral("-y")
+    args << QStringLiteral("-n")
          << QStringLiteral("-loglevel") << QStringLiteral("info")
          << QStringLiteral("-i") << m_mediaPlaylistUrl
          << QStringLiteral("-c") << QStringLiteral("copy")
-         << out;
+         << m_stagedOutputPath;
 
     m_merge = new QProcess(this);
     m_merge->setProcessChannelMode(QProcess::MergedChannels);
@@ -351,11 +365,18 @@ void HlsDownloader::onMergeReadyRead()
     }
 }
 
-void HlsDownloader::onMergeFinished(int exitCode, QProcess::ExitStatus)
+void HlsDownloader::onMergeFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    if (m_cancelled)
+    if (m_cancelled || m_paused || m_finished) {
+        m_outputStage.reset(); // Do not publish canceled or partial media.
         return;
-    if (exitCode == 0) {
+    }
+    if (exitCode == 0 && exitStatus == QProcess::NormalExit) {
+        QString error;
+        if (!publishStagedOutput(&error)) {
+            finish(false, error);
+            return;
+        }
         emit progressChanged(m_taskId, 100, 100, 0);
         finish(true, QString());
     } else {
