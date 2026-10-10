@@ -6,10 +6,12 @@
 #include <QDateTime>
 #include <QTextStream>
 #include <QThread>
+#include <QElapsedTimer>
 
 #include <cstdio>
 
 #include "logger.h"
+#include "socket_drain.h"
 
 QString ipcServerName()
 {
@@ -71,6 +73,27 @@ static void reportFailure(const QString& reason, bool printToStderr)
     }
 }
 
+/* Opt-in forensic record only: no URL, token, filename or packet payload logged.
+   Diagnose the CI's "server handled activate, client Unknown error" disagreement.
+   This must not change the timing budget, return value or retry policy. */
+static void traceForward(const char* stage, const QLocalSocket& socket,
+                         qint64 ms, qint64 bytes = -1, int waitResult = -1)
+{
+    if (!qEnvironmentVariableIsSet("IDM_FORWARD_TRACE")) return;
+    const QByteArray err = socket.errorString().toUtf8();
+    std::fprintf(stderr,
+                 "FORWARD_TRACE stage=%s elapsed_ms=%lld bytes=%lld"
+                 " pending=%lld available=%lld state=%d error=%d"
+                 " wait=%d error_text=%s\n",
+                 stage, static_cast<long long>(ms),
+                 static_cast<long long>(bytes),
+                 static_cast<long long>(socket.bytesToWrite()),
+                 static_cast<long long>(socket.bytesAvailable()),
+                 static_cast<int>(socket.state()), static_cast<int>(socket.error()),
+                 waitResult, err.constData());
+    std::fflush(stderr);
+}
+
 /* 一次往返，**绝不重发**。
  * 为什么不重发：CI 现场证明「服务端处理了、回话却落在客户端 3 秒死线之后」是真实存在的
  * 时序（服务端日志里的「排队 Nms」就是为它加的）。那种情况下重发等于让同一件事做两遍 ——
@@ -85,17 +108,35 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
     const QString pipe = serverName.isEmpty() ? ipcServerName() : serverName;
     const QByteArray data = QJsonDocument(buildRequest(cliArgs)).toJson(QJsonDocument::Compact);
 
+    QElapsedTimer traceClock;
+    traceClock.start();
     QLocalSocket socket;
     socket.connectToServer(pipe);
-    if (!socket.waitForConnected(500)) {
+    const bool connected = socket.waitForConnected(500);
+    // Do not log the many normal NotConnected polls while the GUI is starting:
+    // their logging overhead would change the very startup race under study.
+    if (connected)
+        traceForward("connect", socket, traceClock.elapsed(), data.size(), 1);
+    if (!connected) {
         /* 压根没人监听 —— 这不是失败，是「本机还没有 GUI」，
          * 调用方要据此自己起一套，所以一个字都不报。 */
         return ForwardResult::NotConnected;
     }
 
-    socket.write(data);
-    socket.flush();
-    if (!socket.waitForBytesWritten(2000)) {
+    const qint64 accepted = socket.write(data);
+    const bool flushed = socket.flush();
+    traceForward("write_flush", socket, traceClock.elapsed(), accepted, flushed ? 1 : 0);
+    // waitForBytesWritten() may return false if flush() already emptied the
+    // Qt write queue before the wait began. That is NOT a failed write.
+    // The client previously returned Failure while bytesToWrite()==0 and the
+    // GUI had already processed activate (CI trace 38037010590).
+    // This branch still fails closed if any bytes remain after the original
+    // 2000ms budget; it never resends the request or infers a successful task.
+    const bool drained = (accepted == data.size()) &&
+                         drainSocketBeforeClose(&socket, 2000);
+    traceForward("drain_request", socket, traceClock.elapsed(),
+                 accepted, drained ? 1 : 0);
+    if (!drained) {
         const QString why = QStringLiteral("已连上运行中的实例，但请求没写进去（%1）")
                                 .arg(socket.errorString());
         socket.disconnectFromServer();
@@ -103,10 +144,18 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
         return ForwardResult::Failure;
     }
 
-    if (socket.waitForReadyRead(3000)) {
+    // Readiness may already be buffered by the time request draining ends.
+    const bool readable = socket.bytesAvailable() > 0 || socket.waitForReadyRead(3000);
+    traceForward("wait_reply", socket, traceClock.elapsed(), data.size(), readable ? 1 : 0);
+    if (readable) {
         const QByteArray response = socket.readAll();
+        traceForward("read_reply", socket, traceClock.elapsed(), response.size(), 1);
         const QJsonObject respObj = QJsonDocument::fromJson(response).object();
         const bool success = respObj.value(QStringLiteral("success")).toBool(false);
+        // Optional diagnostics: distinguish a received response from a successful
+        // *business acknowledgement*, without printing user payload or URL.
+        traceForward("response_parsed", socket, traceClock.elapsed(),
+                     response.size(), success ? 1 : 0);
         const QString message = respObj.value(QStringLiteral("message")).toString();
         if (printResponse && !message.isEmpty()) {
             QTextStream stream(success ? stdout : stderr);
