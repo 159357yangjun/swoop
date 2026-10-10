@@ -7,6 +7,7 @@
 #include <QTextStream>
 #include <QThread>
 #include <QElapsedTimer>
+#include <QFile>
 
 #include <cstdio>
 
@@ -79,19 +80,34 @@ static void reportFailure(const QString& reason, bool printToStderr)
 static void traceForward(const char* stage, const QLocalSocket& socket,
                          qint64 ms, qint64 bytes = -1, int waitResult = -1)
 {
-    if (!qEnvironmentVariableIsSet("IDM_FORWARD_TRACE")) return;
+    const QByteArray tracePath = qgetenv("IDM_FORWARD_TRACE_FILE");
+    const bool consoleTrace = qEnvironmentVariableIsSet("IDM_FORWARD_TRACE");
+    if (!consoleTrace && tracePath.isEmpty()) return;
+
+    // These fields contain no user URL, token, file name, IPC JSON or payload.
+    // A GUI-subsystem .exe can redirect stderr to CONOUT$ even when CI supplied
+    // file handles; opt-in tracing to a dedicated per-trial file survives this.
     const QByteArray err = socket.errorString().toUtf8();
-    std::fprintf(stderr,
-                 "FORWARD_TRACE stage=%s elapsed_ms=%lld bytes=%lld"
-                 " pending=%lld available=%lld state=%d error=%d"
-                 " wait=%d error_text=%s\n",
-                 stage, static_cast<long long>(ms),
-                 static_cast<long long>(bytes),
-                 static_cast<long long>(socket.bytesToWrite()),
-                 static_cast<long long>(socket.bytesAvailable()),
-                 static_cast<int>(socket.state()), static_cast<int>(socket.error()),
-                 waitResult, err.constData());
-    std::fflush(stderr);
+    const QByteArray line = QByteArray::asprintf(
+        "FORWARD_TRACE stage=%s elapsed_ms=%lld bytes=%lld"
+        " pending=%lld available=%lld state=%d error=%d"
+        " wait=%d error_text=%s\\n",
+        stage, static_cast<long long>(ms),
+        static_cast<long long>(bytes),
+        static_cast<long long>(socket.bytesToWrite()),
+        static_cast<long long>(socket.bytesAvailable()),
+        static_cast<int>(socket.state()), static_cast<int>(socket.error()),
+        waitResult, err.constData());
+
+    if (consoleTrace) {
+        std::fwrite(line.constData(), 1, static_cast<size_t>(line.size()), stderr);
+        std::fflush(stderr);
+    }
+    if (!tracePath.isEmpty()) {
+        QFile file(QString::fromLocal8Bit(tracePath));
+        if (file.open(QIODevice::WriteOnly | QIODevice::Append))
+            file.write(line);
+    }
 }
 
 /* 一次往返，**绝不重发**。
