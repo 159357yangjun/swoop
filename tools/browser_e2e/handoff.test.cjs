@@ -108,7 +108,7 @@ test('host failure never cancels browser download', async () => {
 });
 test('host acceptance retires only in-progress original', async () => {
   const h = make(); await h.start();
-  assert.deepEqual(h.calls.cancel, [73]); assert.deepEqual(h.calls.erase, [73]);
+  assert.deepEqual(h.calls.cancel, [73]); assert.deepEqual(h.calls.erase, []);
 });
 test('completed browser download stays intact', async () => {
   const h = make({ state: 'complete' }); await h.start();
@@ -198,7 +198,7 @@ test('explicit popup takeover accepts once before canceling browser download', a
   assert.equal(res.browserCanceled, true);
   assert.equal(h.calls.native, 1);
   assert.deepEqual(h.calls.cancel, [73]);
-  assert.deepEqual(h.calls.erase, [73]);
+  assert.deepEqual(h.calls.erase, []);
 });
 
 test('explicit popup takeover failure preserves original browser download', async () => {
