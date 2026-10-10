@@ -8,7 +8,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, confirm = false, state = 'in_progress' } = {}) {
+function make({ accepted = true, confirm = false, intercept = true, state = 'in_progress' } = {}) {
   const events = { created: listener(), message: listener() };
   const calls = { native: 0, cancel: [], erase: [], dialogs: 0 };
   const item = { id: 73, tabId: 19, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
@@ -23,7 +23,7 @@ function make({ accepted = true, confirm = false, state = 'in_progress' } = {}) 
       sendMessage() { return Promise.resolve(); }
     },
     storage: {
-      local: { async get() { return { interceptEnabled: true, confirmEnabled: confirm }; }, async set() {} },
+      local: { async get() { return { interceptEnabled: intercept, confirmEnabled: confirm }; }, async set() {} },
       session: { async get() { return {}; }, async set() {}, async remove() {} }
     },
     downloads: {
@@ -106,4 +106,12 @@ test('manual popup without download ID cannot cancel original', async () => {
   const h = make({ confirm: true }); await h.start();
   await h.submit({ browserDownloadId: null });
   assert.deepEqual(h.calls.cancel, []);
+});
+
+test('automatic takeover is opt-in: disabled leaves browser untouched', async () => {
+  const h = make({ intercept: false });
+  await h.start();
+  assert.equal(h.calls.native, 0);
+  assert.deepEqual(h.calls.cancel, []);
+  assert.deepEqual(h.calls.erase, []);
 });
