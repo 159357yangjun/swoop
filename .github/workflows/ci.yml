@@ -546,6 +546,15 @@ jobs:
           }
           finally {
             Add-IpcLatencies
+            # Keep the last socket-level observations from passing trials too,
+            # so a 2.9s reply wait cannot hide behind a green status.
+            if ($env:IDM_FORWARD_TRACE_FILE -and
+                (Test-Path -LiteralPath $env:IDM_FORWARD_TRACE_FILE)) {
+              $traceTail = Get-Content -LiteralPath $env:IDM_FORWARD_TRACE_FILE -Tail 18
+              if ($traceTail) {
+                Write-Annotation ('IPC forward trace: ' + ($traceTail -join ' | '))
+              }
+            }
             Write-Timings
             foreach ($p in $pair) {
               if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
