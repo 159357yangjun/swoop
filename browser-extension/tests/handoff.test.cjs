@@ -8,10 +8,10 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, confirm = false, intercept = true, dialogOK = true, state = 'in_progress' } = {}) {
+function make({ accepted = true, confirm = false, intercept = true, dialogOK = true, tabId = 19, state = 'in_progress' } = {}) {
   const events = { created: listener(), message: listener() };
   const calls = { native: 0, cancel: [], erase: [], dialogs: 0 };
-  const item = { id: 73, tabId: 19, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
+  const item = { id: 73, tabId, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
   const noop = listener();
   const chrome = {
     runtime: {
@@ -122,4 +122,13 @@ test('failed confirmation card never bypasses user approval', async () => {
   assert.equal(h.calls.dialogs, 1);
   assert.equal(h.calls.native, 0);
   assert.deepEqual(h.calls.cancel, []);
+});
+
+
+test('confirmation cannot silently bypass a download without a source tab', async () => {
+  const h = make({ confirm: true, tabId: -1 });
+  await h.start();
+  assert.equal(h.calls.native, 0);
+  assert.deepEqual(h.calls.cancel, []);
+  assert.deepEqual(h.calls.erase, []);
 });
