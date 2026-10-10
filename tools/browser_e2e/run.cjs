@@ -52,8 +52,21 @@ async function runOne(exe, label, mode, baseUrl) {
       executablePath: exe, headless: true, acceptDownloads: true,
       args: ['--headless=new', '--disable-extensions-except=' + EXT,
              '--load-extension=' + EXT, '--no-first-run',
-             '--no-default-browser-check', '--disable-gpu']
+             '--no-default-browser-check', '--disable-gpu',
+             ...(label === 'Chrome' ? ['--enable-unsafe-extension-debugging'] : [])]
     });
+    // Chrome-branded 137+ ignores --load-extension. The experimental
+    // Extensions.loadUnpacked CDP command requires a pipe connection and explicit
+    // unsafe-extension-debugging flag. This is a CI-only isolated browser.
+    if (label === 'Chrome') {
+      const cdp = await context.newBrowserCDPSession();
+      try {
+        const installed = await cdp.send('Extensions.loadUnpacked', { path: EXT });
+        assert.equal(installed.id, ID, 'Chrome CDP loaded an unexpected extension');
+      } finally {
+        await cdp.detach();
+      }
+    }
     const popup = await context.newPage();
     await popup.goto('chrome-extension://' + ID + '/popup.html', { waitUntil: 'domcontentloaded' });
     const extensionId = await popup.evaluate(() => chrome.runtime.id);
