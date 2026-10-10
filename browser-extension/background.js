@@ -172,7 +172,17 @@ chrome.webRequest.onBeforeRequest.addListener(
         if (details.tabId < 0) return;
 
         const url = details.url;
-        const matched = FILE_PATTERNS.some(pattern => pattern.test(url));
+        // Match extensions against the HTTP URL *pathname*, not its query.
+        // A plain text URL such as /notes.txt?next=video.mp4 must never be
+        // reported as a video merely because an unrelated parameter ends in .mp4.
+        // Keep the original URL for recording and non-HTTP schemes.
+        let patternTarget = url;
+        try {
+            const parsed = new URL(url);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+                patternTarget = parsed.pathname;
+        } catch { /* retain original candidate for unusual schemes */ }
+        const matched = FILE_PATTERNS.some(pattern => pattern.test(patternTarget));
         if (!matched) return;
 
         addResource(details.tabId, {
