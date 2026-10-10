@@ -14,6 +14,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QWidget>
+#include <QUuid>
 
 /* 管道名只有 cli_forward.h 的 ipcServerName() 一个来源：
    客户端（CLI、副实例）与服务端以前各自写一遍同一个字面量，改一处不会报错，
@@ -40,7 +41,8 @@ QString taskLine(const TaskRow& row)
 }
 
 IpcServer::IpcServer(QObject* parent)
-    : QObject(parent)
+    : QObject(parent),
+      m_sessionId(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
 }
 
@@ -150,6 +152,7 @@ void IpcServer::handleClient(QLocalSocket* client)
             response["success"] = created;
             if (created) {
                 response["taskId"] = taskId;
+                response["sessionId"] = m_sessionId;
                 response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
             } else {
                 response["message"] = QStringLiteral("下载任务创建失败，浏览器原下载不应被取消");
@@ -238,14 +241,17 @@ void IpcServer::handleClient(QLocalSocket* client)
         // Machine-readable, read-only status for a browser handoff by exact ID.
         // Never claim completed just because the add IPC previously succeeded.
         const int id = msg.value(QStringLiteral("taskId")).toInt(-1);
+        const QString requestedSession = msg.value(QStringLiteral("sessionId")).toString();
         const QVector<TaskRow> tasks = model ? model->tasks() : QVector<TaskRow>();
-        const TaskRow* row = id > 0 ? findTask(tasks, id) : nullptr;
+        const TaskRow* row = id > 0 && requestedSession == m_sessionId
+            ? findTask(tasks, id) : nullptr;
         if (!row) {
             response["success"] = false;
-            response["message"] = QStringLiteral("任务已不在当前桌面列表，请打开 IDM Next 检查");
+            response["message"] = QStringLiteral("原任务无法确认（可能已重启或移除），请打开 IDM Next 检查");
         } else {
             response["success"] = true;
             response["taskId"] = row->id;
+            response["sessionId"] = m_sessionId;
             response["state"] = row->state;
             response["stateText"] = TaskListModel::stateText(row->state);
             response["downloaded"] = static_cast<double>(row->downloaded);
