@@ -40,6 +40,7 @@
 #include "schedule_service.h"
 #include "tool_probe.h"
 #include "cli_forward.h"
+#include "ipc_server.h"
 #include "off_thread.h"    // IDM_OFFTHREAD_PROBE：自愈不再冻住 GUI 线程
 #include "socket_drain.h"  // IDM_FLUSH_PROBE：回话必须推完才允许关
 #include <stdio.h>
@@ -748,6 +749,63 @@ int main(int argc, char** argv) {
         printf("%s 倒计时归零（sec=0）自动回落到状态文本\n",           ok3 ? "[PASS]" : "[FAIL]");
         printf("%s 429/503/408 三种文案与 sec<=0 空串都对\n",          ok4 ? "[PASS]" : "[FAIL]");
         return (ok0 && ok1 && ok2 && ok3 && ok4) ? 0 : 1;
+    }
+
+    /* IDM_IPC_ADD_PROBE: use the real QLocalSocket + IpcServer path, with a
+       controllable task-creation callback, to prove a failed creation cannot
+       return success=true to a browser host. No GUI or downloads are started. */
+    if (qEnvironmentVariableIsSet("IDM_IPC_ADD_PROBE")) {
+        QLocalSocket guard;
+        guard.connectToServer(QStringLiteral("idm-next-ipc"));
+        const bool occupied = guard.waitForConnected(200);
+        guard.disconnectFromServer();
+        if (occupied) {
+            printf("[FAIL] IPC add probe: existing GUI owns idm-next-ipc\n");
+            return 1;
+        }
+        IpcServer srv;
+        int resultId = -1;
+        int called = 0;
+        srv.setAddTaskCallback([&](const QString&, const QString&, const QString&,
+                                   int, const QString&, const QString&) {
+            ++called;
+            return resultId;
+        });
+        if (!srv.start()) {
+            printf("[FAIL] IPC add probe: could not start isolated server\n");
+            return 1;
+        }
+        auto ask = [&](bool expectedSuccess, int expectedId) {
+            QLocalSocket sock;
+            sock.connectToServer(QStringLiteral("idm-next-ipc"));
+            if (!sock.waitForConnected(1500)) return false;
+            QJsonObject req {
+                { QStringLiteral("command"), QStringLiteral("add") },
+                { QStringLiteral("url"), QStringLiteral("https://example.test/probe.zip") },
+                { QStringLiteral("filename"), QStringLiteral("probe.zip") }
+            };
+            QByteArray payload = QJsonDocument(req).toJson(QJsonDocument::Compact);
+            QEventLoop loop;
+            QObject::connect(&sock, &QLocalSocket::readyRead,
+                             &loop, &QEventLoop::quit);
+            QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+            sock.write(payload);
+            sock.flush();
+            loop.exec();
+            const QJsonObject response = QJsonDocument::fromJson(sock.readAll()).object();
+            const bool ok = response.value(QStringLiteral("success")).toBool();
+            const int id = response.value(QStringLiteral("taskId")).toInt(-1);
+            sock.disconnectFromServer();
+            return ok == expectedSuccess && id == expectedId;
+        };
+        const bool denied = ask(false, -1) && called == 1;
+        printf("%s IPC add failed callback must return success=false\n",
+               denied ? "[PASS]" : "[FAIL]");
+        resultId = 47;
+        const bool accepted = ask(true, 47) && called == 2;
+        printf("%s IPC add successful callback must return matching taskId\n",
+               accepted ? "[PASS]" : "[FAIL]");
+        return (denied && accepted) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──
