@@ -290,7 +290,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_ipcServer->setAddTaskCallback(
         [this](const QString& url, const QString& filename, const QString& dir,
                int threads, const QString& queue, const QString& format) {
-            addTaskFromUrl(url, filename, dir, threads, queue, format);
+            return addTaskFromUrl(url, filename, dir, threads, queue, format);
         });
     m_ipcServer->setTaskCountProvider([this]() { return m_taskModel->rowCount(); });
     /* listen 必须推迟到事件循环的第一轮，不能在这里同步做。
@@ -1642,7 +1642,7 @@ void MainWindow::refreshSidebarCounts()
 
 // ── IPC 单实例通信已迁移至 src/app/ipc_server.cpp（IpcServer 组件）──
 
-void MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
+int MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
                                  const QString& dir, int threads,
                                  const QString& queue, const QString& format)
 {
@@ -1652,7 +1652,7 @@ void MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
     int id = m_taskController->internalAddTask(url, saveDir, filename, threadCount, queue, format);
     if (id <= 0) {
         Log::warn(QStringLiteral("IPC 添加任务失败: %1").arg(url));
-        return;
+        return id;
     }
 
     QString name = filename.isEmpty() ? QUrl(url).fileName() : filename;
@@ -1673,6 +1673,7 @@ void MainWindow::addTaskFromUrl(const QString& url, const QString& filename,
     activateWindow();
 
     Log::info(QStringLiteral("IPC 添加任务 #%1: %2").arg(id).arg(url));
+    return id;
 }
 
 // ── 外部入口：浏览器协议关联 / 命令行位置参数 ──────────

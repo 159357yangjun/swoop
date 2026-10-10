@@ -45,7 +45,7 @@ IpcServer::IpcServer(QObject* parent)
 }
 
 void IpcServer::setAddTaskCallback(
-    std::function<void(const QString&, const QString&, const QString&, int, const QString&, const QString&)> cb)
+    std::function<int(const QString&, const QString&, const QString&, int, const QString&, const QString&)> cb)
 {
     m_addTask = std::move(cb);
 }
@@ -145,9 +145,15 @@ void IpcServer::handleClient(QLocalSocket* client)
             response["success"] = false;
             response["message"] = QStringLiteral("下载任务入口尚未初始化");
         } else {
-            m_addTask(url, filename, dir, threads, queue, format);
-            response["success"] = true;
-            response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
+            const int taskId = m_addTask(url, filename, dir, threads, queue, format);
+            const bool created = taskId > 0;
+            response["success"] = created;
+            if (created) {
+                response["taskId"] = taskId;
+                response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
+            } else {
+                response["message"] = QStringLiteral("下载任务创建失败，浏览器原下载不应被取消");
+            }
         }
     } else if (command == "list") {
         if (model) {

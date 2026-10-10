@@ -227,23 +227,23 @@ chrome.webRequest.onHeadersReceived.addListener(
 );
 
 // ── 接管浏览器默认下载（chrome.downloads API）──
-// 初始化默认设置：默认开启“自动接管浏览器下载”与“下载前确认”
+// 默认保守：资源发现保持开启，但自动接管必须用户主动启用；确认仍默认开启。
 chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.get(['interceptEnabled', 'confirmEnabled'], (r) => {
         if (r.interceptEnabled === undefined)
-            chrome.storage.local.set({ interceptEnabled: true });
+            chrome.storage.local.set({ interceptEnabled: false });
         if (r.confirmEnabled === undefined)
             chrome.storage.local.set({ confirmEnabled: true });
     });
 });
 
 /**
- * 读取“接管浏览器下载”设置（默认开启）
+ * 读取“接管浏览器下载”设置（默认关闭，用户主动开启）
  * @returns {Promise<{enabled: boolean}>}
  */
 async function getInterceptSettings() {
     const r = await chrome.storage.local.get(['interceptEnabled']);
-    return { enabled: r.interceptEnabled !== false }; // 缺省视为开启
+    return { enabled: r.interceptEnabled === true }; // 缺省视为关闭，避免未经确认转移下载所有权
 }
 
 /**
@@ -298,40 +298,68 @@ function flashBadge(success) {
     }, 1500);
 }
 
-// 核心：监听浏览器新建下载，命中规则则取消浏览器默认下载并转发到 IDM Next
+// 浏览器下载属于用户已有的后备通道。桌面端明确接收前，绝不能取消/erase。
+// 注意“任务已添加”不是“文件已经完成”；失败任务仍需在桌面端可见且可重试。
+// 若用户在确认卡片里拒绝/关闭，浏览器原下载继续，不会丢失。
+async function retireBrowserDownloadAfterAccept(item, result) {
+    flashBadge(!!(result && result.success));
+    if (!result || !result.success) return false;
+    try {
+        // 如果浏览器已经下载完成，保留已完成文件；宁可有两份，也不删除数据。
+        const matches = await chrome.downloads.search({ id: item.id });
+        const live = matches.find(x => x.id === item.id && x.url === item.url);
+        if (!live || live.state !== 'in_progress') return false;
+        const canceled = await new Promise(resolve => {
+            chrome.downloads.cancel(item.id, () => resolve(!chrome.runtime.lastError));
+        });
+        if (!canceled) return false;
+        // erase 只清理浏览器下载记录；已确定 cancel 成功才执行。
+        chrome.downloads.erase({ id: item.id }, () => { void chrome.runtime.lastError; });
+        return true;
+    } catch (e) {
+        console.warn('[IDM Next] 已接收任务，但浏览器原下载未能取消:', e);
+        return false;
+    }
+}
+
+// 匹配下载时，先征询/提交给桌面端；只有接受后才转移所有权。
 chrome.downloads.onCreated.addListener(async (item) => {
     const settings = await getInterceptSettings();
     if (!shouldIntercept(item, settings)) return;
-
     const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
-
-    // 取消并抹除浏览器自身的下载（防止重复落盘）
-    chrome.downloads.cancel(item.id, () => { void chrome.runtime.lastError; });
-    chrome.downloads.erase({ id: item.id }, () => { void chrome.runtime.lastError; });
-
-    // 读取“下载前确认”设置：开启则在页面内弹出选择卡片（多种选择）；
-    // 关闭则按原行为静默直接下载（仍无需用户手动添加）。
     const confirm = await getConfirmSettings();
-    if (confirm.enabled && item.tabId >= 0) {
-        // 尝试在来源标签页注入确认卡片；content script 不可用时回退静默直发
+
+    // Chrome downloads.DownloadItem does not provide tabId. An undefined ID is
+    // NOT a valid tab and must never be used to guess which page to interrupt.
+    // Keep the browser download; users can send resources manually from popup.
+    if (confirm.enabled && (!Number.isSafeInteger(item.tabId) || item.tabId < 0)) {
+        console.warn('[IDM Next] 浏览器下载事件不含可靠标签页 ID，保留浏览器下载；可从扩展弹窗手动发送');
+        flashBadge(false);
+        return;
+    }
+    if (confirm.enabled) {
+        // 确认卡片关闭/拒绝时浏览器原下载保持原样。
         chrome.tabs.sendMessage(item.tabId, {
             action: 'showCaptureDialog',
             resource: {
                 url: item.url,
-                filename: filename,
+                filename,
+                browserDownloadId: item.id,
                 type: inferType(item.url),
                 size: (item.fileSize && item.fileSize > 0) ? item.fileSize : -1,
                 initiator: item.url
             }
         }, (resp) => {
-            if (chrome.runtime.lastError) {
-                // 该页面无 content script（如 chrome://、部分特殊页）→ 静默直发
-                sendToIdmNext(item.url, filename).then(r => flashBadge(r.success));
+            if (chrome.runtime.lastError || !resp || resp.ok !== true) {
+                // 用户要求确认，但此页面无法显示卡片：不绕过确认直接下载。
+                // 浏览器原下载继续；用户仍可从 popup/右键菜单手动发送。
+                console.warn('[IDM Next] 此页面无法显示接管确认卡片，保留浏览器原下载');
+                flashBadge(false);
             }
-            // 若 content script 成功接管，卡片内的“立即下载/加入队列”会自行发 downloadWithOptions
         });
     } else {
-        sendToIdmNext(item.url, filename).then(result => flashBadge(result.success));
+        sendToIdmNext(item.url, filename).then(result =>
+            retireBrowserDownloadAfterAccept(item, result));
     }
 });
 
@@ -597,6 +625,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return true;
     }
 
+    // chrome.downloads.DownloadItem 没有 tabId：popup 明确列出仍在进行的下载，
+    // 由用户亲自选择是否转交。不要猜测 activeTab 并自动取消他人的任务。
+    if (msg.action === 'getBrowserDownloads') {
+        chrome.downloads.search({ state: 'in_progress' }).then(items => {
+            const eligible = items.filter(item => shouldIntercept(item, { enabled: true }));
+            sendResponse({ success: true, items: eligible.slice(0, 20).map(item => ({
+                id: item.id, filename: item.filename || inferFilename(item.url),
+                url: item.url, size: item.totalBytes > 0 ? item.totalBytes : -1
+            })) });
+        }).catch(e => sendResponse({ success: false, items: [], message: String(e) }));
+        return true;
+    }
+
+    if (msg.action === 'takeoverBrowserDownload') {
+        // 执行只能来自扩展自己的 popup，不接受网页内容脚本指定要取消的 ID。
+        // The toolbar popup may have no sender.tab. The E2E harness (and a user
+        // opening popup.html in an extension-owned tab) DO have sender.tab.
+        // Authenticate either the exact extension popup URL, or the extension's
+        // own no-tab sender. A webpage content script has a different URL.
+        const trustedPopup = sender.url === chrome.runtime.getURL('popup.html') ||
+            (!sender.tab && sender.id === chrome.runtime.id);
+        if (!trustedPopup || !Number.isSafeInteger(msg.id) || msg.id < 0) {
+            sendResponse({ success: false, message: '无效的浏览器下载接管请求' });
+            return false;
+        }
+        chrome.downloads.search({ id: msg.id }).then(async items => {
+            const item = items.find(x => x.id === msg.id && x.state === 'in_progress' &&
+                                             shouldIntercept(x, { enabled: true }));
+            if (!item) {
+                sendResponse({ success: false, message: '原下载已结束或不符合接管条件' });
+                return;
+            }
+            const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
+            const result = await sendToIdmNext(item.url, filename);
+            const canceled = result.success ? await retireBrowserDownloadAfterAccept(item, result) : false;
+            sendResponse({
+                success: !!result.success,
+                accepted: !!result.success,
+                browserCanceled: canceled,
+                message: result.success
+                    ? (canceled ? 'IDM Next 已接收，浏览器原下载已取消'
+                                : 'IDM Next 已接收；浏览器下载仍在进行或已完成，请检查重复文件')
+                    : (result.message || '桌面端未接收；浏览器会继续下载')
+            });
+        }).catch(e => sendResponse({ success: false, message: String(e) }));
+        return true;
+    }
+
     // popup / content script 请求发送下载到 IDM Next
     if (msg.action === 'download') {
         sendToIdmNext(msg.url, msg.filename || '').then(result => {
@@ -687,7 +763,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             saveDir: msg.saveDir || '',
             queued: !!msg.queued,
             format: msg.format || ''
-        }).then(result => sendResponse(result));
+        }).then(async result => {
+            // 只有自动接管确认卡片携带浏览器下载 ID；手动 popup 不触及浏览器任务。
+            if (Number.isSafeInteger(msg.browserDownloadId) && sender.tab && sender.tab.id >= 0) {
+                try {
+                    const matches = await chrome.downloads.search({ id: msg.browserDownloadId });
+                    const original = matches.find(x =>
+                        x.id === msg.browserDownloadId &&
+                        x.url === msg.url &&
+                        x.tabId === sender.tab.id);
+                    if (original) await retireBrowserDownloadAfterAccept(original, result);
+                } catch (e) {
+                    console.warn('[IDM Next] 浏览器原下载保持不变:', e);
+                }
+            }
+            sendResponse(result);
+        });
         return true;
     }
 

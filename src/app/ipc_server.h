@@ -28,7 +28,7 @@ public:
     bool start();
 
     // "add" 命令 → 转发到上层任务添加（通常为 MainWindow::addTaskFromUrl）
-    void setAddTaskCallback(std::function<void(const QString& url, const QString& filename,
+    void setAddTaskCallback(std::function<int(const QString& url, const QString& filename,
                                                const QString& dir, int threads,
                                                const QString& queue, const QString& format)> cb);
     // "list" 命令响应所需的当前任务数（由 MainWindow 注入：m_taskModel->rowCount()）
@@ -41,7 +41,7 @@ private:
     void handleClient(QLocalSocket* client);
 
     QLocalServer* m_server = nullptr;
-    std::function<void(const QString&, const QString&, const QString&, int, const QString&, const QString&)> m_addTask;
+    std::function<int(const QString&, const QString&, const QString&, int, const QString&, const QString&)> m_addTask;
     std::function<int()> m_taskCount;
 };
 

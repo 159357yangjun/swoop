@@ -440,3 +440,28 @@ svg.i {
 .seg button:last-child  { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .seg button + button { border-left: none; }
 .seg button.active { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); font-weight: 600; }
+
+/* Explicit browser download handoff: distinct from passive sniffed resources. */
+.browser-captures[hidden] { display: none !important; }
+.browser-captures {
+    flex: 0 0 auto;
+    max-height: 158px;
+    overflow-y: auto;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-sunken);
+}
+.browser-captures-head { display: flex; align-items: center; justify-content: space-between; }
+.browser-captures-head strong { font-size: 12px; }
+.browser-captures p { color: var(--text-2); font-size: 10px; margin-bottom: 5px; }
+.browser-capture-row {
+    display: flex; align-items: center; gap: 6px;
+    border-top: 1px solid var(--border); padding: 5px 0;
+}
+.browser-capture-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-capture-send {
+    flex: 0 0 auto; cursor: pointer; border: 1px solid var(--accent-border);
+    color: var(--accent); background: var(--accent-soft); border-radius: var(--radius-sm);
+    font: inherit; padding: 4px 6px;
+}
+.browser-capture-send:disabled { cursor: default; opacity: .6; }
