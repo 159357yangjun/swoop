@@ -163,6 +163,53 @@ int test_race_at_start(void)
     }
     if (t->status != DL_COMPLETE) rc = 170;
 
+    /* 已下载完成的文件被外部程序换成同大小的其他内容后，再点“重新下载”。
+       即使任务在当前进程内曾写过此路径，也不再拥有覆盖它的权利。
+       旧实现只依据 owns_outfile 使用 CREATE_ALWAYS，会静默截断替换文件。 */
+    if (!rc) {
+        const char foreign[] = "FOREIGN!";
+        HANDLE other = CreateFileW(used, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (other == INVALID_HANDLE_VALUE) rc = 171;
+        else {
+            DWORD written = 0;
+            if (!WriteFile(other, foreign, sizeof foreign, &written, NULL)
+                || written != sizeof foreign) rc = 172;
+            CloseHandle(other);
+        }
+
+        if (!rc && task_start(t) != 0) rc = 173;
+        if (!rc && _wcsicmp(t->outfile, used) == 0) rc = 174;
+        if (!rc) {
+            HANDLE verify = CreateFileW(used, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (verify == INVALID_HANDLE_VALUE) rc = 175;
+            else {
+                char got_marker[sizeof foreign] = {0};
+                DWORD got_bytes = 0;
+                if (!ReadFile(verify, got_marker, sizeof got_marker, &got_bytes, NULL)
+                    || got_bytes != sizeof foreign
+                    || memcmp(got_marker, foreign, sizeof foreign) != 0)
+                    rc = 176;
+                CloseHandle(verify);
+            }
+        }
+        if (!rc) {
+            for (int i = 0; i < 2000 && t->status == DL_DOWNLOADING; i++) {
+                task_tick(t, GetTickCount());
+                Sleep(10);
+            }
+            if (t->status != DL_COMPLETE) rc = 177;
+        }
+        if (_wcsicmp(t->outfile, used) != 0) {
+            wchar_t second[MAX_PATH];
+            wcsncpy(second, t->outfile, MAX_PATH - 1);
+            second[MAX_PATH - 1] = 0;
+            task_join(t);
+            DeleteFileW(second);
+        }
+    }
+
 bail:
     task_free(t);
     if (used[0]) DeleteFileW(used);
