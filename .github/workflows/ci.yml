@@ -316,6 +316,7 @@ jobs:
           $env:QT_LOGGING_TO_CONSOLE = '1'
           # Forensic-only toggle: do not change startup/IPC success criteria or timeouts.
           $env:IDM_FORWARD_TRACE = '1'
+          Write-Host "FORWARD_FORENSIC_ENABLED=1 (behavior and budgets unchanged)"
           $logDir = Join-Path $env:TEMP ('idm-ipc-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
