@@ -35,6 +35,15 @@ typedef struct {
     int         user_paused;
     /* 本轮分片线程里传输失败的个数（非 2xx / 连接断）——>0 则整任务判错 */
     volatile LONG io_errors;
+    /* Resume provenance: volume, file index and timestamp; never trust file size alone.
+       Legacy task records without provenance must not write into an existing file. */
+    DWORD resume_volume;
+    DWORD resume_index_high;
+    DWORD resume_index_low;
+    FILETIME resume_last_write;
+    int resume_identity_valid;
+    /* Hold a file handle during resumed workers to block rename/replacement. */
+    HANDLE resume_guard;
 } download_task_t;
 
 /* 用户新建任务：HTTP 目标若已存在/已被其他任务预留，会自动选择 file (1).ext 等安全路径。 */
@@ -49,6 +58,8 @@ int   task_start(download_task_t *t);   /* 全新下载，或 DL_PAUSED 时续�
 void  task_stop(download_task_t *t);    /* 仅发停止信号（running=0），不回收线程 */
 void  task_pause(download_task_t *t);   /* 停止并等待分片线程退出，标记 DL_PAUSED */
 void  task_join(download_task_t *t);    /* 等待所有分片线程结束并回收句柄 */
+/* Called after workers stop; snapshots the partial file's stable identity. */
+int   task_capture_file_identity(download_task_t *t);
 int   task_tick(download_task_t *t, DWORD now_ms); /* 返回 1 表示状态有变化 */
 
 /* 分片线程全部结束后的完成判定（纯函数，便于自测）。
