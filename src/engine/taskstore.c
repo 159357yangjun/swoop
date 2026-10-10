@@ -47,6 +47,7 @@ static void verify_partial(download_task_t *t)
     }
     if (reset) {
         t->downloaded = 0;
+        t->resume_identity_valid = 0;
         for (int i = 0; i < 16; i++) t->seg_written[i] = 0;
         t->status = DL_QUEUED;
     }
@@ -103,6 +104,15 @@ int taskstore_save(const wchar_t *path, download_task_t *const *tasks, int n)
         for (int s = 0; s < t->seg_count && s < 16; s++)
             fprintf(f, "s=%lld,%lld,%lld\n",
                     t->seg_start[s], t->seg_len[s], (long long)t->seg_written[s]);
+        /* Legacy records lacking this are intentionally fail-closed on resume.
+           Persist only a snapshot taken after segment threads stopped. */
+        if (t->resume_identity_valid && t->downloaded > 0)
+            fprintf(f, "fid=%08lx,%08lx,%08lx,%08lx,%08lx\n",
+                    (unsigned long)t->resume_volume,
+                    (unsigned long)t->resume_index_high,
+                    (unsigned long)t->resume_index_low,
+                    (unsigned long)t->resume_last_write.dwHighDateTime,
+                    (unsigned long)t->resume_last_write.dwLowDateTime);
         cnt++;
     }
     fclose(f);
@@ -157,6 +167,18 @@ int taskstore_load(const wchar_t *path, download_task_t **tasks, int maxn, int *
             cur->num_conn = atoi(line + 5);
         } else if (strncmp(line, "segs=", 5) == 0) {
             /* 段数由 s= 行实际决定 */
+        } else if (strncmp(line, "fid=", 4) == 0) {
+            unsigned long vol, hi, lo, time_hi, time_lo;
+            if (sscanf(line + 4, "%lx,%lx,%lx,%lx,%lx",
+                       &vol, &hi, &lo, &time_hi, &time_lo) == 5
+                && (hi != 0 || lo != 0)) {
+                cur->resume_volume = (DWORD)vol;
+                cur->resume_index_high = (DWORD)hi;
+                cur->resume_index_low = (DWORD)lo;
+                cur->resume_last_write.dwHighDateTime = (DWORD)time_hi;
+                cur->resume_last_write.dwLowDateTime = (DWORD)time_lo;
+                cur->resume_identity_valid = 1;
+            }
         } else if (strncmp(line, "s=", 2) == 0) {
             long long a = 0, b = 0, c = 0;
             if (sscanf(line + 2, "%lld,%lld,%lld", &a, &b, &c) == 3 && seidx < 16) {
