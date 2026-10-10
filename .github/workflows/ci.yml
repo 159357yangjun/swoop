@@ -314,9 +314,10 @@ jobs:
           # 「IPC server 已启动，监听 idm-next-ipc」和「IPC 请求: activate → 成功」两句话
           # 就是分诊依据：两句都有 = 交接成功；只有前一句 = 请求根本没被读走。
           $env:QT_LOGGING_TO_CONSOLE = '1'
-          # Forensic-only toggle: do not change startup/IPC success criteria or timeouts.
-          $env:IDM_FORWARD_TRACE = '1'
-          Write-Host "FORWARD_FORENSIC_ENABLED=1 (behavior and budgets unchanged)"
+          # Control run: disable high-frequency stderr telemetry because writing it
+          # can perturb the 5s startup-race gate. Preserve exact gate budgets.
+          Remove-Item Env:IDM_FORWARD_TRACE -ErrorAction SilentlyContinue
+          Write-Host "FORWARD_CONTROL_TRACE=off (unchanged IPC gate and timeouts)"
           $logDir = Join-Path $env:TEMP ('idm-ipc-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
