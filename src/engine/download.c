@@ -449,31 +449,26 @@ int task_start(download_task_t *t)
         CloseHandle(fh);
     } else {
         split_segments(t, res.supports_range);
-        /* ⚠️ 全新下载不能用 CREATE_ALWAYS。名字是 task_create()（排队那一刻）挑的，
-           真正开文件却是现在：队列可能已经放行几分钟，中间任何进程（另一个 Swoop、
-           浏览器抢先落盘、用户自己拖了同名文件进目录）都能把这个名字占掉，
-           而预留表只是本进程的静态链表，跨进程什么都拦不住 —— CREATE_ALWAYS
-           会把别人的文件静默截断成我们的半成品。
-           所以由这一步做最终裁决：不是本任务创建的产物就 CREATE_NEW，撞上就换名字重试；
-           只有重新下载"本任务自己创建过的那份"（含重启后恢复的已完成任务）才允许覆盖。
-           回归用例：自测 race=167。 */
+        /* 不论任务以前是否写过这个路径，重新从零下载都不能静默覆盖。
+           其他进程可在完成之后把同名文件替换成完全不同的内容（甚至相同大小），
+           因此任务内存里的“曾创建过”标志不足以授权 CREATE_ALWAYS。
+           每次都由 CREATE_NEW 做最终原子裁决；占用则另选带后缀的名字。
+           回归用例：race=167（排队占名）与 race=174（完成后同大小替换）。 */
         int tries = 0;
         for (;;) {
             fh = CreateFileW(t->outfile, GENERIC_WRITE,
                              FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                             t->owns_outfile ? CREATE_ALWAYS : CREATE_NEW,
+                             CREATE_NEW,
                              FILE_ATTRIBUTE_NORMAL, NULL);
             if (fh != INVALID_HANDLE_VALUE) break;
             DWORD e = GetLastError();
-            if (!t->owns_outfile
-                && (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
+            if ((e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
                 && ++tries <= 50 && repick_outfile(t))
                 continue;
             t->status = DL_ERROR;
             log_msg("task_start: 打不开目标 %ls（err=%lu）", t->outfile, e);
             return -1;
         }
-        t->owns_outfile = 1;                 /* 从现在起这份文件是本任务的产物 */
         if (t->total > 0) {                 /* 预分配，保证各段可乱序写入 */
             LARGE_INTEGER sz; sz.QuadPart = t->total;
             SetFilePointerEx(fh, sz, NULL, FILE_BEGIN);
