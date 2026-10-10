@@ -7,6 +7,8 @@
 #include <QNetworkReply>
 #include <QProcess>
 #include <QVariantMap>
+#include <QTemporaryDir>
+#include <memory>
 
 // HLS（M3U8）流下载器：不依赖 yt-dlp，自建解析 + ffmpeg 合并
 //
@@ -70,6 +72,7 @@ private:
     void emitProgress();              // 以“已完成分片占比”估算进度
     void finish(bool success, const QString& err);
     QString outputPath(const QString& ext) const;
+    bool publishStagedOutput(QString* error);
     QByteArray segmentIv(int index) const;  // 计算分片 IV（无 IV 属性时用序号）
 
     QNetworkAccessManager* m_nam = nullptr;
@@ -92,7 +95,10 @@ private:
     bool                   m_started   = false;
     bool                   m_finished  = false;
     bool                   m_encrypted = false;    // 媒体播放列表含 AES-128
-    QProcess*              m_merge = nullptr;
+    QProcess* m_merge = nullptr;
+    std::unique_ptr<QTemporaryDir> m_outputStage;
+    QString m_finalOutputPath;
+    QString m_stagedOutputPath;
 
     // ── #52：AES-128 纯 C++ 解密支持 ──
     QString         m_keyUrl;          // #EXT-X-KEY 中的 URI（相对/绝对）
