@@ -289,6 +289,42 @@ download_task_t *task_create_preserve_path(const char *url, const wchar_t *outfi
     return task_create_impl(url, outfile, num_conn, 0);
 }
 
+/* Identity check uses the SAME file handle that is kept open for resume, rather
+   than checking the path and then opening a potentially different file. */
+static int resume_file_matches(const download_task_t *t, HANDLE fh)
+{
+    if (!t || !t->resume_identity_valid || fh == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(fh, &info)) return 0;
+    return info.dwVolumeSerialNumber == t->resume_volume
+        && info.nFileIndexHigh == t->resume_index_high
+        && info.nFileIndexLow == t->resume_index_low
+        && CompareFileTime(&info.ftLastWriteTime, &t->resume_last_write) == 0;
+}
+
+int task_capture_file_identity(download_task_t *t)
+{
+    if (!t || t->kind == IDM_KIND_TORRENT) return 0;
+    t->resume_identity_valid = 0;
+    if (t->downloaded <= 0 || t->total <= 0) return 0;
+    HANDLE fh = CreateFileW(t->outfile, GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh == INVALID_HANDLE_VALUE) return 0;
+    BY_HANDLE_FILE_INFORMATION info;
+    int ok = GetFileInformationByHandle(fh, &info)
+             && (info.nFileIndexHigh != 0 || info.nFileIndexLow != 0);
+    if (ok) {
+        t->resume_volume = info.dwVolumeSerialNumber;
+        t->resume_index_high = info.nFileIndexHigh;
+        t->resume_index_low = info.nFileIndexLow;
+        t->resume_last_write = info.ftLastWriteTime;
+        t->resume_identity_valid = 1;
+    }
+    CloseHandle(fh);
+    return ok;
+}
+
 void task_join(download_task_t *t)
 {
     if (!t) return;
@@ -301,6 +337,10 @@ void task_join(download_task_t *t)
         for (int i = 0; i < cnt; i++) CloseHandle(h[i]);
     }
     t->threads_done = 0;
+    if (t->resume_guard && t->resume_guard != INVALID_HANDLE_VALUE) {
+        CloseHandle(t->resume_guard);
+        t->resume_guard = NULL;
+    }
 }
 
 void task_stop(download_task_t *t)
@@ -337,6 +377,9 @@ void task_pause(download_task_t *t)
     }
     t->running = 0;      /* 通知各分片线程中止 */
     task_join(t);        /* 等它们真正退出，避免恢复时新旧线程串写 */
+    /* Snapshot only AFTER writes are finished. Never bless a foreign file
+       at taskstore_load() merely because its apparent size is unchanged. */
+    if (t->downloaded > 0) (void)task_capture_file_identity(t);
     t->status = DL_PAUSED;
     t->speed = 0.0;
     log_msg("task_pause: %s got=%lld", t->url, t->downloaded);
@@ -441,13 +484,25 @@ int task_start(download_task_t *t)
 
     HANDLE fh;
     if (resuming) {
-        /* 复用已有文件；段划分沿用暂停前的，只补各段缺口 */
-        fh = CreateFileW(t->outfile, GENERIC_WRITE,
+        /* A stored byte count/size is NOT proof of file ownership. Open once,
+           check that precise handle's persisted identity, then keep it open
+           (without FILE_SHARE_DELETE) until workers have finished. */
+        fh = CreateFileW(t->outfile, GENERIC_READ | GENERIC_WRITE,
                          FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (fh == INVALID_HANDLE_VALUE) { t->status = DL_ERROR; return -1; }
-        CloseHandle(fh);
-    } else {
+        if (fh == INVALID_HANDLE_VALUE || !resume_file_matches(t, fh)) {
+            if (fh != INVALID_HANDLE_VALUE) CloseHandle(fh);
+            resuming = 0;
+            t->downloaded = 0;
+            t->resume_identity_valid = 0;
+            log_msg("task_start: untrusted/changed partial file; restart safely under new name: %ls",
+                    t->outfile);
+        } else {
+            t->resume_guard = fh;
+        }
+    }
+    if (!resuming) {
+        t->resume_identity_valid = 0;
         split_segments(t, res.supports_range);
         /* 不论任务以前是否写过这个路径，重新从零下载都不能静默覆盖。
            其他进程可在完成之后把同名文件替换成完全不同的内容（甚至相同大小），
@@ -510,7 +565,14 @@ int task_start(download_task_t *t)
     }
     t->threads_expected = expected;
 
-    if (expected == 0) { t->status = DL_COMPLETE; return 0; }
+    if (expected == 0) {
+        t->status = DL_COMPLETE;
+        if (t->resume_guard) {
+            CloseHandle(t->resume_guard);
+            t->resume_guard = NULL;
+        }
+        return 0;
+    }
     log_msg("task_start: %s segs=%d expected=%d total=%lld resume=%d",
             t->url, t->seg_count, expected, t->total, resuming);
     return 0;
@@ -552,6 +614,10 @@ int task_tick(download_task_t *t, DWORD now_ms)
     if (t->threads_done >= t->threads_expected) {
         int done = dl_verdict(t->total, t->downloaded, (int)t->io_errors);
         t->status = done ? DL_COMPLETE : DL_ERROR;
+        if (t->resume_guard) {
+            CloseHandle(t->resume_guard);
+            t->resume_guard = NULL;
+        }
         log_msg("task_done: status=%d got=%lld total=%lld err=%ld",
                 t->status, t->downloaded, t->total, (long)t->io_errors);
         return 1;
