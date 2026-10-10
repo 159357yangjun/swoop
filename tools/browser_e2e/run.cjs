@@ -59,12 +59,14 @@ async function runOne(exe, label, mode, baseUrl) {
     // Extensions.loadUnpacked CDP command requires a pipe connection and explicit
     // unsafe-extension-debugging flag. This is a CI-only isolated browser.
     if (label === 'Chrome') {
-      const cdp = await context.newBrowserCDPSession();
+      const control = await context.newPage();
+      const cdp = await context.newCDPSession(control);
       try {
         const installed = await cdp.send('Extensions.loadUnpacked', { path: EXT });
         assert.equal(installed.id, ID, 'Chrome CDP loaded an unexpected extension');
       } finally {
         await cdp.detach();
+        await control.close();
       }
     }
     const popup = await context.newPage();
