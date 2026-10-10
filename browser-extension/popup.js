@@ -608,7 +608,58 @@ document.addEventListener('DOMContentLoaded', () => {
     loadResources();
     loadBrowserCaptures();
     $('refreshCapturesBtn').addEventListener('click', loadBrowserCaptures);
+    loadRecentHandoffs();
+    $('refreshHandoffsBtn').addEventListener('click', loadRecentHandoffs);
 });
+
+/* A locally persisted task association, NOT evidence of file completion.
+   Status is requested only on user click: no hidden polling/native process churn. */
+function loadRecentHandoffs() {
+    send({ action: 'getRecentHandoffs' }, resp => {
+        const section = $('recentHandoffs');
+        const list = $('recentHandoffsList');
+        list.textContent = '';
+        const records = resp && resp.success && Array.isArray(resp.items) ? resp.items : [];
+        section.hidden = records.length === 0;
+        records.forEach(record => {
+            if (!Number.isSafeInteger(record.taskId) || record.taskId <= 0) return;
+            const row = document.createElement('div');
+            row.className = 'browser-capture-row';
+            const label = document.createElement('span');
+            label.className = 'browser-capture-name';
+            label.textContent = '#' + record.taskId + ' · ' + (record.filename || '下载任务');
+            label.title = '已转交，状态未查询';
+            const query = document.createElement('button');
+            query.className = 'browser-capture-send';
+            query.type = 'button';
+            query.textContent = '查看状态';
+            query.addEventListener('click', () => {
+                query.disabled = true;
+                query.textContent = '查询中…';
+                send({ action: 'getHandoffStatus', taskId: record.taskId }, answer => {
+                    query.disabled = false;
+                    query.textContent = '刷新状态';
+                    if (!answer || !answer.success) {
+                        label.title = (answer && answer.message) || '无法查询桌面任务';
+                        label.textContent = '#' + record.taskId + ' · 状态未知（请检查桌面端）';
+                        return;
+                    }
+                    const state = Number.isInteger(answer.state) ? answer.state : -1;
+                    const stateText = typeof answer.stateText === 'string' ?
+                        answer.stateText : '状态未知';
+                    label.textContent = '#' + record.taskId + ' · ' +
+                        (record.filename || '下载任务') + ' · ' + stateText;
+                    label.title = state === 4
+                        ? ('下载失败：' + (answer.error || '请在桌面端检查并重试'))
+                        : (state === 3 ? '桌面端显示任务已完成' : '桌面端实时任务状态');
+                });
+            });
+            row.appendChild(label);
+            row.appendChild(query);
+            list.appendChild(row);
+        });
+    });
+}
 
 /* 下载列表不依赖 webRequest 的 tabId，也不与嗅探资源合并。
    仅显示浏览器实际存在的进行中任务；按下载 ID 重新查询并安全交接。 */
@@ -641,6 +692,7 @@ function loadBrowserCaptures() {
                     } else {
                         showToast(answer.message || '桌面端已接收任务', 'success');
                         loadBrowserCaptures();
+                        loadRecentHandoffs();
                     }
                 });
             });
