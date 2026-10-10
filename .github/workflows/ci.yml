@@ -78,7 +78,7 @@ jobs:
           fi
 
           PROBES="IDM_SCHEDULE_PROBE IDM_SETTINGS_PROBE IDM_SITEAUTH_PROBE
-                  IDM_NOTICE_PROBE IDM_IPC_PROBE IDM_FORWARD_PROBE
+                  IDM_NOTICE_PROBE IDM_IPC_PROBE IDM_IPC_ADD_PROBE IDM_FORWARD_PROBE
                   IDM_PROXY_PROBE IDM_ZOOM_PROBE IDM_TOOLPROBE_PROBE
                   IDM_TEXT_PROBE IDM_CONCURRENCY_PROBE
                   IDM_ACTIVATE_PROBE IDM_OFFTHREAD_PROBE IDM_FLUSH_PROBE"
@@ -117,7 +117,7 @@ jobs:
             echo "::error::UI 探针总共只报了 $TOTAL_PASS 条 PASS（期望 ≥46）—— 断言被删了还是根本没跑？"
             exit 1
           fi
-          echo "UI 探针全绿：14 个模式共 $TOTAL_PASS 条断言"
+          echo "UI 探针全绿：15 个模式共 $TOTAL_PASS 条断言"
 
       - name: Engine self-test (local authenticated HTTP server)
         shell: msys2 {0}
