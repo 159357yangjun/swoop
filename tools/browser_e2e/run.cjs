@@ -9,6 +9,7 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { chromium } = require('playwright-core');
+const { Browser, detectBrowserPlatform, resolveBuildId, install } = require('@puppeteer/browsers');
 
 const EXT = path.resolve(__dirname, '..', '..', 'browser-extension');
 const ID = 'fmnehlhldcoknecihnlbbcmhpaaapmbp';
@@ -16,14 +17,22 @@ const payload = Buffer.alloc(262144);
 for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) & 255;
 const sourceSha = crypto.createHash('sha256').update(payload).digest('hex');
 
-function browsers() {
+async function browsers() {
   const roots = [process.env['PROGRAMFILES(X86)'], process.env.ProgramFiles,
                  process.env.LOCALAPPDATA].filter(Boolean);
   const pick = (rel) => roots.map(root => path.join(root, rel)).find(fs.existsSync);
-  return [
-    ['Edge', pick('Microsoft/Edge/Application/msedge.exe')],
-    ['Chrome', pick('Google/Chrome/Application/chrome.exe')]
-  ];
+  const edge = pick('Microsoft/Edge/Application/msedge.exe');
+  assert.ok(edge, 'Edge browser missing from Windows runner');
+  const platform = detectBrowserPlatform();
+  assert.ok(platform, 'unsupported Chrome for Testing host platform');
+  const buildId = await resolveBuildId(Browser.CHROME, platform, 'stable');
+  const cacheDir = path.join(os.tmpdir(), 'idm-next-cft-cache');
+  console.log('CFT_INSTALL build=' + buildId + ' platform=' + platform);
+  const installed = await install({ browser: Browser.CHROME, buildId, platform, cacheDir,
+                                   downloadProgressCallback: 'default' });
+  assert.ok(fs.existsSync(installed.executablePath), 'Chrome for Testing executable not installed');
+  console.log('CFT_READY exe=' + installed.executablePath);
+  return [['Edge', edge], ['Chrome for Testing', installed.executablePath]];
 }
 async function httpServer() {
   const server = http.createServer((req, res) => {
@@ -53,22 +62,8 @@ async function runOne(exe, label, mode, baseUrl) {
       args: ['--headless=new', '--disable-extensions-except=' + EXT,
              '--load-extension=' + EXT, '--no-first-run',
              '--no-default-browser-check', '--disable-gpu',
-             ...(label === 'Chrome' ? ['--enable-unsafe-extension-debugging'] : [])]
+             ]
     });
-    // Chrome-branded 137+ ignores --load-extension. The experimental
-    // Extensions.loadUnpacked CDP command requires a pipe connection and explicit
-    // unsafe-extension-debugging flag. This is a CI-only isolated browser.
-    if (label === 'Chrome') {
-      const control = await context.newPage();
-      const cdp = await context.newCDPSession(control);
-      try {
-        const installed = await cdp.send('Extensions.loadUnpacked', { path: EXT });
-        assert.equal(installed.id, ID, 'Chrome CDP loaded an unexpected extension');
-      } finally {
-        await cdp.detach();
-        await control.close();
-      }
-    }
     const popup = await context.newPage();
     await popup.goto('chrome-extension://' + ID + '/popup.html', { waitUntil: 'domcontentloaded' });
     const extensionId = await popup.evaluate(() => chrome.runtime.id);
@@ -201,10 +196,7 @@ async function runOne(exe, label, mode, baseUrl) {
   }
 }
 (async () => {
-  const found = browsers();
-  for (const [name, exe] of found) {
-    if (!exe) throw new Error(name + ' not found on Windows runner; this test does not skip browser brands');
-  }
+  const found = await browsers();
   const { server, port } = await httpServer();
   console.log('SERVER_READY port=' + port + ' size=' + payload.length + ' sha256=' + sourceSha);
   try {
