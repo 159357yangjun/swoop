@@ -606,7 +606,50 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSettings();
     checkConnection();
     loadResources();
+    loadBrowserCaptures();
+    $('refreshCapturesBtn').addEventListener('click', loadBrowserCaptures);
 });
+
+/* 下载列表不依赖 webRequest 的 tabId，也不与嗅探资源合并。
+   仅显示浏览器实际存在的进行中任务；按下载 ID 重新查询并安全交接。 */
+function loadBrowserCaptures() {
+    send({ action: 'getBrowserDownloads' }, (resp) => {
+        const section = $('browserCaptures');
+        const list = $('browserCapturesList');
+        list.textContent = '';
+        const items = (resp && resp.success && Array.isArray(resp.items)) ? resp.items : [];
+        section.hidden = items.length === 0;
+        items.forEach(item => {
+            const row = document.createElement('div');
+            row.className = 'browser-capture-row';
+            const label = document.createElement('span');
+            label.className = 'browser-capture-name';
+            label.textContent = (item.filename || item.url || '未知文件').split(/[\\/]/).pop();
+            label.title = item.url || '';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'browser-capture-send';
+            btn.textContent = '转交 IDM Next';
+            btn.addEventListener('click', () => {
+                btn.disabled = true;
+                btn.textContent = '请求接收…';
+                send({ action: 'takeoverBrowserDownload', id: item.id }, (answer) => {
+                    if (!answer || !answer.success) {
+                        btn.disabled = false;
+                        btn.textContent = '转交 IDM Next';
+                        showToast((answer && answer.message) || '接收失败，浏览器继续下载', 'error');
+                    } else {
+                        showToast(answer.message || '桌面端已接收任务', 'success');
+                        loadBrowserCaptures();
+                    }
+                });
+            });
+            row.appendChild(label);
+            row.appendChild(btn);
+            list.appendChild(row);
+        });
+    });
+}
 
 function loadResources() {
     const host = $('resourceList');
