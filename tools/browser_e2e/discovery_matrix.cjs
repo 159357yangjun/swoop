@@ -72,8 +72,11 @@ function fixture(req, res) {
       '.map(u=>fetch(u,{cache:"no-store"}).then(r=>{if(!r.ok)throw Error(r.status);return r.arrayBuffer()})))' +
       '.then(()=>window.__ready=true).catch(e=>window.__error=String(e));';
     res.writeHead(200, { ...head, 'Content-Type': 'text/html; charset=utf-8' });
+    const baitLink = scenario === 'dynamic'
+      ? '<a href="/not-media.txt?token=' + token + '&next=video.mp4">ordinary text link</a>'
+      : '';
     res.end('<!doctype html><html><head><script>' + script +
-            '</script></head><body>MV3 fixture</body></html>');
+            '</script></head><body>MV3 fixture' + baitLink + '</body></html>');
   } else {
     res.writeHead(404); res.end('absent');
   }
