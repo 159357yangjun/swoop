@@ -24,7 +24,7 @@ jobs:
       - name: Real Chrome/Edge takeover fallback (offline native host)
         shell: pwsh
         run: |
-          npm install --prefix tools/browser_e2e --no-save --package-lock=false playwright-core@1.56.1
+          npm install --prefix tools/browser_e2e --no-save --package-lock=false playwright-core@1.56.1 @puppeteer/browsers@2.10.4
           node tools/browser_e2e/run.cjs
 
       - name: Set up MSYS2 + Qt 6 toolchain
