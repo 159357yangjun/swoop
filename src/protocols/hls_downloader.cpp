@@ -135,6 +135,7 @@ void HlsDownloader::resume()
     m_paused = false;
     if (m_merge) {
         // The old process may still have staged output open. Defer start.
+        Log::info(QStringLiteral("HLS 任务 #%1 等待旧 ffmpeg 退出后再恢复").arg(m_taskId));
         m_restartPending = true;
         return;
     }
