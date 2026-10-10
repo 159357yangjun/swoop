@@ -343,9 +343,10 @@ chrome.downloads.onCreated.addListener(async (item) => {
             }
         }, (resp) => {
             if (chrome.runtime.lastError || !resp || resp.ok !== true) {
-                // 注入失败时沿用旧策略：自动发送，但仍要等宿主接收后才取消。
-                sendToIdmNext(item.url, filename).then(result =>
-                    retireBrowserDownloadAfterAccept(item, result));
+                // 用户要求确认，但此页面无法显示卡片：不绕过确认直接下载。
+                // 浏览器原下载继续；用户仍可从 popup/右键菜单手动发送。
+                console.warn('[IDM Next] 此页面无法显示接管确认卡片，保留浏览器原下载');
+                flashBadge(false);
             }
         });
     } else {
