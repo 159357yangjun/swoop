@@ -474,6 +474,29 @@ static QJsonObject handleGetStatus()
     return response;
 }
 
+// Native status is a fresh GUI snapshot, NOT a promise of completion or
+// a substitute for persisted files. Do not fall back to CLI, which has no
+// authoritative task model when GUI is absent.
+static QJsonObject handleTaskStatus(int taskId, const QString& sessionId)
+{
+    if (taskId <= 0 || sessionId.isEmpty())
+        return {{QStringLiteral("success"), false},
+                {QStringLiteral("message"), QStringLiteral("无效任务 ID")}};
+    QJsonObject req;
+    req["command"] = QStringLiteral("task_status");
+    req["taskId"] = taskId;
+    req["sessionId"] = sessionId;
+    bool connected = false;
+    QJsonObject result = forwardToGui(req, &connected);
+    if (!connected)
+        return {{QStringLiteral("success"), false},
+                {QStringLiteral("message"), QStringLiteral("桌面端未运行，无法验证任务状态")}};
+    if (result.isEmpty())
+        return {{QStringLiteral("success"), false},
+                {QStringLiteral("message"), QStringLiteral("任务状态暂时不可查询")}};
+    return result;
+}
+
 // ── 主消息循环 ───────────────────────────────────────────────────────
 
 int main(int argc, char* argv[])
@@ -511,6 +534,9 @@ int main(int argc, char* argv[])
             response = handleBatchAdd(msg.value(QStringLiteral("items")).toArray());
         } else if (action == QStringLiteral("get_status")) {
             response = handleGetStatus();
+        } else if (action == QStringLiteral("get_task_status")) {
+            response = handleTaskStatus(msg.value(QStringLiteral("taskId")).toInt(-1),
+                                        msg.value(QStringLiteral("sessionId")).toString());
         } else {
             response["success"] = false;
             response["message"] = QStringLiteral("未知操作: ") + action;

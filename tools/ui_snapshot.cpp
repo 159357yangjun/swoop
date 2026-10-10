@@ -763,7 +763,9 @@ int main(int argc, char** argv) {
             printf("[FAIL] IPC add probe: existing GUI owns idm-next-ipc\n");
             return 1;
         }
-        IpcServer srv;
+        QObject root;
+        TaskListModel model(&root);
+        IpcServer srv(&root);
         int resultId = -1;
         int called = 0;
         srv.setAddTaskCallback([&](const QString&, const QString&, const QString&,
@@ -775,6 +777,7 @@ int main(int argc, char** argv) {
             printf("[FAIL] IPC add probe: could not start isolated server\n");
             return 1;
         }
+        QString acceptedSessionId;
         auto ask = [&](bool expectedSuccess, int expectedId) {
             QLocalSocket sock;
             sock.connectToServer(QStringLiteral("idm-next-ipc"));
@@ -795,8 +798,11 @@ int main(int argc, char** argv) {
             const QJsonObject response = QJsonDocument::fromJson(sock.readAll()).object();
             const bool ok = response.value(QStringLiteral("success")).toBool();
             const int id = response.value(QStringLiteral("taskId")).toInt(-1);
+            if (expectedSuccess)
+                acceptedSessionId = response.value(QStringLiteral("sessionId")).toString();
             sock.disconnectFromServer();
-            return ok == expectedSuccess && id == expectedId;
+            return ok == expectedSuccess && id == expectedId &&
+                (!expectedSuccess || !acceptedSessionId.isEmpty());
         };
         const bool denied = ask(false, -1) && called == 1;
         printf("%s IPC add failed callback must return success=false\n",
@@ -805,7 +811,50 @@ int main(int argc, char** argv) {
         const bool accepted = ask(true, 47) && called == 2;
         printf("%s IPC add successful callback must return matching taskId\n",
                accepted ? "[PASS]" : "[FAIL]");
-        return (denied && accepted) ? 0 : 1;
+        TaskRow row{};
+        row.id = 47;
+        row.fileName = QStringLiteral("probe.zip");
+        row.url = QStringLiteral("https://example.test/probe.zip");
+        row.state = 4;
+        row.errorMsg = QStringLiteral("HTTP 404");
+        model.addTask(row);
+        auto queryStatus = [&](int requestedId, const QString& sessionId) {
+            QLocalSocket sock;
+            sock.connectToServer(QStringLiteral("idm-next-ipc"));
+            if (!sock.waitForConnected(1500)) return QJsonObject{};
+            const QJsonObject req {
+                { QStringLiteral("command"), QStringLiteral("task_status") },
+                { QStringLiteral("taskId"), requestedId },
+                { QStringLiteral("sessionId"), sessionId }
+            };
+            QEventLoop loop;
+            QObject::connect(&sock, &QLocalSocket::readyRead,
+                             &loop, &QEventLoop::quit);
+            QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+            sock.write(QJsonDocument(req).toJson(QJsonDocument::Compact));
+            sock.flush();
+            loop.exec();
+            const QJsonObject reply = QJsonDocument::fromJson(sock.readAll()).object();
+            sock.disconnectFromServer();
+            return reply;
+        };
+        const QJsonObject status = queryStatus(47, acceptedSessionId);
+        const bool failedTask = status.value(QStringLiteral("success")).toBool()
+            && status.value(QStringLiteral("taskId")).toInt() == 47
+            && status.value(QStringLiteral("sessionId")).toString() == acceptedSessionId
+            && status.value(QStringLiteral("state")).toInt() == 4
+            && status.value(QStringLiteral("error")).toString() == QStringLiteral("HTTP 404");
+        printf("%s IPC status: failed task must retain error and exact ID\n",
+               failedTask ? "[PASS]" : "[FAIL]");
+        const QJsonObject absent = queryStatus(999, acceptedSessionId);
+        const bool missing = !absent.value(QStringLiteral("success")).toBool();
+        printf("%s IPC status: absent task must fail, never report completed\n",
+               missing ? "[PASS]" : "[FAIL]");
+        const QJsonObject stale = queryStatus(47, QStringLiteral("old-session"));
+        const bool rejectsStale = !stale.value(QStringLiteral("success")).toBool();
+        printf("%s IPC status: old GUI session cannot alias a reused task ID\n",
+               rejectsStale ? "[PASS]" : "[FAIL]");
+        return (denied && accepted && failedTask && missing && rejectsStale) ? 0 : 1;
     }
 
     /* ── 诊断模式：IDM_IPC_PROBE=1 ──

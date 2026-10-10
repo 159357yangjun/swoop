@@ -40,6 +40,7 @@ private slots:
 private:
     void handleClient(QLocalSocket* client);
 
+    QString m_sessionId; // unique per desktop GUI process; blocks stale ID reuse after restart
     QLocalServer* m_server = nullptr;
     std::function<int(const QString&, const QString&, const QString&, int, const QString&, const QString&)> m_addTask;
     std::function<int()> m_taskCount;

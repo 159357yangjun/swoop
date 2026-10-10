@@ -8,9 +8,12 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', '..', 'browser-extension', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress' } = {}) {
+function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress' } = {}) {
   const events = { created: listener(), message: listener() };
-  const calls = { native: 0, cancel: [], erase: [], dialogs: 0 };
+  const calls = { native: 0, cancel: [], erase: [], dialogs: 0, nativeActions: [] };
+  const local = {};
+  const SESSION_A = '11111111-1111-4111-8111-111111111111';
+  let guiSession = SESSION_A;
   const item = { id: 73, tabId, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
   if (omitTabId) delete item.tabId;
   const noop = listener();
@@ -20,12 +23,30 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
       getURL(path) { return 'chrome-extension://mock-extension/' + path; },
       sendNativeMessage(_host, _payload, callback) {
         calls.native++;
-        queueMicrotask(() => callback({ success: accepted, message: accepted ? 'accepted' : 'failed' }));
+        calls.nativeActions.push(_payload.action);
+        queueMicrotask(() => callback(_payload.action === 'get_task_status'
+          ? (_payload.sessionId === guiSession
+              ? { success: true, taskId: _payload.taskId, sessionId: guiSession, state: 4,
+                  stateText: '失败', error: 'HTTP 404', message: '任务失败' }
+              : { success: false, message: 'old desktop session' })
+          : { success: accepted, taskId: accepted ? acceptedTaskId : null,
+              sessionId: accepted ? guiSession : null,
+              message: accepted ? 'accepted' : 'failed' }));
       },
       sendMessage() { return Promise.resolve(); }
     },
     storage: {
-      local: { async get() { return { interceptEnabled: intercept, confirmEnabled: confirm }; }, async set() {} },
+      local: {
+        async get(key) {
+          const selected = key === 'recentHandoffs'
+            ? { recentHandoffs: local.recentHandoffs } : {};
+          return { interceptEnabled: intercept, confirmEnabled: confirm, ...selected };
+        },
+        async set(data) {
+          if (failJournal && data.recentHandoffs) throw new Error('storage unavailable');
+          Object.assign(local, data);
+        }
+      },
       session: { async get() { return {}; }, async set() {}, async remove() {} }
     },
     downloads: {
@@ -54,6 +75,7 @@ function make({ accepted = true, confirm = false, intercept = true, dialogOK = t
                      { filename: 'background.js' });
   return {
     item, calls,
+    setGuiSession(value) { guiSession = value; },
     async message(msg, fromPopup = true, overrideSender = null) {
       return new Promise(resolve => {
         const sender = overrideSender || (fromPopup
@@ -227,4 +249,86 @@ test('verified popup.html opened in extension tab can request explicit takeover'
   assert.equal(result.success, true);
   assert.equal(h.calls.native, 1);
   assert.deepEqual(h.calls.cancel, [73]);
+});
+
+test('tracked handoff persists task ID and can show later failure, not just accepted', async () => {
+  const h = make();
+  await h.start();
+  const saved = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(saved.success, true);
+  assert.equal(saved.items[0].taskId, 47);
+  assert.equal(saved.items[0].browserDownloadId, 73);
+  const status = await h.message({ action: 'getHandoffStatus', taskId: 47 });
+  assert.equal(status.success, true);
+  assert.equal(status.state, 4);
+  assert.equal(status.error, 'HTTP 404');
+  assert.equal(h.calls.nativeActions.at(-1), 'get_task_status');
+  // Cancellation history stays visible as a recovery witness.
+  assert.deepEqual(h.calls.erase, []);
+});
+test('CLI-style success without task ID cannot cancel browser original', async () => {
+  const h = make({ acceptedTaskId: null });
+  await h.start();
+  assert.deepEqual(h.calls.cancel, []);
+  assert.deepEqual(h.calls.erase, []);
+  const list = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(list.items.length, 0);
+});
+test('if handoff journal cannot persist, browser download is preserved', async () => {
+  const h = make({ failJournal: true });
+  await h.start();
+  assert.deepEqual(h.calls.cancel, []);
+  assert.deepEqual(h.calls.erase, []);
+});
+test('content scripts cannot query handoff history or per-task state', async () => {
+  const h = make();
+  await h.start();
+  const list = await h.message({ action: 'getRecentHandoffs' }, false);
+  const status = await h.message({ action: 'getHandoffStatus', taskId: 47 }, false);
+  assert.equal(list.success, false);
+  assert.equal(status.success, false);
+});
+test('status query rejects untracked task IDs', async () => {
+  const h = make();
+  await h.start();
+  const prevNative = h.calls.native;
+  const reply = await h.message({ action: 'getHandoffStatus', taskId: 999 });
+  assert.equal(reply.success, false);
+  assert.equal(h.calls.native, prevNative);
+});
+
+test('manually sent resource also leaves a queryable task record', async () => {
+  const h = make({ confirm: true });
+  const accepted = await h.message({ action: 'download', url: h.item.url, filename: 'file.zip' });
+  assert.equal(accepted.success, true);
+  assert.equal(accepted.taskId, 47);
+  assert.equal(accepted.tracked, true);
+  const history = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(history.items[0].taskId, 47);
+  const state = await h.message({ action: 'getHandoffStatus', taskId: 47 });
+  assert.equal(state.state, 4);
+  assert.equal(state.error, 'HTTP 404');
+});
+
+test('manual send without task ID is explicitly not tracked', async () => {
+  const h = make({ acceptedTaskId: null });
+  const result = await h.message({ action: 'download', url: h.item.url, filename: 'file.zip' });
+  assert.equal(result.success, true);
+  assert.equal(result.tracked, false);
+  assert.equal(result.taskId, null);
+  const history = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(history.items.length, 0);
+});
+
+test('desktop process restart rejects reused integer ID from old handoff', async () => {
+  const h = make();
+  await h.start();
+  const original = await h.message({ action: 'getRecentHandoffs' });
+  assert.equal(original.items[0].taskId, 47);
+  assert.equal(original.items[0].sessionId, '11111111-1111-4111-8111-111111111111');
+  h.setGuiSession('22222222-2222-4222-8222-222222222222');
+  const status = await h.message({ action: 'getHandoffStatus', taskId: 47 });
+  assert.equal(status.success, false);
+  assert.match(status.message, /old desktop session/);
+  assert.deepEqual(h.calls.erase, []);
 });
