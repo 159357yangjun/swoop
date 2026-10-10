@@ -625,6 +625,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return true;
     }
 
+    // chrome.downloads.DownloadItem 没有 tabId：popup 明确列出仍在进行的下载，
+    // 由用户亲自选择是否转交。不要猜测 activeTab 并自动取消他人的任务。
+    if (msg.action === 'getBrowserDownloads') {
+        chrome.downloads.search({ state: 'in_progress' }).then(items => {
+            const eligible = items.filter(item => shouldIntercept(item, { enabled: true }));
+            sendResponse({ success: true, items: eligible.slice(0, 20).map(item => ({
+                id: item.id, filename: item.filename || inferFilename(item.url),
+                url: item.url, size: item.totalBytes > 0 ? item.totalBytes : -1
+            })) });
+        }).catch(e => sendResponse({ success: false, items: [], message: String(e) }));
+        return true;
+    }
+
+    if (msg.action === 'takeoverBrowserDownload') {
+        // 执行只能来自扩展自己的 popup，不接受网页内容脚本指定要取消的 ID。
+        if (sender.tab || !sender.url ||
+            sender.url !== chrome.runtime.getURL('popup.html') ||
+            !Number.isSafeInteger(msg.id) || msg.id < 0) {
+            sendResponse({ success: false, message: '无效的浏览器下载接管请求' });
+            return false;
+        }
+        chrome.downloads.search({ id: msg.id }).then(async items => {
+            const item = items.find(x => x.id === msg.id && x.state === 'in_progress' &&
+                                             shouldIntercept(x, { enabled: true }));
+            if (!item) {
+                sendResponse({ success: false, message: '原下载已结束或不符合接管条件' });
+                return;
+            }
+            const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
+            const result = await sendToIdmNext(item.url, filename);
+            const canceled = result.success ? await retireBrowserDownloadAfterAccept(item, result) : false;
+            sendResponse({
+                success: !!result.success,
+                accepted: !!result.success,
+                browserCanceled: canceled,
+                message: result.success
+                    ? (canceled ? 'IDM Next 已接收，浏览器原下载已取消'
+                                : 'IDM Next 已接收；浏览器下载仍在进行或已完成，请检查重复文件')
+                    : (result.message || '桌面端未接收；浏览器会继续下载')
+            });
+        }).catch(e => sendResponse({ success: false, message: String(e) }));
+        return true;
+    }
+
     // popup / content script 请求发送下载到 IDM Next
     if (msg.action === 'download') {
         sendToIdmNext(msg.url, msg.filename || '').then(result => {
