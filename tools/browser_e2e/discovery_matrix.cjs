@@ -158,7 +158,9 @@ async function runTrial(exe, label, index, base) {
       }
       // A query parameter ending in video.mp4 MUST NOT promote a text/plain response to media.
       const negatives = rows.filter(r => r.url.includes('/not-media.txt'));
-      if (!tabInfo.token.startsWith('dynamic-')) counters.negatives++;
+      // Dynamic pages exercise a negative anchor; the other pages issue a
+      // negative HTTP fetch. Every tab has one real negative control.
+      counters.negatives++;
       counters.falsePositives += negatives.length;
       assert.equal(negatives.length, 0,
                    name + ' classified plain text as media: ' + JSON.stringify(negatives));
