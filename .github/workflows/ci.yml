@@ -20,6 +20,12 @@ jobs:
           node --check browser-extension/content.js
           node --test browser-extension/tests/handoff.test.cjs
 
+      - name: Real Chrome/Edge takeover fallback (offline native host)
+        shell: pwsh
+        run: |
+          npm install --prefix tools/browser_e2e --no-save --package-lock=false playwright-core@1.56.1
+          node tools/browser_e2e/run.cjs
+
       - name: Set up MSYS2 + Qt 6 toolchain
         uses: msys2/setup-msys2@v2
         with:
