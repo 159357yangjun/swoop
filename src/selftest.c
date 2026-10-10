@@ -243,6 +243,9 @@ int test_resume_replaced_after_restore(void)
     if (rc) goto done;
     t->status = DL_PAUSED; t->total = 1048576; t->downloaded = 131072;
     t->seg_count = 1; t->seg_len[0] = 1048576; t->seg_written[0] = 131072;
+    /* Save real provenance for the original partial file, then replace it on disk.
+       This must test mismatched identity, not only legacy records lacking identity. */
+    if (!task_capture_file_identity(t)) { rc = 197; goto done; }
     download_task_t *list[1] = { t };
     if (taskstore_save(db, list, 1) != 1) { rc = 185; goto done; }
     task_free(t); t = NULL;
