@@ -53,7 +53,12 @@ bool HlsDownloader::isFfmpegAvailable()
 
 bool HlsDownloader::isHlsUrl(const QString& url)
 {
-    return url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive);
+    // Signed/CDN playlists commonly end in ?token=... . Match the URL path,
+    // never the query text, so a non-HLS URL cannot masquerade as a manifest.
+    const QUrl parsed(url);
+    return (parsed.scheme() == QStringLiteral("http") ||
+            parsed.scheme() == QStringLiteral("https")) &&
+           parsed.path().endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive);
 }
 
 // ── IDownloader 接口 ──────────────────────────
