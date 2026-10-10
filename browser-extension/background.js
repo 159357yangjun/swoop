@@ -640,8 +640,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.action === 'takeoverBrowserDownload') {
         // 执行只能来自扩展自己的 popup，不接受网页内容脚本指定要取消的 ID。
-        if (sender.tab || !sender.url ||
-            sender.url !== chrome.runtime.getURL('popup.html') ||
+        // MessageSender.url is optional for extension pages; do not require it.
+        // Internal popup messages carry our extension ID and no sender.tab.
+        // Content scripts carry sender.tab and cannot take over a different download.
+        if (sender.tab || sender.id !== chrome.runtime.id ||
             !Number.isSafeInteger(msg.id) || msg.id < 0) {
             sendResponse({ success: false, message: '无效的浏览器下载接管请求' });
             return false;
