@@ -295,6 +295,76 @@ done:
     return rc;
 }
 
+
+/* Positive control: an unchanged partial file with persisted identity must resume
+   in place and produce the exact one-megabyte deterministic HTTP test payload. */
+int test_resume_unchanged_after_restore(void)
+{
+    wchar_t tmp[MAX_PATH], dest[MAX_PATH], db[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, tmp)) return 201;
+    _snwprintf(dest, MAX_PATH, L"%sswoop-resume-ok.bin", tmp);
+    _snwprintf(db, MAX_PATH, L"%sswoop-resume-ok.dat", tmp);
+    dest[MAX_PATH - 1] = db[MAX_PATH - 1] = 0;
+    DeleteFileW(dest); DeleteFileW(db);
+    int rc = 0;
+    download_task_t *t = task_create("http://127.0.0.1:18099/bigfile", dest, 1);
+    if (!t) return 202;
+    HANDLE h = CreateFileW(dest, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { rc = 203; goto done; }
+    unsigned char chunk[4096];
+    for (int block = 0; block < 32; block++) {
+        for (int j = 0; j < (int)sizeof chunk; j++)
+            chunk[j] = (unsigned char)(((block * 4096 + j) * 31 + 7) & 255);
+        DWORD written = 0;
+        if (!WriteFile(h, chunk, sizeof chunk, &written, NULL) || written != sizeof chunk) {
+            rc = 204; break;
+        }
+    }
+    LARGE_INTEGER size; size.QuadPart = 1048576;
+    if (!rc && (!SetFilePointerEx(h, size, NULL, FILE_BEGIN) || !SetEndOfFile(h)))
+        rc = 205;
+    CloseHandle(h);
+    if (rc) goto done;
+    t->status = DL_PAUSED; t->total = 1048576; t->downloaded = 131072;
+    t->seg_count = 1; t->seg_len[0] = 1048576; t->seg_written[0] = 131072;
+    if (!task_capture_file_identity(t)) { rc = 206; goto done; }
+    download_task_t *list[1] = {t};
+    if (taskstore_save(db, list, 1) != 1) { rc = 207; goto done; }
+    task_free(t); t = NULL;
+
+    download_task_t *loaded[2] = {NULL, NULL}; int n = 0;
+    if (taskstore_load(db, loaded, 2, &n) != 0 || n != 1) { rc = 208; goto loaded_done; }
+    if (!loaded[0]->resume_identity_valid) { rc = 209; goto loaded_done; }
+    if (task_start(loaded[0]) != 0) { rc = 210; goto loaded_done; }
+    if (_wcsicmp(loaded[0]->outfile, dest) != 0) { rc = 211; goto loaded_done; }
+    for (int i = 0; i < 2000 && loaded[0]->status == DL_DOWNLOADING; i++) {
+        task_tick(loaded[0], GetTickCount()); Sleep(10);
+    }
+    if (loaded[0]->status != DL_COMPLETE) { rc = 212; goto loaded_done; }
+    h = CreateFileW(dest, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { rc = 213; goto loaded_done; }
+    unsigned char verify[4096]; DWORD got = 0;
+    for (int block = 0; block < 256 && !rc; block++) {
+        if (!ReadFile(h, verify, sizeof verify, &got, NULL) || got != sizeof verify) {
+            rc = 214; break;
+        }
+        for (int j = 0; j < (int)sizeof verify; j++) {
+            if (verify[j] != (unsigned char)(((block * 4096 + j) * 31 + 7) & 255)) {
+                rc = 215; break;
+            }
+        }
+    }
+    CloseHandle(h);
+loaded_done:
+    if (loaded[0]) task_free(loaded[0]);
+done:
+    if (t) task_free(t);
+    DeleteFileW(dest); DeleteFileW(db);
+    return rc;
+}
+
 int main(void)
 {
     int safe = test_safe_derived_filenames();
