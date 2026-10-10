@@ -62,7 +62,7 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
     if (archiveByType && m_settings && m_settings->autoArchiveByType() && !dir.isEmpty()) {
         FileType ft = FileType::Other;
         if (VideoDownloader::isVideoUrl(url)
-                || url.endsWith(QStringLiteral(".m3u8"), Qt::CaseInsensitive)
+                || HlsDownloader::isHlsUrl(url)
                 || url.endsWith(QStringLiteral(".mpd"),  Qt::CaseInsensitive)) {
             ft = FileType::Video;  // 视频站点 URL 无扩展名，单独判定
         } else {
