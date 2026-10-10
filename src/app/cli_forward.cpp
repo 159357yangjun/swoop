@@ -152,6 +152,10 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
         traceForward("read_reply", socket, traceClock.elapsed(), response.size(), 1);
         const QJsonObject respObj = QJsonDocument::fromJson(response).object();
         const bool success = respObj.value(QStringLiteral("success")).toBool(false);
+        // Optional diagnostics: distinguish a received response from a successful
+        // *business acknowledgement*, without printing user payload or URL.
+        traceForward("response_parsed", socket, traceClock.elapsed(),
+                     response.size(), success ? 1 : 0);
         const QString message = respObj.value(QStringLiteral("message")).toString();
         if (printResponse && !message.isEmpty()) {
             QTextStream stream(success ? stdout : stderr);
