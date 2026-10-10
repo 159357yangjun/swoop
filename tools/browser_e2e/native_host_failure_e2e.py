@@ -44,7 +44,8 @@ def host_call(host: Path, cwd: Path, obj: dict, timeout: float = 15) -> dict:
     framed = struct.pack("<I", len(packet)) + packet
     child = subprocess.Popen(
         [str(host)], cwd=str(cwd),
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "IDM_NATIVE_HOST_TRACE": "1"}
     )
     try:
         raw, err = child.communicate(framed, timeout=timeout)
