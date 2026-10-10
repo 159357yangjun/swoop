@@ -11,6 +11,7 @@
 #include <cstdio>
 
 #include "logger.h"
+#include "socket_drain.h"
 
 QString ipcServerName()
 {
@@ -125,10 +126,15 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
     const qint64 accepted = socket.write(data);
     const bool flushed = socket.flush();
     traceForward("write_flush", socket, traceClock.elapsed(), accepted, flushed ? 1 : 0);
-    const bool writtenSignal = socket.waitForBytesWritten(2000);
-    traceForward("wait_bytes_written", socket, traceClock.elapsed(),
-                 accepted, writtenSignal ? 1 : 0);
-    if (!writtenSignal) {
+    // waitForBytesWritten() may return false if flush() already emptied the
+    // Qt write queue before the wait began. That is NOT a failed write.
+    // The client previously returned Failure while bytesToWrite()==0 and the
+    // GUI had already processed activate (CI trace 38037010590).
+    const bool drained = (accepted == data.size()) &&
+                         drainSocketBeforeClose(&socket, 2000);
+    traceForward("drain_request", socket, traceClock.elapsed(),
+                 accepted, drained ? 1 : 0);
+    if (!drained) {
         const QString why = QStringLiteral("已连上运行中的实例，但请求没写进去（%1）")
                                 .arg(socket.errorString());
         socket.disconnectFromServer();
@@ -136,7 +142,8 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
         return ForwardResult::Failure;
     }
 
-    const bool readable = socket.waitForReadyRead(3000);
+    // Readiness may already be buffered by the time request draining ends.
+    const bool readable = socket.bytesAvailable() > 0 || socket.waitForReadyRead(3000);
     traceForward("wait_reply", socket, traceClock.elapsed(), data.size(), readable ? 1 : 0);
     if (readable) {
         const QByteArray response = socket.readAll();
