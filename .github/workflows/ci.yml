@@ -532,6 +532,7 @@ jobs:
       - name: Real Native Host and GUI 404 failure status
         shell: pwsh
         run: |
+          # Integration gate: all three strict startup races above must pass first.
           # Exercises packaged idm-next.exe + idm-next-host.exe + actual HTTP
           # error path, with one-shot add (no duplicate-risk retry).
           # Not a browser toolbar UI test: that is separately gated above.
