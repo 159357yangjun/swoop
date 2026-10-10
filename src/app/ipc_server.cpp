@@ -234,6 +234,27 @@ void IpcServer::handleClient(QLocalSocket* client)
                 ? QStringLiteral("已取消任务 #%1").arg(id)
                 : QStringLiteral("已移除任务 #%1").arg(id);
         }
+    } else if (command == "task_status") {
+        // Machine-readable, read-only status for a browser handoff by exact ID.
+        // Never claim completed just because the add IPC previously succeeded.
+        const int id = msg.value(QStringLiteral("taskId")).toInt(-1);
+        const QVector<TaskRow> tasks = model ? model->tasks() : QVector<TaskRow>();
+        const TaskRow* row = id > 0 ? findTask(tasks, id) : nullptr;
+        if (!row) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("任务已不在当前桌面列表，请打开 IDM Next 检查");
+        } else {
+            response["success"] = true;
+            response["taskId"] = row->id;
+            response["state"] = row->state;
+            response["stateText"] = TaskListModel::stateText(row->state);
+            response["downloaded"] = static_cast<double>(row->downloaded);
+            response["total"] = static_cast<double>(row->fileSize);
+            response["error"] = row->state == 4 ? row->errorMsg : QString();
+            response["message"] = row->state == 4
+                ? QStringLiteral("下载失败，请在桌面端查看原因并重试")
+                : QStringLiteral("任务状态已更新");
+        }
     } else if (command == "info") {
         bool ok = false;
         int id = args.toInt(&ok);
