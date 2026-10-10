@@ -715,7 +715,9 @@
         btnQueue.appendChild(qLbl);
         const btnCancel = document.createElement('button');
         btnCancel.className = 'idm-cap-cancel';
-        btnCancel.textContent = '取消';
+        // 自动接管卡片只是“改用 IDM 下载”的选择；拒绝后浏览器原下载继续。
+        btnCancel.textContent = Number.isSafeInteger(resource.browserDownloadId)
+            ? '继续浏览器下载' : '取消';
         actions.appendChild(btnNow);
         actions.appendChild(btnQueue);
         actions.appendChild(btnCancel);
@@ -736,7 +738,9 @@
                 filename: fn,
                 saveDir: dir,
                 format: fmt,
-                queued: queued
+                queued: queued,
+                browserDownloadId: Number.isSafeInteger(resource.browserDownloadId)
+                    ? resource.browserDownloadId : null
             }, (response) => {
                 const success = !!(response && response.success);
                 const message = success ? (response && response.message) || '已添加到 IDM Next'
@@ -821,8 +825,8 @@
             sendResponse({ ok: true });
         } else if (msg.action === 'showCaptureDialog') {
             // 浏览器自动拦截触发：在页面内弹出下载确认卡片
-            showCaptureDialog(msg.resource || { url: msg.url, filename: '' });
-            sendResponse({ ok: true });
+            const card = showCaptureDialog(msg.resource || { url: msg.url, filename: '' });
+            sendResponse({ ok: !!card });
         } else if (msg.action === 'showCaptureDialogFor') {
             // popup 点“选择路径”触发：针对某条嗅探资源打开确认卡片
             showCaptureDialog(msg.resource);
