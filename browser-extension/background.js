@@ -238,7 +238,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 /**
- * 读取“接管浏览器下载”设置（默认开启）
+ * 读取“接管浏览器下载”设置（默认关闭，用户主动开启）
  * @returns {Promise<{enabled: boolean}>}
  */
 async function getInterceptSettings() {
@@ -329,7 +329,12 @@ chrome.downloads.onCreated.addListener(async (item) => {
     const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
     const confirm = await getConfirmSettings();
 
-    if (confirm.enabled && item.tabId >= 0) {
+    if (confirm.enabled && item.tabId < 0) {
+        // 没有可展示确认卡片的来源页时，也不能绕过用户的确认要求。
+        console.warn('[IDM Next] 下载无可确认的来源标签页，交由浏览器继续');
+        return;
+    }
+    if (confirm.enabled) {
         // 确认卡片关闭/拒绝时浏览器原下载保持原样。
         chrome.tabs.sendMessage(item.tabId, {
             action: 'showCaptureDialog',
