@@ -459,11 +459,13 @@ void HlsDownloader::fetchKey()
 
 void HlsDownloader::onKeyFinished()
 {
-    if (!m_keyReply)
-        return;
-    QNetworkReply* r = m_keyReply;
-    m_keyReply = nullptr;
+    // Use the actual sender: an aborted reply from an earlier run must not
+    // consume/clear a new run's m_keyReply after rapid pause/resume.
+    auto* r = qobject_cast<QNetworkReply*>(sender());
+    if (!r) return;
     r->deleteLater();
+    if (m_keyReply != r) return;
+    m_keyReply = nullptr;
 
     if (m_cancelled || m_paused || m_finished ||
         r->property("hlsGeneration").toULongLong() != m_generation)
