@@ -73,7 +73,7 @@ async function runOne(exe, label, mode, baseUrl) {
         if (!candidate.url().startsWith('chrome-extension://' + ID + '/')) continue;
         try {
           const ready = await candidate.evaluate(() => typeof chrome !== 'undefined'
-            + && !!(chrome.runtime && chrome.runtime.sendNativeMessage));
+            && !!(chrome.runtime && chrome.runtime.sendNativeMessage));
           if (ready) { worker = candidate; break; }
         } catch { /* target was replaced: retry after waking the extension */ }
       }
