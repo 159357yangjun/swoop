@@ -180,7 +180,17 @@ void DownloadManager::flushProgress()
 
 void DownloadManager::forwardComplete(int task_id, int success)
 {
-    emit taskCompleted(task_id, success != 0, QString());
+    // C 引擎的完成回调只携带成功标志；失败原因存放在 TaskInfo。
+    // 回调在引擎锁释放后触发，此处可安全读取任务快照并通过信号转给 GUI。
+    // 不要依赖 GUI 的 4Hz 轮询：状态信号可能先把行标记为 FAILED，
+    // 导致仅检测状态跃迁的刷新逻辑再也读不到 error_msg。
+    QString error;
+    if (!success) {
+        TaskInfo info{};
+        if (dlmgr_get_task_info(task_id, &info) == 0 && info.status == TASK_FAILED)
+            error = QString::fromUtf8(info.error_msg).trimmed();
+    }
+    emit taskCompleted(task_id, success != 0, error);
     // 同步转发终态：3=COMPLETED 4=FAILED（与 download_core.h TaskStatus 对齐）
     emit taskStateChanged(task_id, success != 0 ? 3 : 4);
 }
