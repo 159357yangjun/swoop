@@ -16,12 +16,22 @@ jobs:
       - name: Browser handoff regression (Node, no browser profile)
         shell: pwsh
         run: |
+          # Preserve each native exit code: later successful node commands must
+          # not mask a failed earlier regression suite in pwsh.
           node --check browser-extension/background.js
+          if ($LASTEXITCODE -ne 0) { throw 'background.js syntax check failed' }
           node --check browser-extension/content.js
+          if ($LASTEXITCODE -ne 0) { throw 'content.js syntax check failed' }
           node --check browser-extension/resource_backfill.js
+          if ($LASTEXITCODE -ne 0) { throw 'resource_backfill.js syntax check failed' }
           node --check tools/browser_e2e/run.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'run.cjs syntax check failed' }
+          node --check tools/browser_e2e/discovery_matrix.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'discovery_matrix.cjs syntax check failed' }
           node --test tools/browser_e2e/handoff.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Browser handoff Node tests failed' }
           node --test tools/browser_e2e/resource_backfill.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Resource discovery Node tests failed' }
 
       - name: Real Chrome/Edge takeover fallback (offline native host)
         shell: pwsh
