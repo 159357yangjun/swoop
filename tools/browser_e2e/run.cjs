@@ -36,7 +36,20 @@ async function browsers() {
 }
 async function httpServer() {
   const server = http.createServer((req, res) => {
-    if (req.url === '/file.zip' || req.url === '/slow.zip') {
+    if (req.url === '/early.mp4') {
+      res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': payload.length,
+                           'Cache-Control': 'no-store' });
+      res.end(payload);
+    } else if (req.url === '/not-media.txt') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      res.end('plain content');
+    } else if (req.url === '/network.html') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><html><script>Promise.all([' +
+              'fetch("/early.mp4?from=early"),fetch("/not-media.txt")' +
+              ']).then(async rs=>{await Promise.all(rs.map(r=>r.arrayBuffer()));window.__done=true})' +
+              '</script><body>No video elements or media links</body></html>');
+    } else if (req.url === '/file.zip' || req.url === '/slow.zip') {
       const slow = req.url === '/slow.zip';
       res.writeHead(200, { 'Content-Type': 'application/zip',
                            'Content-Disposition': 'attachment; filename="' + (slow ? 'slow' : 'file') + '.zip"',
@@ -123,6 +136,38 @@ async function runOne(exe, label, mode, baseUrl) {
         });
       };
     }, mode);
+
+    if (mode === 'media-backfill') {
+      // Native-page fetch, no video/source DOM: a PerformanceResourceTiming
+      // witness must be recorded independently of the webRequest source.
+      const watch = await context.newPage();
+      await watch.goto(baseUrl + '/network.html', { waitUntil: 'domcontentloaded' });
+      await watch.waitForFunction(() => window.__done === true, { timeout: 12000 });
+      const watchTab = await popup.evaluate(async url => {
+        return (await chrome.tabs.query({})).find(x => x.url === url) || null;
+      }, baseUrl + '/network.html');
+      assert.ok(watchTab && watchTab.id >= 0, 'network page has no browser tab');
+      let found = null;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        found = await popup.evaluate(async id => {
+          const key = 'tab_' + id;
+          const r = await chrome.storage.session.get(key);
+          return r[key] || [];
+        }, watchTab.id);
+        if (found.some(x => x.url.includes('/early.mp4') &&
+                            (x.sources || []).includes('performance-backfill'))) break;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      const positive = found.filter(x => x.url.includes('/early.mp4'));
+      assert.equal(positive.length, 1, 'early media lost or duplicated');
+      assert.ok((positive[0].sources || []).includes('performance-backfill'),
+                'Performance Timeline did not backfill early resource');
+      assert.ok(!found.some(x => x.url.includes('/not-media.txt')),
+                'plain text must not be reported as media');
+      console.log('[PASS] ' + label + ' media-backfill provenance=' +
+                  positive[0].sources.join(',') + ' count=' + found.length);
+      return;
+    }
 
     const explicitPopup = mode === 'popup-takeover-offline';
     const pagePath = explicitPopup ? '/slow.html' : '/index.html';
@@ -244,7 +289,7 @@ async function runOne(exe, label, mode, baseUrl) {
   console.log('SERVER_READY port=' + port + ' size=' + payload.length + ' sha256=' + sourceSha);
   try {
     for (const [label, exe] of found)
-      for (const mode of ['offline', 'no-source-confirm', 'manual-dismiss', 'browser-first', 'popup-takeover-offline'])
+      for (const mode of ['offline', 'no-source-confirm', 'manual-dismiss', 'browser-first', 'popup-takeover-offline', 'media-backfill'])
         await runOne(exe, label, mode, 'http://127.0.0.1:' + port);
   } finally {
     await new Promise(resolve => server.close(resolve));

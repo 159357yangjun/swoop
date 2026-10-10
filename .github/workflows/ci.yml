@@ -18,8 +18,10 @@ jobs:
         run: |
           node --check browser-extension/background.js
           node --check browser-extension/content.js
+          node --check browser-extension/resource_backfill.js
           node --check tools/browser_e2e/run.cjs
           node --test tools/browser_e2e/handoff.test.cjs
+          node --test tools/browser_e2e/resource_backfill.test.cjs
 
       - name: Real Chrome/Edge takeover fallback (offline native host)
         shell: pwsh

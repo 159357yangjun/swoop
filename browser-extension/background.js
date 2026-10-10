@@ -65,53 +65,72 @@ const MEDIA_MIME_PREFIXES = ['video/', 'audio/'];
 const MAX_RESOURCES_PER_TAB = 200;
 
 // ── 资源存储 ──────────────────────────────────
-
-/**
- * 添加嗅探到的资源到标签页列表
- */
-async function addResource(tabId, resource) {
-    const key = `tab_${tabId}`;
-    const result = await chrome.storage.session.get(key);
-    let list = result[key] || [];
-
-    // 去重：同一 URL 不重复添加
-    if (list.some(r => r.url === resource.url)) return;
-
-    // 如果有新的大小信息，更新已有条目
-    const existing = list.find(r => r.url === resource.url);
-    if (existing && resource.size > 0 && existing.size < 0) {
-        existing.size = resource.size;
-        await chrome.storage.session.set({ [key]: list });
-        return;
-    }
-
-    list.unshift(resource);
-    if (list.length > MAX_RESOURCES_PER_TAB)
-        list = list.slice(0, MAX_RESOURCES_PER_TAB);
-
-    await chrome.storage.session.set({ [key]: list });
-
-    // 更新扩展图标 badge（显示当前页面嗅探到的资源数）
-    await chrome.action.setBadgeText({ tabId, text: String(list.length) });
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: '#2563eb' });
+// A network URL event, its response headers, and the content script may arrive
+// simultaneously. storage.session read/modify/write is NOT atomic: serialize by tab.
+const tabResourceWrites = new Map();
+function withTabWrite(tabId, change) {
+    const prev = tabResourceWrites.get(tabId) || Promise.resolve();
+    const next = prev.catch(() => {}).then(change);
+    tabResourceWrites.set(tabId, next);
+    next.finally(() => {
+        if (tabResourceWrites.get(tabId) === next) tabResourceWrites.delete(tabId);
+    }).catch(() => {});
+    return next;
 }
 
-/**
- * 获取标签页的资源列表
- */
+async function addResource(tabId, resource) {
+    if (!Number.isSafeInteger(tabId) || tabId < 0 ||
+        !resource || typeof resource.url !== 'string' || !resource.url) return;
+    return withTabWrite(tabId, async () => {
+        const key = `tab_${tabId}`;
+        const result = await chrome.storage.session.get(key);
+        const list = result[key] || [];
+        const existing = list.find(r => r.url === resource.url);
+        const source = resource.source || 'dom';
+        if (existing) {
+            let changed = false;
+            if (resource.size > 0 && !(existing.size > 0)) {
+                existing.size = resource.size;
+                changed = true;
+            }
+            if (resource.mimeType && !existing.mimeType) {
+                existing.mimeType = resource.mimeType;
+                changed = true;
+            }
+            const sources = existing.sources || [existing.source || 'unknown'];
+            if (!sources.includes(source)) {
+                sources.push(source);
+                existing.sources = sources;
+                changed = true;
+            }
+            if (changed) await chrome.storage.session.set({ [key]: list });
+            return;
+        }
+        list.unshift({ ...resource, source, sources: [source] });
+        if (list.length > MAX_RESOURCES_PER_TAB) list.length = MAX_RESOURCES_PER_TAB;
+        await chrome.storage.session.set({ [key]: list });
+        try {
+            await chrome.action.setBadgeText({ tabId, text: String(list.length) });
+            await chrome.action.setBadgeBackgroundColor({ tabId, color: '#2563eb' });
+        } catch {
+            // The tab may have closed between resource discovery and badge update.
+        }
+    });
+}
+
 async function getResources(tabId) {
+    const pending = tabResourceWrites.get(tabId);
+    if (pending) await pending.catch(() => {});
     const key = `tab_${tabId}`;
     const result = await chrome.storage.session.get(key);
     return result[key] || [];
 }
 
-/**
- * 清空标签页资源
- */
 async function clearResources(tabId) {
-    const key = `tab_${tabId}`;
-    await chrome.storage.session.remove(key);
-    await chrome.action.setBadgeText({ tabId, text: '' });
+    return withTabWrite(tabId, async () => {
+        await chrome.storage.session.remove(`tab_${tabId}`);
+        try { await chrome.action.setBadgeText({ tabId, text: '' }); } catch {}
+    });
 }
 
 /**
@@ -162,7 +181,8 @@ chrome.webRequest.onBeforeRequest.addListener(
             filename: inferFilename(url),
             size: -1,
             timestamp: Date.now(),
-            initiator: details.initiator || ''
+            initiator: details.initiator || '',
+            source: 'webRequest'
         });
     },
     { urls: ['<all_urls>'] }
@@ -192,34 +212,19 @@ chrome.webRequest.onHeadersReceived.addListener(
 
         if (!isMedia) return;
 
-        // 如果 URL 已在列表中，更新大小信息
+        // Same URL updates MIME/size, or inserts if the onBeforeRequest
+        // event was missed. Always pass through the serialized dedup layer.
         const url = details.url;
-        const key = `tab_${details.tabId}`;
-
-        chrome.storage.session.get(key).then(result => {
-            let list = result[key] || [];
-            const existing = list.find(r => r.url === url);
-            if (existing) {
-                // 更新大小
-                if (contentLength > 0 && existing.size < 0) existing.size = contentLength;
-                existing.mimeType = ct;
-                chrome.storage.session.set({ [key]: list });
-            } else {
-                // 新发现：URL 无扩展名但 Content-Type 是媒体
-                const alreadyMatched = FILE_PATTERNS.some(p => p.test(url));
-                if (alreadyMatched) return; // 已通过 URL 模式添加过
-
-                addResource(details.tabId, {
-                    url,
-                    type: ct.startsWith('video/') ? 'video' :
-                          ct.startsWith('audio/') ? 'audio' : 'file',
-                    filename: inferFilename(url),
-                    size: contentLength,
-                    mimeType: ct,
-                    timestamp: Date.now(),
-                    initiator: details.initiator || ''
-                });
-            }
+        addResource(details.tabId, {
+            url,
+            type: ct.startsWith('video/') ? 'video' :
+                  ct.startsWith('audio/') ? 'audio' : 'file',
+            filename: inferFilename(url),
+            size: contentLength,
+            mimeType: ct,
+            timestamp: Date.now(),
+            initiator: details.initiator || '',
+            source: 'webRequest-headers'
         });
     },
     { urls: ['<all_urls>'] },
@@ -716,7 +721,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     filename: item.filename || '',
                     size: item.size || -1,
                     timestamp: Date.now(),
-                    initiator: sender.tab.url || ''
+                    initiator: sender.tab.url || '',
+                    source: item.source || 'dom'
                 });
             });
         }
