@@ -112,7 +112,10 @@ ForwardResult forwardToGui(const QStringList& cliArgs, bool printResponse,
     QLocalSocket socket;
     socket.connectToServer(pipe);
     const bool connected = socket.waitForConnected(500);
-    traceForward("connect", socket, traceClock.elapsed(), data.size(), connected ? 1 : 0);
+    // Do not log the many normal NotConnected polls while the GUI is starting:
+    // their logging overhead would change the very startup race under study.
+    if (connected)
+        traceForward("connect", socket, traceClock.elapsed(), data.size(), 1);
     if (!connected) {
         /* 压根没人监听 —— 这不是失败，是「本机还没有 GUI」，
          * 调用方要据此自己起一套，所以一个字都不报。 */
