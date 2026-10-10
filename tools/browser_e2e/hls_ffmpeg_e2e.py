@@ -339,6 +339,15 @@ def main() -> int:
             if list(output_dir.rglob(".idm-next-hls-*")):
                 raise AssertionError("Pause/resume left old FFmpeg stages behind")
             print("[PASS] HLS pause→immediate resume: one completed MP4, correct frames, no stale stages")
+            # Late controls against a completed task must not lie about status
+            # or change a validated final output.
+            cli_control(gui, dist, "pause", paused_id)
+            poll_state(host, dist, paused_id, paused_session, 3)
+            cli_control(gui, dist, "cancel", paused_id)
+            poll_state(host, dist, paused_id, paused_session, 3)
+            inspect_mp4(ffprobe, ffmpeg, output_dir, "pause-restart.mp4", 320, 192,
+                        public / "high" / "index.m3u8")
+            print("[PASS] HLS terminal task ignores late pause/cancel without changing output")
 
             # Cancel during active segment I/O; a canceled old callback must
             # never turn this task into FAILED or COMPLETED after cancellation.
