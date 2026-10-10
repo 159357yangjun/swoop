@@ -84,7 +84,7 @@ async function runOne(exe, label, mode, baseUrl) {
     assert.equal(extensionId, ID, 'wrong extension loaded');
     await popup.evaluate(async (m) => {
       await chrome.storage.local.set({ interceptEnabled: true,
-                                      confirmEnabled: m === 'no-source-confirm' || m === 'manual-dismiss' });
+                                      confirmEnabled: m === 'no-source-confirm' || m === 'manual-dismiss' || m === 'popup-takeover-offline' });
     }, mode);
 
     // Service workers can be suspended/restarted between browser scenarios.
@@ -209,7 +209,9 @@ async function runOne(exe, label, mode, baseUrl) {
                    'unconfirmed browser download must not reach native host');
     } else {
       assert.ok(observed.calls.includes('add_download'),
-                'real downloads.onCreated handler did not call native API');
+                'native add_download did not reach background handler');
+      if (explicitPopup) assert.equal(observed.calls.filter(x => x === 'add_download').length, 1,
+                                    'explicit popup click must hand off exactly once');
       if (mode === 'offline' || explicitPopup)
         assert.ok(observed.errors.length > 0, 'native host was not actually unavailable');
     }
