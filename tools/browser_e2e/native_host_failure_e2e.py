@@ -139,7 +139,11 @@ def main() -> int:
                         raise AssertionError(f"Task identity mismatch: {last!r}")
                     if not isinstance(last.get("error"), str) or not last["error"].strip():
                         raise AssertionError(f"Failure state lacks actionable reason: {last!r}")
-                    print("[PASS] real engine reports failed task with nonempty error through Native Host")
+                    # A generic nonempty failure string is not enough: the server sent HTTP 404.
+                    # Verify the network layer's real status code survives engine → GUI → host.
+                    if "404" not in last["error"]:
+                        raise AssertionError(f"HTTP 404 reason was lost or replaced: {last!r}")
+                    print("[PASS] real engine reports HTTP 404 reason through Native Host")
                     return 0
                 if last.get("success") is True and last.get("state") == 3:
                     raise AssertionError(f"HTTP 404 incorrectly became a completed download: {last!r}")
