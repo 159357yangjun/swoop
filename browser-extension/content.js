@@ -409,6 +409,28 @@
         if (interesting) setResButtonCount(items.filter(it => it.type && it.type !== 'image').length);
     }
 
+    // 页面首次扫描仍以 DOM 为主。Performance Timing 只补充可能在
+    // content script 执行前结束的 HTTP(S) 直链媒体，且严格限制路径后缀。
+    // 两个观察器共用 foundUrls，webRequest 与 background 则再次按 URL 去重。
+    function capturePerformanceEntries(entries) {
+        const helper = globalThis.IDMResourceBackfill;
+        if (!helper) return;
+        const candidates = helper.collect(entries, foundUrls, window.location.href);
+        reportMedia(candidates);
+    }
+    try {
+        capturePerformanceEntries(performance.getEntriesByType('resource'));
+        if (typeof PerformanceObserver !== 'undefined') {
+            const timingObserver = new PerformanceObserver(list => {
+                capturePerformanceEntries(list.getEntries());
+            });
+            timingObserver.observe({ type: 'resource', buffered: true });
+        }
+    } catch (err) {
+        // Browser may restrict the Performance API: original DOM/webRequest paths remain intact.
+        console.debug('[IDM Next] Performance backfill unavailable:', err);
+    }
+
     // 页面加载完成后首次扫描
     scanAll();
 
