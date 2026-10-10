@@ -329,9 +329,12 @@ chrome.downloads.onCreated.addListener(async (item) => {
     const filename = (item.filename || '').split(/[\\/]/).pop() || inferFilename(item.url);
     const confirm = await getConfirmSettings();
 
-    if (confirm.enabled && item.tabId < 0) {
-        // 没有可展示确认卡片的来源页时，也不能绕过用户的确认要求。
-        console.warn('[IDM Next] 下载无可确认的来源标签页，交由浏览器继续');
+    // Chrome downloads.DownloadItem does not provide tabId. An undefined ID is
+    // NOT a valid tab and must never be used to guess which page to interrupt.
+    // Keep the browser download; users can send resources manually from popup.
+    if (confirm.enabled && (!Number.isSafeInteger(item.tabId) || item.tabId < 0)) {
+        console.warn('[IDM Next] 浏览器下载事件不含可靠标签页 ID，保留浏览器下载；可从扩展弹窗手动发送');
+        flashBadge(false);
         return;
     }
     if (confirm.enabled) {
