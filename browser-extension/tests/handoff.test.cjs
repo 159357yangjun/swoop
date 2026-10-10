@@ -132,3 +132,13 @@ test('confirmation cannot silently bypass a download without a source tab', asyn
   assert.deepEqual(h.calls.cancel, []);
   assert.deepEqual(h.calls.erase, []);
 });
+
+
+test('actual Chrome DownloadItem omits tabId: confirmation must fail closed', async () => {
+  const h = make({ confirm: true, tabId: undefined });
+  await h.start();
+  assert.equal(h.calls.dialogs, 0);
+  assert.equal(h.calls.native, 0);
+  assert.deepEqual(h.calls.cancel, []);
+  assert.deepEqual(h.calls.erase, []);
+});
