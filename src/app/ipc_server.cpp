@@ -147,7 +147,13 @@ void IpcServer::handleClient(QLocalSocket* client)
             response["success"] = false;
             response["message"] = QStringLiteral("下载任务入口尚未初始化");
         } else {
+            // Only lifecycle boundaries and the numerical task ID are logged.
+            // The URL, save path and IPC payload are intentionally omitted.
+            // Distinguishes "GUI never entered add" from "backend blocked add"
+            // and "ACK failed after task creation" in packaged Windows E2E.
+            Log::info(QStringLiteral("IPC add: callback enter"));
             const int taskId = m_addTask(url, filename, dir, threads, queue, format);
+            Log::info(QStringLiteral("IPC add: callback returned taskId=%1").arg(taskId));
             const bool created = taskId > 0;
             response["success"] = created;
             if (created) {

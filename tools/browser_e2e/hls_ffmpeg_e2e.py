@@ -28,6 +28,14 @@ from native_host_failure_e2e import host_call
 class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append(self.path)
+        if self.path.split("?", 1)[0] == "/gated.m3u8":
+            with self.server.playlist_lock:
+                self.server.playlist_requests += 1
+                first = self.server.playlist_requests == 1
+            if first:
+                self.server.playlist_requested.set()
+                if not self.server.playlist_release.wait(timeout=25):
+                    raise AssertionError("Gated HLS manifest was not released")
         if self.path.split("?", 1)[0] == "/delayed/seg001.ts":
             self.server.slow_segment_requested.set()
             if not self.server.slow_segment_release.wait(timeout=25):
@@ -75,6 +83,11 @@ def build_fixture(ffmpeg: str, root: Path) -> None:
         "\n".join(("delayed/" + line if line.startswith("seg") and
                     line.endswith(".ts") else line) for line in playlist.splitlines()) + "\n",
         encoding="utf-8")
+    high_text = (root / "high" / "index.m3u8").read_text(encoding="utf-8")
+    (root / "gated.m3u8").write_text(
+        "\n".join(("high/" + line if line.startswith("seg") and
+                    line.endswith(".ts") else line) for line in high_text.splitlines()) + "\n",
+        encoding="utf-8")
     (root / "broken.m3u8").write_text(
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n"
         "#EXTINF:2.0,\nmissing.ts\n#EXT-X-ENDLIST\n", encoding="utf-8"
@@ -107,10 +120,43 @@ def submit_once(host: Path, dist: Path, url: str, name: str,
     task_id = response.get("taskId")
     session = response.get("sessionId")
     if response.get("success") is not True or type(task_id) is not int or task_id <= 0:
-        raise AssertionError(f"No confirmed HLS task ID for {name}: {response!r}")
+        # The add command is NOT retried: it may already have created a task.
+        # A separate read-only ping tells us whether the GUI is still serving
+        # IPC after the missing/invalid creation acknowledgment.
+        try:
+            read_only_health = host_call(host, dist, {"action": "ping"}, timeout=5)
+        except Exception as exc:
+            read_only_health = {"ping_error": repr(exc)}
+        raise AssertionError(
+            f"No confirmed HLS task ID for {name}: {response!r}; "
+            f"read_only_gui_ping={read_only_health!r}; add_not_retried=true")
     if not isinstance(session, str) or len(session) < 32:
         raise AssertionError(f"No HLS GUI session ID for {name}: {response!r}")
     return task_id, session
+
+
+def cli_control(gui: Path, dist: Path, action: str, task_id: int) -> None:
+    # idm-next.exe is a WIN32 subsystem binary: stdout can be empty even when
+    # its CLI IPC request reaches the running GUI. The CLI's nonzero exit
+    # remains a hard failure; callers MUST then confirm the exact task state
+    # through the separate real Native Host / session-bound task_status API.
+    run([str(gui), "--cli", action, str(task_id)], timeout=15)
+    print(f"[CLI] {action} task={task_id} rc=0; verify via Native Host task_status")
+
+
+def poll_state(host: Path, dist: Path, task_id: int, session: str,
+               desired: int, timeout: float = 20) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict = {}
+    while time.monotonic() < deadline:
+        last = host_call(host, dist, {
+            "action": "get_task_status", "taskId": task_id,
+            "sessionId": session
+        }, timeout=8)
+        if (last.get("success") is True and last.get("state") == desired):
+            return last
+        time.sleep(0.3)
+    raise AssertionError(f"Expected state {desired} for task {task_id}, got {last!r}")
 
 
 def poll_terminal(host: Path, dist: Path, task_id: int,
@@ -202,6 +248,10 @@ def main() -> int:
         server.requests = []
         server.slow_segment_requested = threading.Event()
         server.slow_segment_release = threading.Event()
+        server.playlist_lock = threading.Lock()
+        server.playlist_requests = 0
+        server.playlist_requested = threading.Event()
+        server.playlist_release = threading.Event()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -291,6 +341,85 @@ def main() -> int:
             if hashlib.sha256(late.read_bytes()).hexdigest() != late_sha:
                 raise AssertionError("Late-created user file was overwritten")
             print("[PASS] late HLS output race preserved original and removed stage")
+
+            # Pause and immediately resume while real FFmpeg is still waiting
+            # on a blocked TS response. The old FFmpeg generation must exit
+            # before restarting, and no old callback may publish/mark failure.
+            server.slow_segment_requested.clear()
+            server.slow_segment_release.clear()
+            paused_id, paused_session = submit_once(
+                host, dist, base + "/late.m3u8", "pause-restart.mp4", output_dir)
+            try:
+                if not server.slow_segment_requested.wait(timeout=20):
+                    raise AssertionError("Paused FFmpeg never requested gated segment")
+                cli_control(gui, dist, "pause", paused_id)
+                poll_state(host, dist, paused_id, paused_session, 2)
+                if list(output_dir.rglob("pause-restart.mp4")):
+                    raise AssertionError("Paused HLS unexpectedly published a final file")
+                cli_control(gui, dist, "start", paused_id)
+            finally:
+                server.slow_segment_release.set()
+            paused_final = poll_terminal(host, dist, paused_id, paused_session)
+            if paused_final.get("state") != 3:
+                raise AssertionError(f"Rapid pause/resume failed to complete: {paused_final!r}")
+            inspect_mp4(ffprobe, ffmpeg, output_dir, "pause-restart.mp4", 320, 192,
+                        public / "high" / "index.m3u8")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Pause/resume left old FFmpeg stages behind")
+            print("[PASS] HLS pause then immediate resume: one completed MP4, correct frames, no stale stages")
+            # Late controls against a completed task must not lie about status
+            # or change a validated final output.
+            cli_control(gui, dist, "pause", paused_id)
+            poll_state(host, dist, paused_id, paused_session, 3)
+            cli_control(gui, dist, "cancel", paused_id)
+            poll_state(host, dist, paused_id, paused_session, 3)
+            inspect_mp4(ffprobe, ffmpeg, output_dir, "pause-restart.mp4", 320, 192,
+                        public / "high" / "index.m3u8")
+            print("[PASS] HLS terminal task ignores late pause/cancel without changing output")
+
+            # Cancel during active segment I/O; a canceled old callback must
+            # never turn this task into FAILED or COMPLETED after cancellation.
+            server.slow_segment_requested.clear()
+            server.slow_segment_release.clear()
+            cancel_id, cancel_session = submit_once(
+                host, dist, base + "/late.m3u8", "cancel-inflight.mp4", output_dir)
+            try:
+                if not server.slow_segment_requested.wait(timeout=20):
+                    raise AssertionError("Canceled FFmpeg never requested gated segment")
+                cli_control(gui, dist, "cancel", cancel_id)
+                poll_state(host, dist, cancel_id, cancel_session, 5)
+            finally:
+                server.slow_segment_release.set()
+            time.sleep(1.2)
+            poll_state(host, dist, cancel_id, cancel_session, 5)
+            if list(output_dir.rglob("cancel-inflight.mp4")):
+                raise AssertionError("Canceled HLS published a partial final MP4")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Canceled HLS left partial FFmpeg stages")
+            print("[PASS] HLS cancel: state remains canceled after stale completion, no final MP4")
+
+            # Hold the first manifest until pause/resume invalidates its
+            # generation. The resumed download must ignore that old reply.
+            gated_id, gated_session = submit_once(
+                host, dist, base + "/gated.m3u8", "manifest-restart.mp4", output_dir)
+            try:
+                if not server.playlist_requested.wait(timeout=20):
+                    raise AssertionError("Gated manifest request did not arrive")
+                cli_control(gui, dist, "pause", gated_id)
+                poll_state(host, dist, gated_id, gated_session, 2)
+                cli_control(gui, dist, "start", gated_id)
+            finally:
+                server.playlist_release.set()
+            gated_state = poll_terminal(host, dist, gated_id, gated_session)
+            if gated_state.get("state") != 3:
+                raise AssertionError(f"Stale manifest callback corrupted restart: {gated_state!r}")
+            inspect_mp4(ffprobe, ffmpeg, output_dir, "manifest-restart.mp4", 320, 192,
+                        public / "high" / "index.m3u8")
+            if server.playlist_requests < 2:
+                raise AssertionError("Interrupted manifest was never refetched")
+            if list(output_dir.rglob(".idm-next-hls-*")):
+                raise AssertionError("Manifest restart left staging files")
+            print("[PASS] HLS stale pre-manifest response ignored after resume")
 
             missing_id, missing_session = submit_once(
                 host, dist, base + "/broken.m3u8",

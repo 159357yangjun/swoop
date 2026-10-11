@@ -6,6 +6,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QProcess>
+#include <QPointer>
 #include <QVariantMap>
 #include <QTemporaryDir>
 #include <memory>
@@ -32,6 +33,7 @@ public:
     void pause() override;
     void resume() override;
     void cancel() override;
+    void restart(); // Explicit user restart, including after cancellation
 
     // 设置本下载器关联的任务 ID（信号中携带，接入主窗口任务列表）
     void setTaskId(int id);
@@ -76,6 +78,9 @@ private:
     QByteArray segmentIv(int index) const;  // 计算分片 IV（无 IV 属性时用序号）
 
     QNetworkAccessManager* m_nam = nullptr;
+    QPointer<QNetworkReply> m_playlistReply;
+    quint64 m_generation = 0; // invalidates callbacks from interrupted runs
+    bool m_restartPending = false; // old FFmpeg process must exit first
     QList<Segment>         m_segments;
     int                    m_taskId   = -1;
     QString                m_url;

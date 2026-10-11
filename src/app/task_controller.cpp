@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QUrl>
+#include <QTimer>
 
 #include "download_manager.h"
 #include "task_list_model.h"      // TaskRow / FileType / stateText
@@ -169,12 +170,33 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
         // in "format"; the HLS backend consumes "hlsVariant".
         if (!format.isEmpty())
             req.extra.insert(QStringLiteral("hlsVariant"), format);
+        // Register a startable request before returning the task ID.
+        // Browser/Native Host must receive the real taskId/sessionId before
+        // any asynchronous HLS error can synchronously re-enter MainWindow,
+        // HistoryStore, or the notification/UI stack. An already-existing
+        // destination may fail very quickly after the playlist resolves.
+        m_pendingStream[id] = req;
         if (startNow) {
-            hd->start(req);
+            // Deferring until the next event-loop turn lets the current IPC
+            // handler write its ACK before network/FFmpeg callbacks can run.
+            // Keep the request in m_pendingStream so an immediate pause/cancel
+            // freezes this not-yet-started task instead of starting anyway.
+            QTimer::singleShot(0, this, [this, id]() {
+                if (!m_pendingStream.contains(id) || !m_model)
+                    return;
+                bool shouldStart = false;
+                for (const TaskRow& row : m_model->tasks()) {
+                    if (row.id == id) {
+                        shouldStart = row.state == 1;
+                        break;
+                    }
+                }
+                if (shouldStart)
+                    startTaskById(id);
+            });
             if (m_cancelAutoPower) m_cancelAutoPower();
-        } else {
-            m_pendingStream[id] = req;   // 交给 QueueScheduler 延迟启动
-            if (queue.isEmpty()) m_queueScheduler->markDeferred(id);   // 等全局并发空位
+        } else if (queue.isEmpty()) {
+            m_queueScheduler->markDeferred(id); // No concurrent slot available.
         }
 
         if (m_syncStatus) m_syncStatus();
@@ -324,6 +346,12 @@ void TaskController::pauseTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
+        // A completed/failed task must not be relabeled PAUSED just because a
+        // late UI/CLI command arrived after the terminal completion event.
+        bool running = false;
+        for (const TaskRow& row : m_model->tasks())
+            if (row.id == id) { running = row.state == 1; break; }
+        if (!running) return;
         if (auto* hd = m_hlsTasks.value(id)) hd->pause();
         m_setState(id, 2);
         m_model->updateStatus(id, 2);
@@ -367,6 +395,10 @@ void TaskController::resumeTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
+        bool paused = false;
+        for (const TaskRow& row : m_model->tasks())
+            if (row.id == id) { paused = row.state == 2; break; }
+        if (!paused) return;
         if (auto* hd = m_hlsTasks.value(id)) hd->resume();
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
         m_model->updateStatus(id, 1);
@@ -404,6 +436,10 @@ void TaskController::cancelTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
+        bool active = false;
+        for (const TaskRow& row : m_model->tasks())
+            if (row.id == id) { active = row.state == 1 || row.state == 2; break; }
+        if (!active) return;
         if (auto* hd = m_hlsTasks.value(id)) hd->cancel();
         m_setState(id, 5);
         m_model->updateStatus(id, 5);
@@ -438,7 +474,7 @@ void TaskController::restartTaskById(int id)
         return;
     }
     if (isHlsTask(id)) {
-        if (auto* hd = m_hlsTasks.value(id)) hd->resume();  // HLS 无断点续传，重新下载
+        if (auto* hd = m_hlsTasks.value(id)) hd->restart(); // Explicit restart after cancel/failure
         m_setState(id, 1); if (m_cancelAutoPower) m_cancelAutoPower();
         m_model->updateStatus(id, 1);
         if (m_syncStatus) m_syncStatus();

@@ -71,19 +71,31 @@ void HlsDownloader::setTaskId(int id) { m_taskId = id; }
 
 void HlsDownloader::start(const DownloadRequest& req)
 {
-    m_url      = req.url;
-    m_saveDir  = req.savePath;
-    m_fileName = req.fileName;
-    m_extra    = req.extra;
-    m_forcedVariant = req.extra.value(QStringLiteral("hlsVariant")).toString();
+    // A previous FFmpeg process must be reaped before any state/staging reset.
+    if (m_merge) {
+        m_restartPending = true;
+        return;
+    }
+    ++m_generation;
+    m_restartPending = false;
+    if (m_playlistReply) m_playlistReply->abort();
+    if (m_keyReply) m_keyReply->abort();
+    for (auto& seg : m_segments)
+        if (seg.reply) seg.reply->abort();
+    m_outputStage.reset();
 
+    m_url = req.url;
+    m_saveDir = req.savePath;
+    m_fileName = req.fileName;
+    m_extra = req.extra;
+    m_forcedVariant = req.extra.value(QStringLiteral("hlsVariant")).toString();
     m_cancelled = false;
-    m_paused    = false;
-    m_finished  = false;
-    m_started   = false;
+    m_paused = false;
+    m_finished = false;
+    m_started = false;
     m_segments.clear();
     m_downloadedBytes = 0;
-    m_totalDuration   = 0.0;
+    m_totalDuration = 0.0;
     m_active = 0;
     m_doneCount = 0;
     m_encrypted = false;
@@ -91,54 +103,78 @@ void HlsDownloader::start(const DownloadRequest& req)
     m_key.clear();
     m_iv.clear();
     m_ivPresent = false;
-    if (m_keyReply) { m_keyReply->deleteLater(); m_keyReply = nullptr; }
-
     QDir().mkpath(m_saveDir);
-
     Log::info(QStringLiteral("HlsDownloader 启动: %1").arg(m_url));
-    emit stateChanged(m_taskId, 1);  // RUNNING
+    emit stateChanged(m_taskId, 1);
     fetchPlaylist(m_url, false);
 }
 
 void HlsDownloader::pause()
 {
-    if (m_merge && m_merge->state() == QProcess::Running) {
-        m_paused = true;
-        m_merge->terminate();
-        emit stateChanged(m_taskId, 2);  // PAUSED
-        return;
-    }
-    // 手动模式：中止在途分片
-    for (auto& s : m_segments)
-        if (s.reply) { s.reply->abort(); s.reply = nullptr; }
-    m_active = 0;
+    if (m_paused || m_cancelled || m_finished) return;
     m_paused = true;
+    m_restartPending = false;
+    ++m_generation; // Discard old network callbacks and all queued progress.
+    if (m_playlistReply) m_playlistReply->abort();
+    if (m_keyReply) m_keyReply->abort();
+    for (auto& seg : m_segments)
+        if (seg.reply) seg.reply->abort();
+    if (m_merge) {
+        if (m_merge->state() != QProcess::NotRunning)
+            m_merge->terminate();
+        // Keep staging alive until the process-finished handler has reaped it.
+    } else {
+        m_outputStage.reset();
+    }
     emit stateChanged(m_taskId, 2);
 }
 
 void HlsDownloader::resume()
 {
-    if (m_cancelled)
+    if (!m_paused || m_cancelled || m_finished) return;
+    m_paused = false;
+    if (m_merge) {
+        // The old process may still have staged output open. Defer start.
+        Log::info(QStringLiteral("HLS 任务 #%1 等待旧 ffmpeg 退出后再恢复").arg(m_taskId));
+        m_restartPending = true;
         return;
-    m_cancelled = false;
-    m_paused    = false;
-    // HLS 不支持断点续传，恢复 = 从播放列表重新拉取（与 yt-dlp 后端一致）
-    if (m_started)
-        start({m_url, m_saveDir, m_fileName, 1, false, m_extra});
+    }
+    start({m_url, m_saveDir, m_fileName, 1, false, m_extra});
 }
 
 void HlsDownloader::cancel()
 {
+    if (m_cancelled || m_finished) return;
     m_cancelled = true;
-    if (m_merge && m_merge->state() == QProcess::Running)
-        m_merge->kill();
-    if (m_keyReply)
-        m_keyReply->abort();
-    for (auto& s : m_segments)
-        if (s.reply) s.reply->abort();
-    if (!m_merge || m_merge->state() == QProcess::NotRunning)
+    m_paused = false;
+    m_restartPending = false;
+    ++m_generation;
+    if (m_playlistReply) m_playlistReply->abort();
+    if (m_keyReply) m_keyReply->abort();
+    for (auto& seg : m_segments)
+        if (seg.reply) seg.reply->abort();
+    if (m_merge) {
+        if (m_merge->state() != QProcess::NotRunning)
+            m_merge->kill();
+    } else {
         m_outputStage.reset();
-    emit stateChanged(m_taskId, 5);  // CANCELLED
+    }
+    emit stateChanged(m_taskId, 5);
+}
+
+void HlsDownloader::restart()
+{
+    if (m_merge) {
+        // A canceled process must terminate before the new one can start.
+        m_restartPending = true;
+        m_cancelled = false;
+        m_paused = false;
+        ++m_generation;
+        if (m_merge->state() != QProcess::NotRunning)
+            m_merge->kill();
+        return;
+    }
+    start({m_url, m_saveDir, m_fileName, 1, false, m_extra});
 }
 
 // ── 播放列表拉取与解析 ────────────────────────
@@ -150,11 +186,14 @@ void HlsDownloader::fetchPlaylist(const QString& url, bool isMedia)
     req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("IDM-Next/0.1"));
 
     QNetworkReply* r = m_nam->get(req);
-    // 捕获当前请求的上下文，避免重定向后 base 失真
+    m_playlistReply = r;
+    const quint64 generation = m_generation;
+    // A paused/old request must never mutate the newly restarted playlist.
     QString base = url;
-    connect(r, &QNetworkReply::finished, this, [this, r, base, isMedia]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, base, isMedia, generation]() {
         r->deleteLater();
-        if (m_cancelled)
+        if (m_playlistReply == r) m_playlistReply = nullptr;
+        if (generation != m_generation || m_cancelled || m_paused || m_finished)
             return;
         if (r->error() != QNetworkReply::NoError) {
             finish(false, r->errorString());
@@ -340,13 +379,17 @@ void HlsDownloader::startFfmpegDownload()
     Log::info(QStringLiteral("HlsDownloader 启动 ffmpeg: %1 %2")
                   .arg(ffmpegPath()).arg(args.join(' ')));
     m_merge->start(ffmpegPath(), args);
-    if (!m_merge->waitForStarted(5000))
+    if (!m_merge->waitForStarted(5000)) {
+        QProcess* failed = m_merge;
+        m_merge = nullptr;
+        failed->deleteLater();
         finish(false, QStringLiteral("无法启动 ffmpeg，请确认已安装并位于 PATH 或捆绑目录"));
+    }
 }
 
 void HlsDownloader::onMergeReadyRead()
 {
-    if (!m_merge)
+    if (!m_merge || sender() != m_merge || m_paused || m_cancelled || m_finished)
         return;
     while (m_merge->canReadLine()) {
         QString line = QString::fromUtf8(m_merge->readLine());
@@ -367,8 +410,21 @@ void HlsDownloader::onMergeReadyRead()
 
 void HlsDownloader::onMergeFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    auto* process = qobject_cast<QProcess*>(sender());
+    if (!process || process != m_merge) return;
+    m_merge = nullptr;
+    process->deleteLater();
+    if (m_restartPending) {
+        // Only the old process is permitted to retire the old staging area.
+        // Pause/resume can happen in the same event loop turn as FFmpeg exit.
+        m_restartPending = false;
+        m_outputStage.reset();
+        if (!m_cancelled)
+            start({m_url, m_saveDir, m_fileName, 1, false, m_extra});
+        return;
+    }
     if (m_cancelled || m_paused || m_finished) {
-        m_outputStage.reset(); // Do not publish canceled or partial media.
+        m_outputStage.reset();
         return;
     }
     if (exitCode == 0 && exitStatus == QProcess::NormalExit) {
@@ -398,18 +454,22 @@ void HlsDownloader::fetchKey()
     req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("IDM-Next/0.1"));
     Log::info(QStringLiteral("HlsDownloader 拉取 AES-128 密钥: %1").arg(keyUrl));
     m_keyReply = m_nam->get(req);
+    m_keyReply->setProperty("hlsGeneration", QVariant::fromValue<qulonglong>(m_generation));
     connect(m_keyReply, &QNetworkReply::finished, this, &HlsDownloader::onKeyFinished);
 }
 
 void HlsDownloader::onKeyFinished()
 {
-    if (!m_keyReply)
-        return;
-    QNetworkReply* r = m_keyReply;
-    m_keyReply = nullptr;
+    // Use the actual sender: an aborted reply from an earlier run must not
+    // consume/clear a new run's m_keyReply after rapid pause/resume.
+    auto* r = qobject_cast<QNetworkReply*>(sender());
+    if (!r) return;
     r->deleteLater();
+    if (m_keyReply != r) return;
+    m_keyReply = nullptr;
 
-    if (m_cancelled)
+    if (m_cancelled || m_paused || m_finished ||
+        r->property("hlsGeneration").toULongLong() != m_generation)
         return;
     if (r->error() != QNetworkReply::NoError) {
         finish(false, QStringLiteral("获取 HLS 密钥失败: %1").arg(r->errorString()));
@@ -464,7 +524,8 @@ void HlsDownloader::launchSegments()
         req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("IDM-Next/0.1"));
 
         QNetworkReply* r = m_nam->get(req);
-        r->setProperty("segIndex", idx);   // 把分片索引绑到 reply，完成回调 O(1) 定位
+        r->setProperty("segIndex", idx);
+        r->setProperty("hlsGeneration", QVariant::fromValue<qulonglong>(m_generation));   // 把分片索引绑到 reply，完成回调 O(1) 定位
         s.reply = r;
         m_active++;
 
@@ -481,7 +542,8 @@ void HlsDownloader::onSegFinished()
     int idx = r->property("segIndex").toInt();
     r->deleteLater();
 
-    if (m_cancelled)
+    if (m_cancelled || m_paused || m_finished ||
+        r->property("hlsGeneration").toULongLong() != m_generation)
         return;
 
     if (idx < 0 || idx >= m_segments.size())
