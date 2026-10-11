@@ -663,6 +663,19 @@ jobs:
           node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --request-lifecycle
           if ($LASTEXITCODE -ne 0) { throw 'Request UUID lifecycle or session invalidation failed' }
 
+      - name: Real MV3 worker stopped mid Native add - persisted UUID recovery
+        shell: pwsh
+        env:
+          IDM_IPC_TIMING_TRACE: '1'
+        run: |
+          # Real Edge CDP ServiceWorker.stopWorker while packaged GUI is still
+          # blocked in 4200ms test-only SQLite history insert delay.
+          # The only recovery calls are read-only UUID lookups; never replay add.
+          node --check tools/browser_e2e/browser_hls_popup_e2e.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'MV3 midflight test syntax failed' }
+          node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --mv3-midflight
+          if ($LASTEXITCODE -ne 0) { throw 'Real midflight MV3 shutdown/recovery failed' }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
