@@ -27,3 +27,11 @@ This remains a Draft stacked on PR #23. It is **not** release acceptance or proo
 ## Preserved initial red and fixture correction
 
 The first real Windows attempt [#38111104899](https://github.com/159357yangjun/swoop/actions/runs/38111104899) failed at `Edge media discovery timed out`. The initial fixture rendered `<video src="...m3u8">` and independently fetched the same pathname with `?seed=real`. Since the extension intentionally deduplicates by full URL, these were two distinct URLs, while the E2E erroneously required exactly one match **by pathname**. Commit `6ad4a766` makes the request URLs identical, retaining the strict one-resource check. This fixture diagnosis does not establish that the entire E2E has passed; the next Windows run must prove that. Preserve the original red run in the evidence record.
+
+## Second red: real handoff reached GUI but lost persistent task identity
+
+[Windows CI #38113661520](https://github.com/159357yangjun/swoop/actions/runs/38113661520) reached the *actual packaged GUI*: original GUI stderr recorded `IPC add: callback returned taskId=2000000` after the Edge Popup operation. The test then failed at `Edge session-bound handoff timed out`. Source inspection confirms a one-resource click uses `batchDownload` / Native Host `batch_add`, whose response only includes aggregate counts, so it never goes through the existing `rememberHandoff` path. This PR changes **only one-item Popup sends** to `downloadWithOptions`, preserving queue mode and one-shot submission. Multi-item batch requests retain the old behavior; dedicated Node regression cases cover both.
+
+The original test also looked up journal entries by `url`, but persisted records intentionally hold `filename`, `taskId` and `sessionId` (not URL). It now matches the unique fixture filename. Finally the GUI log showed native TS fallback, not MP4. The test now explicitly sets `ffmpegCustomPath` to the runner's real FFmpeg executable in isolated settings, preserving the strict final MP4 and decoded SHA-256 verification. These changes do not alter any HLS download engine code or relax the user-visible status assertions.
+
+The first and second red runs remain permanently referenced here. **The new combined head still requires an independent Windows CI before passing.**
