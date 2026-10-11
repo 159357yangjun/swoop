@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QUrl>
 #include <QTimer>
+#include <QElapsedTimer>
 
 #include "download_manager.h"
 #include "task_list_model.h"      // TaskRow / FileType / stateText
@@ -130,6 +131,18 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
 
     // ── HLS（M3U8）：交给原生 HlsDownloader（自建解析 + ffmpeg 合并），不依赖 yt-dlp
     if (HlsDownloader::isHlsUrl(url)) {
+        // Forensic mode only: measure synchronous creation phases without changing
+        // add/ACK semantics, timeouts, task identity or retry policy.
+        // No URL, filename, save path or payload is logged.
+        const bool traceHlsAdd = qEnvironmentVariableIsSet("IDM_IPC_TIMING_TRACE");
+        QElapsedTimer addClock;
+        if (traceHlsAdd) addClock.start();
+        auto traceAdd = [&](const char* phase) {
+            if (traceHlsAdd)
+                Log::info(QStringLiteral("HLS_ADD_TIMING phase=%1 elapsed_ms=%2")
+                    .arg(QString::fromLatin1(phase)).arg(addClock.elapsed()));
+        };
+        traceAdd("entered");
         int id = m_videoIdSeq++;  // 与视频/引擎任务区分的编号偏移
         auto* hd = new HlsDownloader(this);
         hd->setTaskId(id);
@@ -155,6 +168,7 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
         row.state     = startNow ? 1 : 0;
         row.statusText = TaskListModel::stateText(row.state);
         m_model->addTask(row);
+        traceAdd("model_added");
 
         m_setSpeed(id, 0);
         m_setState(id, row.state);
@@ -199,9 +213,13 @@ int TaskController::internalAddTask(const QString& url, const QString& dir, cons
             m_queueScheduler->markDeferred(id); // No concurrent slot available.
         }
 
+        traceAdd("pending_registered");
         if (m_syncStatus) m_syncStatus();
+        traceAdd("status_synced");
         HistoryStore::instance().recordAdded(url, row.fileName, finalDir);
+        traceAdd("history_recorded");
         Log::info(QStringLiteral("添加 HLS 任务 #%1: %2").arg(id).arg(url));
+        traceAdd("return");
         return id;
     }
 
