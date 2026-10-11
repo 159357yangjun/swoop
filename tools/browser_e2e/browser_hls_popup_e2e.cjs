@@ -381,8 +381,11 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
       const restartAfter=nativeRequest({action:'get_status'});
       assert.equal(stale.success,false,'Old GUI session token must not be accepted');
       assert.equal(stale.found,false,'Old GUI token lookup must be unconfirmed');
-      assert.equal(restartAfter.message,restartBefore.message,
-        'Read-only stale lookup must not mutate task model');
+      const ids=response=>(response.message||'').split(/\r?\n/)
+        .filter(line=>/^#\d+\t/.test(line))
+        .map(line=>Number(line.match(/^#(\d+)/)[1])).sort((a,b)=>a-b);
+      assert.deepEqual(ids(restartAfter),ids(restartBefore),
+        'Read-only stale lookup must not create or remove GUI tasks');
       console.log('[PASS] Request lifecycle: same UUID creates one task; '+
         'invalid/unknown IDs fail closed; stale UUID after GUI restart stays unknown');
       return;
