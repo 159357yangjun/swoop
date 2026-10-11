@@ -8,7 +8,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', '..', 'browser-extension', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress' } = {}) {
+function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress', addUnknown = false, lookupFound = false } = {}) {
   const events = { created: listener(), message: listener() };
   const calls = { native: 0, cancel: [], erase: [], dialogs: 0, nativeActions: [] };
   const local = {};
@@ -24,11 +24,15 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
       sendNativeMessage(_host, _payload, callback) {
         calls.native++;
         calls.nativeActions.push(_payload.action);
-        queueMicrotask(() => callback(_payload.action === 'get_task_status'
+        queueMicrotask(() => callback(_payload.action === 'get_request_status'
+          ? (lookupFound ? { success: true, found: true, taskId: acceptedTaskId,
+              sessionId: guiSession } : {success:false,found:false})
+          : _payload.action === 'get_task_status'
           ? (_payload.sessionId === guiSession
               ? { success: true, taskId: _payload.taskId, sessionId: guiSession, state: 4,
                   stateText: '失败', error: 'HTTP 404', message: '任务失败' }
               : { success: false, message: 'old desktop session' })
+          : addUnknown ? { success:false,message:'GUI 未响应' }
           : { success: accepted, taskId: accepted ? acceptedTaskId : null,
               sessionId: accepted ? guiSession : null,
               message: accepted ? 'accepted' : 'failed' }));
@@ -71,7 +75,9 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
       getBadgeText(_arg, callback) { callback(''); }
     }
   };
-  vm.runInNewContext(source, { chrome, console, URL, setTimeout() {}, clearTimeout() {} },
+  vm.runInNewContext(source, { chrome, console, URL,
+    crypto:{randomUUID:()=> '33333333-3333-4333-8333-333333333333'},
+    setTimeout(fn) { queueMicrotask(fn); return 1; }, clearTimeout() {} },
                      { filename: 'background.js' });
   return {
     item, calls,
@@ -342,4 +348,30 @@ test('plain text download query bait never triggers automatic browser takeover',
   assert.equal(h.calls.native, 0, 'query bait must not reach Native Host');
   assert.deepEqual(h.calls.cancel, []);
   assert.deepEqual(h.calls.erase, []);
+});
+
+test('unknown native add ACK is reconciled by UUID without second add',async()=>{
+  const h=make({confirm:true,addUnknown:true,lookupFound:true});
+  await h.start();
+  const response=await h.submit();
+  assert.equal(response.success,true);
+  assert.equal(response.reconciled,true);
+  assert.equal(response.tracked,true);
+  assert.deepEqual(h.calls.nativeActions,['add_download','get_request_status']);
+  assert.deepEqual(h.calls.cancel,[73]);
+  const journal=await h.message({action:'getRecentHandoffs'});
+  assert.equal(journal.items.length,1);
+  assert.equal(journal.items[0].taskId,47);
+});
+test('unknown add whose ID cannot be resolved never retries or cancels browser download',async()=>{
+  const h=make({confirm:true,addUnknown:true,lookupFound:false});
+  await h.start();
+  const response=await h.submit();
+  assert.equal(response.success,false);
+  assert.equal(response.outcomeUnknown,true);
+  assert.equal(h.calls.nativeActions.filter(x=>x==='add_download').length,1);
+  assert.equal(h.calls.nativeActions.filter(x=>x==='get_request_status').length,3);
+  assert.deepEqual(h.calls.cancel,[]);
+  const journal=await h.message({action:'getRecentHandoffs'});
+  assert.equal(journal.items.length,0);
 });
