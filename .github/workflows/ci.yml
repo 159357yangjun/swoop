@@ -639,6 +639,19 @@ jobs:
           node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist
           if ($LASTEXITCODE -ne 0) { throw 'Real browser Popup to final HLS E2E failed' }
 
+      - name: Fault injection - SQLite write delay after accepted HLS task
+        shell: pwsh
+        env:
+          IDM_IPC_TIMING_TRACE: '1'
+        run: |
+          # Separate packaged GUI/browser/native session and isolated SQLite DB.
+          # Injection is opt-in only in this step, bounded 3500..5000ms.
+          # Never resubmit an uncertain add; reconcile through read-only status.
+          node --check tools/browser_e2e/browser_hls_popup_e2e.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'SQLite ACK fault fixture syntax failed' }
+          node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --ack-delay
+          if ($LASTEXITCODE -ne 0) { throw 'SQLite slow-write unknown-ACK E2E failed' }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
