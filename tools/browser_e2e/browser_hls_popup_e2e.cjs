@@ -158,21 +158,18 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
     await row.locator('input[type=checkbox]').check();
     await popup.locator('#downloadSelBtn').click();
     if(ackDelay){
-      // The GUI has already inserted one task, but synchronous history writing
-      // exceeds Native Host's unchanged 3000ms reply deadline.
-      // Do NOT retry the non-idempotent add operation.
-      const failure=await until(()=>popup.evaluate(()=>{
-        const toast=document.getElementById('toast');
-        return toast?.classList.contains('err')?toast.textContent:'';
-      }),label+' unknown ACK error toast',13000);
-      assert.match(failure,/未响应/,
-        'Expected the real 3000ms GUI acknowledgement timeout, not any generic failure');
-      assert.equal(await popup.locator('#resourceList .row.sent').count(),0,
-        'Unknown ACK incorrectly marked a resource as sent');
+      // Production behavior under the same genuine 4200ms DB stall:
+      // no retry of add_download, only a read-only UUID lookup of its outcome.
+      await popup.locator('#resourceList .row.sent').waitFor({timeout:18000});
+      const recoveryNotice=await popup.locator('#toast').textContent();
+      assert.match(recoveryNotice||'',/已核对原请求/,
+        'The Popup must identify this as a recovered (not a resent) handoff');
       await popup.reload({waitUntil:'domcontentloaded'});
       const journal=await popup.evaluate(async()=>(
         (await chrome.storage.local.get('recentHandoffs')).recentHandoffs||[]));
-      assert.equal(journal.length,0,'Unknown ACK created a tracked/successful journal entry');
+      assert.equal(journal.length,1,'Recovered add should persist exactly one handoff');
+      assert.ok(Number.isSafeInteger(journal[0].taskId)&&journal[0].taskId>0);
+      assert.ok(journal[0].sessionId&&journal[0].sessionId.length>=32);
       // Reconcile state only by read-only queries after the delayed GUI operation.
       const state=await until(()=>{
         const result=nativeRequest({action:'get_status'});
@@ -205,8 +202,8 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
         'The opted-in SQLite latency injection must execute exactly once');
       assert.equal((guiLog.match(/HISTORY_WRITE_FAULT_INJECTION_END delay_ms=4200/g)||[]).length,1,
         'The injected SQLite write must reach the finish boundary exactly once');
-      console.log('[PASS] SQLite delay unknown-ACK: Popup failed closed; '+
-        'GUI tasks=1, history records=1, no resend, final decoded SHA256=match');
+      console.log('[PASS] SQLite delay unknown-ACK reconciled by request ID: '+
+        'Popup tracked, GUI tasks=1, history records=1, no resend, final decoded SHA256=match');
       return;
     }
     try {
