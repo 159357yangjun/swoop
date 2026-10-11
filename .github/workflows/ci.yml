@@ -574,6 +574,7 @@ jobs:
                 throw "Previous startup-race GUI PID $($p.Id) was not reaped"
               }
             }
+            Write-Host "STARTUP_RACE_TEARDOWN=all-processes-reaped"
             Remove-Item Env:IDM_FORWARD_TRACE_FILE -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
           }
