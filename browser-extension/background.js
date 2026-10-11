@@ -15,7 +15,7 @@
 // 按文件扩展名匹配的常见下载/媒体类型
 const FILE_PATTERNS = [
     // 视频
-    /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)(\?|$)/i,
+    /\.(m3u8|mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)(\?|$)/i,
     // 音频
     /\.(mp3|flac|aac|ogg|wav|m4a|wma|opus)(\?|$)/i,
     // 压缩包
@@ -152,7 +152,7 @@ function inferType(url) {
     url = urlPathForPattern(url);
     if (/^(magnet:|ed2k:|thunder:)/i.test(url)) return 'magnet';
     if (/\.torrent/i.test(url)) return 'torrent';
-    if (/\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)/i.test(url)) return 'video';
+    if (/\.(m3u8|mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts)/i.test(url)) return 'video';
     if (/\.(mp3|flac|aac|ogg|wav|m4a|wma|opus)/i.test(url)) return 'audio';
     if (/\.(jpg|jpeg|png|gif|bmp|webp|svg|tiff)/i.test(url)) return 'image';
     if (/\.(zip|rar|7z|tar|gz|bz2|xz|iso)/i.test(url)) return 'archive';
