@@ -652,6 +652,17 @@ jobs:
           node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --ack-delay
           if ($LASTEXITCODE -ne 0) { throw 'SQLite slow-write unknown-ACK E2E failed' }
 
+      - name: Request UUID lifecycle - duplicate, invalid and GUI restart
+        shell: pwsh
+        run: |
+          # Real packaged Native Host / GUI, using an isolated data directory.
+          # Duplicate is deliberately invoked ONCE with the SAME UUID only
+          # to assert idempotence. No client timeout retry or ID guessing.
+          node --check tools/browser_e2e/browser_hls_popup_e2e.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Request lifecycle fixture syntax failed' }
+          node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --request-lifecycle
+          if ($LASTEXITCODE -ne 0) { throw 'Request UUID lifecycle or session invalidation failed' }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
