@@ -573,6 +573,32 @@ function checkHostConnection() {
  *        format:  视频画质选择串（yt-dlp -f 选择串，空=最佳画质）
  * @returns {Promise<{success: boolean, message: string}>}
  */
+// Persist the opaque identity BEFORE any irreversible native add. A killed MV3
+// worker must never reconstruct the add payload and send it again.
+const PENDING_PREFIX = 'pendingAdd:';
+const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+async function forgetPendingAdd(requestId) {
+    await chrome.storage.local.remove(PENDING_PREFIX + requestId);
+}
+async function recoverPendingAdds() {
+    const all = await chrome.storage.local.get(null);
+    const now = Date.now();
+    for (const [key, entry] of Object.entries(all)) {
+        if (!key.startsWith(PENDING_PREFIX)) continue;
+        if (!entry || typeof entry.requestId !== 'string' ||
+            key !== PENDING_PREFIX + entry.requestId ||
+            !Number.isSafeInteger(entry.createdAt) ||
+            now - entry.createdAt > PENDING_MAX_AGE_MS) {
+            // Expired entries are no longer auto-checked; this says NOTHING
+            // about whether a desktop task existed.
+            await chrome.storage.local.remove(key);
+            continue;
+        }
+        const result = await reconcileUncertainRequest(entry.requestId, entry.url, entry.filename);
+        if (result.success && result.tracked)
+            await forgetPendingAdd(entry.requestId);
+    }
+}
 // Read-only recovery of a possibly accepted add. Never issue a second add
 // for an uncertain response: the original request can already have committed.
 function lookupOriginalRequest(requestId) {
@@ -611,13 +637,20 @@ async function reconcileUncertainRequest(requestId, url, filename) {
         message: '下载请求结果尚无法确认；请在桌面端检查，勿重复提交' };
 }
 
-function sendToIdmNext(url, filename = '', opts = {}) {
+async function sendToIdmNext(url, filename = '', opts = {}) {
+    const requestId = crypto.randomUUID();
+    try {
+        await chrome.storage.local.set({[PENDING_PREFIX + requestId]: {
+            requestId, url, filename, createdAt: Date.now()
+        }});
+    } catch (_) {
+        return {success:false, outcomeUnknown:false, message:'无法保存请求标识，未提交下载'};
+    }
     return new Promise(resolve => {
         try {
             // UUIDv4 is an unguessable capability for read-only reconciliation.
             // Generate ONCE per explicit user/automatic add; never reuse for
             // a second attempt or submit the add again on timeout.
-            const requestId = crypto.randomUUID();
             chrome.runtime.sendNativeMessage(NATIVE_HOST, {
                 action: 'add_download',
                 requestId,
@@ -631,7 +664,10 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                 if (nativeError || !response ||
                     (!response.success && (response.outcomeUnknown ||
                     /未响应|不明|状态未知/.test(response.message || '')))) {
-                    resolve(await reconcileUncertainRequest(requestId, url, filename));
+                    const recovered = await reconcileUncertainRequest(requestId, url, filename);
+                    if (recovered.success && recovered.tracked)
+                        await forgetPendingAdd(requestId).catch(() => {});
+                    resolve(recovered);
                 } else if (response && response.success) {
                     const taskId = Number.isSafeInteger(response.taskId) && response.taskId > 0
                         ? response.taskId : null;
@@ -641,12 +677,16 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                         resolve({ success: true, taskId: null, tracked: false,
                             message: '桌面端报告已接收，但没有有效任务身份；浏览器原下载会保留' });
                     } else {
-                        rememberHandoff({ id: null, filename, url }, taskId, sessionId).then(tracked =>
+                        rememberHandoff({ id: null, filename, url }, taskId, sessionId).then(async tracked => {
+                            if (tracked) await forgetPendingAdd(requestId).catch(() => {});
                             resolve({ success: true, taskId, sessionId, tracked,
                                 message: tracked ? (response.message || '已添加到 IDM Next')
-                                    : '任务已接收，但扩展无法保存查询记录；请在桌面端查看' }));
+                                    : '任务已接收，但扩展无法保存查询记录；请在桌面端查看' });
+                        });
                     }
                 } else {
+                    // Negative reply does not always prove the add was rejected.
+                    // Keep the UUID for read-only investigation; never replay.
                     resolve({ success: false, message: (response && response.message) || 'IDM Next 未响应' });
                 }
             });
@@ -655,6 +695,9 @@ function sendToIdmNext(url, filename = '', opts = {}) {
         }
     });
 }
+
+// Cold-start read-only reconciliation. Do not add/download/cancel here.
+recoverPendingAdds().catch(() => {});
 
 /**
  * 批量发送下载请求
