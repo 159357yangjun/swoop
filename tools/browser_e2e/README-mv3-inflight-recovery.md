@@ -28,3 +28,7 @@ Uses packaged GUI and Native Host, Edge MV3 extension, actual native messaging r
 - The queued batch-add path remains legacy and is not covered by this per-request UUID mechanism.
 - A browser storage write returning success immediately before a forced browser-wide shutdown still depends on the browser's storage durability; this test specifically kills the Service Worker after observing the committed value.
 - Historical IPC delay and intermittent engine exit issues remain open; do not claim this test proves their original causes.
+
+## First CI red and fixture correction
+
+[CI #38140801760](https://github.com/159357yangjun/swoop/actions/runs/38140801760) failed in the **new** mid-flight scenario before sending any Native Host request. The Popup resource row was absent because the new scenario had not activated the media source tab before `loadResources()`. The existing E2E correctly does `page.bringToFront()`. The correction adds that operation and waits for the source page's injected resource token element. The full CI red is preserved; worker stop/recovery is **not yet proven** by that run.
