@@ -3,6 +3,8 @@
 
 #include <QObject>
 #include <QString>
+#include <QHash>
+#include <QQueue>
 #include <functional>
 
 class QLocalServer;
@@ -39,6 +41,13 @@ private slots:
 
 private:
     void handleClient(QLocalSocket* client);
+
+    // Opaque UUIDv4 request token -> real task ID. Read-only reconciliation
+    // lives for this GUI session only; bounded so untrusted browser callers
+    // cannot grow a server-side map without limit.
+    QHash<QString, int> m_requestToTask;
+    QQueue<QString> m_recentRequestIds;
+    static constexpr int kMaxRequestIds = 256;
 
     QString m_sessionId; // unique per desktop GUI process; blocks stale ID reuse after restart
     QLocalServer* m_server = nullptr;

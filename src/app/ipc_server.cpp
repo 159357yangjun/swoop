@@ -139,8 +139,27 @@ void IpcServer::handleClient(QLocalSocket* client)
         QString queue    = msg.value("queue").toString();    // 非空=加入队列
         QString format   = msg.value("format").toString();   // 视频画质（yt-dlp -f 选择串）
         int    threads   = msg.value("threads").toInt();
+        const QString requestId = msg.value(QStringLiteral("requestId")).toString();
+        const QUuid token = QUuid::fromString(requestId);
+        const bool validRequestId = requestId.size() == 36 && !token.isNull() &&
+            token.toString(QUuid::WithoutBraces).compare(requestId, Qt::CaseInsensitive) == 0;
+        const QString canonicalRequestId = validRequestId
+            ? token.toString(QUuid::WithoutBraces) : QString();
 
-        if (url.isEmpty()) {
+        if (!requestId.isEmpty() && !validRequestId) {
+            response["success"] = false;
+            response["message"] = QStringLiteral("无效请求标识");
+        } else if (!canonicalRequestId.isEmpty() &&
+                   m_requestToTask.contains(canonicalRequestId)) {
+            // A repeated request token MUST NOT invoke the add callback again.
+            // Browsers never automatically resend; this protects user/network
+            // repetitions with the same token from double task creation.
+            const int priorTask = m_requestToTask.value(canonicalRequestId);
+            response["success"] = true;
+            response["taskId"] = priorTask;
+            response["sessionId"] = m_sessionId;
+            response["message"] = QStringLiteral("该请求已有下载任务");
+        } else if (url.isEmpty()) {
             response["success"] = false;
             response["message"] = QStringLiteral("URL 为空");
         } else if (!m_addTask) {
@@ -157,6 +176,15 @@ void IpcServer::handleClient(QLocalSocket* client)
             const bool created = taskId > 0;
             response["success"] = created;
             if (created) {
+                // Commit the mapping even if the IPC client times out before
+                // it can read our ACK. Lookup never creates a new task.
+                if (!canonicalRequestId.isEmpty()) {
+                    m_requestToTask.insert(canonicalRequestId, taskId);
+                    m_recentRequestIds.enqueue(canonicalRequestId);
+                    while (m_recentRequestIds.size() > kMaxRequestIds) {
+                        m_requestToTask.remove(m_recentRequestIds.dequeue());
+                    }
+                }
                 response["taskId"] = taskId;
                 response["sessionId"] = m_sessionId;
                 response["message"] = QStringLiteral("已添加下载: %1").arg(filename.isEmpty() ? url : filename);
@@ -242,6 +270,30 @@ void IpcServer::handleClient(QLocalSocket* client)
             response["message"] = command == "cancel"
                 ? QStringLiteral("已取消任务 #%1").arg(id)
                 : QStringLiteral("已移除任务 #%1").arg(id);
+        }
+    } else if (command == "request_status") {
+        // Read-only lookup of an unpredictable, per-add request token. No URL,
+        // filename or original add payload is returned to the caller.
+        const QString requestId = msg.value(QStringLiteral("requestId")).toString();
+        const QUuid token = QUuid::fromString(requestId);
+        const bool valid = requestId.size() == 36 && !token.isNull() &&
+            token.toString(QUuid::WithoutBraces).compare(requestId, Qt::CaseInsensitive) == 0;
+        const QString key = valid ? token.toString(QUuid::WithoutBraces) : QString();
+        const int taskId = key.isEmpty() ? 0 : m_requestToTask.value(key, 0);
+        const QVector<TaskRow> tasks = model ? model->tasks() : QVector<TaskRow>();
+        const TaskRow* row = taskId > 0 ? findTask(tasks, taskId) : nullptr;
+        if (!row) {
+            // "not found" is NOT proof the add was not committed: the GUI
+            // could have restarted, evicted the token, or removed the task.
+            response["success"] = false;
+            response["found"] = false;
+            response["message"] = QStringLiteral("请求暂不可确认，请在桌面端核对，勿重复提交");
+        } else {
+            response["success"] = true;
+            response["found"] = true;
+            response["taskId"] = row->id;
+            response["sessionId"] = m_sessionId;
+            response["message"] = QStringLiteral("已核对原请求对应任务");
         }
     } else if (command == "task_status") {
         // Machine-readable, read-only status for a browser handoff by exact ID.
