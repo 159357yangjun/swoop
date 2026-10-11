@@ -142,7 +142,7 @@ async function scenario(label,executable,base,root,broken){
     await popup.reload({waitUntil:'domcontentloaded'});
     const handoff=await until(()=>popup.evaluate(()=>new Promise(resolve=>
       chrome.runtime.sendMessage({action:'getRecentHandoffs'},resolve)))
-      .then(r=>r?.items?.find(x=>x.url?.includes(name))||null),
+      .then(r=>r?.items?.find(x=>x.filename===name)||null),
       label+' session-bound handoff');
     assert.ok(Number.isSafeInteger(handoff.taskId)&&handoff.taskId>0,'Missing task ID');
     assert.ok(handoff.sessionId&&handoff.sessionId.length>=32,'Missing session ID');
@@ -185,8 +185,12 @@ async function scenario(label,executable,base,root,broken){
   try{
     const media=fixture(root), config=path.join(root,'config'),downloads=path.join(root,'downloads');
     fs.mkdirSync(config);fs.mkdirSync(downloads);
+    const ffmpegExe=cmd('where.exe',['ffmpeg'],{encoding:'utf8'}).trim().split(/\r?\n/)[0];
+    assert.ok(ffmpegExe&&fs.existsSync(ffmpegExe),'FFmpeg executable not found for packaged GUI');
     fs.writeFileSync(path.join(config,'idm-next.ini'),
-      '[General]\ndefaultSaveDir='+downloads.replace(/\\/g,'/')+'\n');
+      '[General]\ndefaultSaveDir='+downloads.replace(/\\/g,'/')+
+      '\nffmpegCustomPath='+ffmpegExe.replace(/\\/g,'/')+
+      '\nautoDownloadFfmpeg=false\nautoDownloadYtDlp=false\nautoDownloadAria2=false\n');
     server=http.createServer((req,res)=>{
       const u=new URL(req.url,'http://127.0.0.1');
       if(u.pathname==='/watch.html'){
@@ -215,7 +219,10 @@ async function scenario(label,executable,base,root,broken){
     const stdout=fs.openSync(path.join(root,'gui.out'),'w');
     const stderr=fs.openSync(path.join(root,'gui.err'),'w');
     guiProcess=cp.spawn(gui,[],{cwd:dist,windowsHide:true,stdio:['ignore',stdout,stderr],
-      env:{...process.env,IDM_DATA_DIR:config,QT_LOGGING_TO_CONSOLE:'1'}});
+      env:{...process.env,IDM_DATA_DIR:config,
+        PATH:path.dirname(ffmpegExe)+path.delimiter+process.env.PATH,
+        QT_FORCE_STDERR_LOGGING:'1'}});
+    fs.closeSync(stdout);fs.closeSync(stderr);
     await until(()=>{
       if(guiProcess.exitCode!==null)throw Error('Packaged GUI exited');
       try{return hostPing().success===true;}catch{return false;}
