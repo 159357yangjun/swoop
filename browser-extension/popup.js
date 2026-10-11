@@ -412,6 +412,31 @@ function sendBatch(queued) {
     dBtn.disabled = qBtn.disabled = true;
     showToast(`正在发送 ${list.length} 个资源…`);
 
+    // A single selected resource needs a real taskId + sessionId for the
+    // Recent Handoffs status UI. batch_add returns only aggregate counts;
+    // routing one item through it loses task identity even if GUI accepts it.
+    // Submit exactly once; uncertain native acknowledgement is never retried.
+    if (list.length === 1) {
+        const item = list[0];
+        send({
+            action: 'downloadWithOptions',
+            url: item.url, filename: item.filename || '',
+            saveDir: '', queued,
+        }, (resp) => {
+            const ok = !!(resp && resp.success);
+            const msg = (resp && resp.message) || (ok ? '已添加到 IDM Next' : '发送失败');
+            if (ok) {
+                sent.add(item.url);
+                selected.clear();
+            }
+            render();
+            showToast(msg, ok ? 'ok' : 'err');
+            pageToast(msg, ok ? 'success' : 'error');
+            if (ok) loadRecentHandoffs();
+        });
+        return;
+    }
+
     send({
         action: 'batchDownload',
         items: list.map(r => ({ url: r.url, filename: r.filename || '', queued })),
