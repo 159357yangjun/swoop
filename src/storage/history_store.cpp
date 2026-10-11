@@ -5,6 +5,7 @@
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDateTime>
+#include <QThread>
 #include <QVariant>
 #include <QJsonObject>
 
@@ -65,6 +66,24 @@ void HistoryStore::recordAdded(const QString& url, const QString& filename, cons
     q.addBindValue(filename);
     q.addBindValue(dir);
     q.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+
+    // EXPERIMENTAL FAULT INJECTION, isolated in the draft CI test branch.
+    // Simulate a slow synchronous SQLite history write after the task has
+    // already been registered in the GUI model, before the IPC add ACK.
+    // Both opt-in environment flags are required; normal behavior is unchanged.
+    // A deliberately narrow bounded range prevents accidental giant stalls.
+    if (qEnvironmentVariableIsSet("IDM_IPC_TIMING_TRACE")) {
+        bool validDelay = false;
+        const int delayMs = qEnvironmentVariableIntValue(
+            "IDM_E2E_HISTORY_WRITE_DELAY_MS", &validDelay);
+        if (validDelay && delayMs >= 3500 && delayMs <= 5000) {
+            Log::info(QStringLiteral("HISTORY_WRITE_FAULT_INJECTION_BEGIN delay_ms=%1")
+                          .arg(delayMs));
+            QThread::msleep(static_cast<unsigned long>(delayMs));
+            Log::info(QStringLiteral("HISTORY_WRITE_FAULT_INJECTION_END delay_ms=%1")
+                          .arg(delayMs));
+        }
+    }
     if (!q.exec())
         Log::warn(QStringLiteral("HistoryStore 记录加入失败: %1").arg(q.lastError().text()));
 }
