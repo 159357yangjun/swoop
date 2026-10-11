@@ -146,6 +146,7 @@ async function scenario(label,executable,base,root,broken){
       label+' session-bound handoff');
     assert.ok(Number.isSafeInteger(handoff.taskId)&&handoff.taskId>0,'Missing task ID');
     assert.ok(handoff.sessionId&&handoff.sessionId.length>=32,'Missing session ID');
+    console.log('[HANDOFF] '+label+' task='+handoff.taskId+' session_present=true');
     const state=await until(async()=>{
       const r=await popup.evaluate(taskId=>new Promise(resolve=>
         chrome.runtime.sendMessage({action:'getHandoffStatus',taskId},resolve)),handoff.taskId);
