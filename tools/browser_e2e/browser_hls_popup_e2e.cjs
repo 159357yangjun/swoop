@@ -330,6 +330,66 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
       try{return hostPing().success===true;}catch{return false;}
     },'GUI Native Host ping',45000);
     const base='http://127.0.0.1:'+server.address().port;
+    if(process.argv.includes('--request-lifecycle')){
+      // Real Native Host / GUI protocol lifecycle. A second add below is an
+      // explicit same-token idempotence assertion, NOT a timeout retry.
+      const requestId=crypto.randomUUID(), unknownId=crypto.randomUUID();
+      const url=base+'/broken.m3u8';
+      const filename='request-lifecycle-'+crypto.randomBytes(5).toString('hex')+'.m3u8';
+      const first=nativeRequest({action:'add_download',requestId,url,filename});
+      assert.equal(first.success,true,'First actual GUI creation failed');
+      assert.ok(Number.isSafeInteger(first.taskId)&&first.taskId>0);
+      assert.ok(first.sessionId&&first.sessionId.length>=32);
+      const verified=nativeRequest({action:'get_request_status',requestId});
+      assert.equal(verified.found,true,'Committed request is not queryable');
+      assert.equal(verified.taskId,first.taskId);
+      assert.equal(verified.sessionId,first.sessionId);
+      const duplicate=nativeRequest({action:'add_download',requestId,url,filename});
+      assert.equal(duplicate.success,true,'Same request token must be idempotent');
+      assert.equal(duplicate.taskId,first.taskId);
+      assert.equal(duplicate.sessionId,first.sessionId);
+      const invalid=nativeRequest({action:'add_download',
+        requestId:'not-a-uuid',url,filename});
+      assert.equal(invalid.success,false,'Malformed token must be rejected');
+      const missing=nativeRequest({action:'get_request_status',requestId:unknownId});
+      assert.equal(missing.success,false,'Unknown UUID cannot be treated as acceptance');
+      assert.equal(missing.found,false);
+      const listing=nativeRequest({action:'get_status'});
+      const rows=(listing.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
+      assert.equal(rows.length,1,'Duplicate or invalid token must not create tasks');
+      assert.ok(rows[0].includes(filename),'Original task missing from GUI listing');
+      const oldGui=guiProcess;
+      oldGui.kill();
+      await until(()=>oldGui.exitCode!==null||oldGui.signalCode!==null,
+        'First GUI process exit before restart',7000);
+      // Keep the isolated database but create a new GUI session. Opaque tokens
+      // are deliberately NOT durable; a stale request lookup must fail closed.
+      const outFd=fs.openSync(path.join(root,'gui.out'),'a');
+      const errFd=fs.openSync(path.join(root,'gui.err'),'a');
+      guiProcess=cp.spawn(gui,[],{cwd:dist,windowsHide:true,
+        stdio:['ignore',outFd,errFd],
+        env:{...process.env,IDM_DATA_DIR:config,
+          PATH:path.dirname(ffmpegExe)+path.delimiter+process.env.PATH,
+          QT_FORCE_STDERR_LOGGING:'1'}});
+      fs.closeSync(outFd);fs.closeSync(errFd);
+      await until(()=>{
+        if(guiProcess.exitCode!==null)throw Error('Restarted GUI exited');
+        try{return hostPing().success===true;}catch{return false;}
+      },'Restarted GUI Native Host ping',45000);
+      const restartBefore=nativeRequest({action:'get_status'});
+      const stale=nativeRequest({action:'get_request_status',requestId});
+      const restartAfter=nativeRequest({action:'get_status'});
+      assert.equal(stale.success,false,'Old GUI session token must not be accepted');
+      assert.equal(stale.found,false,'Old GUI token lookup must be unconfirmed');
+      const ids=response=>(response.message||'').split(/\r?\n/)
+        .filter(line=>/^#\d+\t/.test(line))
+        .map(line=>Number(line.match(/^#(\d+)/)[1])).sort((a,b)=>a-b);
+      assert.deepEqual(ids(restartAfter),ids(restartBefore),
+        'Read-only stale lookup must not create or remove GUI tasks');
+      console.log('[PASS] Request lifecycle: same UUID creates one task; '+
+        'invalid/unknown IDs fail closed; stale UUID after GUI restart stays unknown');
+      return;
+    }
     const installed=await browsers();
     if(ackDelay){
       await scenario('Edge SQLite delayed write',installed[0][1],base,root,false,true);

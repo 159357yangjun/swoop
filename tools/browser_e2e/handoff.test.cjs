@@ -8,10 +8,10 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', '..', 'browser-extension', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress', addUnknown = false, lookupFound = false } = {}) {
+function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress', addUnknown = false, lookupFound = false, sharedLocal = null } = {}) {
   const events = { created: listener(), message: listener() };
   const calls = { native: 0, cancel: [], erase: [], dialogs: 0, nativeActions: [] };
-  const local = {};
+  const local = sharedLocal || {};
   const SESSION_A = '11111111-1111-4111-8111-111111111111';
   let guiSession = SESSION_A;
   const item = { id: 73, tabId, state, url: 'https://example.test/file.zip', filename: 'file.zip', mime: 'application/zip' };
@@ -374,4 +374,35 @@ test('unknown add whose ID cannot be resolved never retries or cancels browser d
   assert.deepEqual(h.calls.cancel,[]);
   const journal=await h.message({action:'getRecentHandoffs'});
   assert.equal(journal.items.length,0);
+});
+
+test('recovered task journal survives simulated MV3 worker JavaScript restart',async()=>{
+  // A fresh VM/worker receives ONLY the previous chrome.storage.local content.
+  // This does not simulate a crash during the original in-flight add callback.
+  const sharedLocal={};
+  const first=make({confirm:true,addUnknown:true,lookupFound:true,sharedLocal});
+  const result=await first.submit();
+  assert.equal(result.success,true);
+  assert.equal(result.reconciled,true);
+  assert.equal(sharedLocal.recentHandoffs.length,1);
+  const restarted=make({sharedLocal});
+  const journal=await restarted.message({action:'getRecentHandoffs'});
+  assert.equal(journal.items.length,1);
+  assert.equal(journal.items[0].taskId,47);
+  const state=await restarted.message({action:'getHandoffStatus',taskId:47});
+  assert.equal(state.taskId,47);
+  assert.equal(state.state,4);
+  assert.deepEqual(restarted.calls.nativeActions,['get_task_status'],
+    'New worker must only read state and never replay add_download');
+});
+test('unresolved ACK remains unknown after simulated MV3 worker restart',async()=>{
+  const sharedLocal={};
+  const first=make({confirm:true,addUnknown:true,lookupFound:false,sharedLocal});
+  const result=await first.submit();
+  assert.equal(result.success,false);
+  assert.equal(result.outcomeUnknown,true);
+  const restarted=make({sharedLocal});
+  const journal=await restarted.message({action:'getRecentHandoffs'});
+  assert.equal(journal.items.length,0);
+  assert.equal(restarted.calls.nativeActions.filter(x=>x==='add_download').length,0);
 });
