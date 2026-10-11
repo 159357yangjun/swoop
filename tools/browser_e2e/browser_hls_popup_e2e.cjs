@@ -165,8 +165,8 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
         const toast=document.getElementById('toast');
         return toast?.classList.contains('err')?toast.textContent:'';
       }),label+' unknown ACK error toast',13000);
-      assert.match(failure,/未响应|任务状态未知|发送失败/,
-        'The Popup must NOT claim the unacknowledged add succeeded');
+      assert.match(failure,/未响应/,
+        'Expected the real 3000ms GUI acknowledgement timeout, not any generic failure');
       assert.equal(await popup.locator('#resourceList .row.sent').count(),0,
         'Unknown ACK incorrectly marked a resource as sent');
       await popup.reload({waitUntil:'domcontentloaded'});
@@ -200,6 +200,11 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
       const lines=(last.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
       assert.equal(lines.length,1,'GUI contains duplicate tasks after timeout');
       assert.equal(persistedHistoryCount(root,name),1,'SQLite contains duplicated add');
+      const guiLog=fs.readFileSync(path.join(root,'gui.err'),'utf8');
+      assert.equal((guiLog.match(/HISTORY_WRITE_FAULT_INJECTION_BEGIN delay_ms=4200/g)||[]).length,1,
+        'The opted-in SQLite latency injection must execute exactly once');
+      assert.equal((guiLog.match(/HISTORY_WRITE_FAULT_INJECTION_END delay_ms=4200/g)||[]).length,1,
+        'The injected SQLite write must reach the finish boundary exactly once');
       console.log('[PASS] SQLite delay unknown-ACK: Popup failed closed; '+
         'GUI tasks=1, history records=1, no resend, final decoded SHA256=match');
       return;
