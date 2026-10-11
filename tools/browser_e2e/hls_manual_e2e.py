@@ -80,13 +80,20 @@ def copy_fixture(root: Path, source: str, name: str) -> Path:
 
 
 def video_digest(ffmpeg: str, source: Path) -> str:
-    payload = subprocess.run(
-        [ffmpeg, "-v", "error", "-xerror", "-nostdin",
-         "-allowed_extensions", "ALL", "-i", str(source),
-         "-map", "0:v:0", "-pix_fmt", "yuv420p",
-         "-f", "rawvideo", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=25
-    ).stdout
+    args = [ffmpeg, "-v", "error", "-xerror", "-nostdin"]
+    # -allowed_extensions is a HLS demuxer option. Supplying it to the
+    # MPEG-TS demuxer itself fails with "Option not found" on FFmpeg 9.
+    if source.suffix.lower() == ".m3u8":
+        args += ["-allowed_extensions", "ALL"]
+    args += ["-i", str(source), "-map", "0:v:0",
+             "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]
+    decoded = subprocess.run(args, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, timeout=25)
+    if decoded.returncode != 0:
+        raise AssertionError(
+            f"Independent video decode failed for {source}: "
+            + decoded.stderr.decode("utf-8", errors="replace")[-1200:])
+    payload = decoded.stdout
     if not payload:
         raise AssertionError(f"No decoded video frames: {source}")
     return hashlib.sha256(payload).hexdigest()
