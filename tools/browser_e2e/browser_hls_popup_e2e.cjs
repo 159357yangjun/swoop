@@ -199,9 +199,9 @@ async function scenario(label,executable,base,root,broken){
         assert.match(token,/^(ok|bad)[a-f0-9]{10}$/);
         const resource='/' +(u.searchParams.get('broken')==='1'?'popup-broken-':'popup-hls-')+token+'.m3u8';
         res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});
-        res.end('<!doctype html><html><video src="'+resource+'"></video><script>'+
+        res.end('<!doctype html><html><body>HLS resource fixture<script>'+
           'fetch('+JSON.stringify(resource)+').then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(()=>window.mediaFetched=true)'+
-          '.catch(e=>window.mediaError=String(e));</script></html>');
+          '.catch(e=>window.mediaError=String(e));</script></body></html>');
         return;
       }
       const file=u.pathname.startsWith('/popup-hls-')&&u.pathname.endsWith('.m3u8')
