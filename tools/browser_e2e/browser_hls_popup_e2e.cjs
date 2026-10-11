@@ -178,9 +178,9 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
         const result=nativeRequest({action:'get_status'});
         if(!result.success||!result.running)return null;
         const message=result.message||'';
-        const rows=message.split(/\\r?\\n/).filter(x=>/^#\\d+\\t/.test(x));
+        const rows=message.split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
         return rows.length===1&&rows[0].includes(name)
-          ?{rows:rows.length,taskIds:rows.map(x=>Number(x.match(/^#(\\d+)/)[1]))}
+          ?{rows:rows.length,taskIds:rows.map(x=>Number(x.match(/^#(\d+)/)[1]))}
           :null;
       },label+' single GUI task read-only reconciliation',16000);
       assert.equal(state.rows,1);
@@ -197,7 +197,7 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
         'HLS output changed under injected SQLite delay');
       // Last independent snapshot: no hidden automatic resubmission on completion.
       const last=nativeRequest({action:'get_status'});
-      const lines=(last.message||'').split(/\\r?\\n/).filter(x=>/^#\\d+\\t/.test(x));
+      const lines=(last.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
       assert.equal(lines.length,1,'GUI contains duplicate tasks after timeout');
       assert.equal(persistedHistoryCount(root,name),1,'SQLite contains duplicated add');
       console.log('[PASS] SQLite delay unknown-ACK: Popup failed closed; '+
