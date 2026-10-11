@@ -267,6 +267,21 @@ async function scenario(label,executable,base,root,broken){
     }
     throw e;
   }finally{
+    // Emit only opt-in phase durations on EVERY outcome, including green.
+    // The GUI log itself contains request URLs/paths: NEVER print raw lines.
+    // This runs after the strict Popup success/failure gate and never retries.
+    try {
+      if(process.env.IDM_IPC_TIMING_TRACE==='1'){
+        const file=path.join(root,'gui.err');
+        const raw=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';
+        const markers=[...raw.matchAll(/HLS_ADD_TIMING phase=([a-z_]+) elapsed_ms=(\d+)/g)]
+          .map(m=>({phase:m[1],elapsedMs:Number(m[2])}));
+        console.log('[IPC_PHASE_SUMMARY] '+JSON.stringify(markers));
+        if(!markers.length)console.error('[IPC_PHASE_SUMMARY] no HLS timing markers captured');
+      }
+    }catch(traceError){
+      console.error('[IPC_PHASE_SUMMARY_ERROR] '+String(traceError).slice(0,160));
+    }
     try{
       if(guiProcess){
         guiProcess.kill();
