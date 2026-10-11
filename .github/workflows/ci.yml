@@ -34,6 +34,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pure C++ HLS/AES Python syntax check failed' }
           node --test tools/browser_e2e/handoff.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Browser handoff Node tests failed' }
+          node --test tools/browser_e2e/popup_single_handoff.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Single Popup handoff Node tests failed' }
           node --test tools/browser_e2e/resource_backfill.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Resource discovery Node tests failed' }
 
@@ -624,6 +626,16 @@ jobs:
           $env:PYTHONIOENCODING = 'utf-8'
           python tools/browser_e2e/hls_manual_e2e.py --dist installer/dist
           if ($LASTEXITCODE -ne 0) { throw 'Real pure C++ HLS/AES-128 E2E failed' }
+
+      - name: Real browser Popup to Native Host to final HLS file E2E
+        shell: pwsh
+        run: |
+          # Browser APIs, OS Native Messaging registration, packaged GUI IPC,
+          # final FFmpeg output and decoded frame hashing are all real.
+          node --check tools/browser_e2e/browser_hls_popup_e2e.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Real browser Popup E2E syntax failed' }
+          node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist
+          if ($LASTEXITCODE -ne 0) { throw 'Real browser Popup to final HLS E2E failed' }
 
       - name: Verify package outputs
         shell: pwsh
