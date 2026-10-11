@@ -15,6 +15,7 @@ function exercise(items,queued,response) {
   const nodes=new Map();
   const ctx=vm.createContext({
     console,
+    window:{matchMedia:null},
     document:{
       addEventListener(){},
       getElementById(id){
