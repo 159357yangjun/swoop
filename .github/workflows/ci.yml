@@ -663,6 +663,16 @@ jobs:
           node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --request-lifecycle
           if ($LASTEXITCODE -ne 0) { throw 'Request UUID lifecycle or session invalidation failed' }
 
+      - name: MV3 real worker stop during pending native add
+        shell: pwsh
+        env:
+          IDM_IPC_TIMING_TRACE: '1'
+        run: |
+          node --check tools/browser_e2e/browser_hls_popup_e2e.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'MV3 pending recovery test syntax failure' }
+          node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --ack-delay --worker-stop
+          if ($LASTEXITCODE -ne 0) { throw 'Real MV3 stop/restart pending UUID recovery failed' }
+
       - name: Verify package outputs
         shell: pwsh
         run: |
