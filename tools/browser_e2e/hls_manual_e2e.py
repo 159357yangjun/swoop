@@ -81,7 +81,8 @@ def copy_fixture(root: Path, source: str, name: str) -> Path:
 
 def video_digest(ffmpeg: str, source: Path) -> str:
     payload = subprocess.run(
-        [ffmpeg, "-v", "error", "-xerror", "-nostdin", "-i", str(source),
+        [ffmpeg, "-v", "error", "-xerror", "-nostdin",
+         "-allowed_extensions", "ALL", "-i", str(source),
          "-map", "0:v:0", "-pix_fmt", "yuv420p",
          "-f", "rawvideo", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=25
