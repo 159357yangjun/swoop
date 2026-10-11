@@ -562,7 +562,17 @@ jobs:
             }
             Write-Timings
             foreach ($p in $pair) {
-              if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+              if (-not $p.HasExited) {
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              }
+              # Stop-Process may return before a Windows process fully exits.
+              # The next trial MUST NOT inherit an old named mutex/QLocalServer
+              # and have BOTH new GUI contenders forward to a dying instance.
+              # This is between trials, after strict startup timings finish;
+              # it does not relax the original 20s/5s in-trial assertions.
+              if (-not $p.WaitForExit(5000)) {
+                throw "Previous startup-race GUI PID $($p.Id) was not reaped"
+              }
             }
             Remove-Item Env:IDM_FORWARD_TRACE_FILE -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
