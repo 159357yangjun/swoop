@@ -32,6 +32,26 @@ function hostPing(){
   assert.ok(bytes.length>=4&&bytes.readUInt32LE(0)===bytes.length-4,'Malformed native frame');
   return JSON.parse(bytes.subarray(4).toString('utf8'));
 }
+// A new native process for READ-ONLY reconciliation; never resubmit add_download.
+function nativeRequest(request){
+  const bytes=Buffer.from(JSON.stringify(request));
+  const length=Buffer.alloc(4);length.writeUInt32LE(bytes.length);
+  const child=cp.spawnSync(host,[],{cwd:dist,input:Buffer.concat([length,bytes]),
+    windowsHide:true,timeout:9000,maxBuffer:1024*1024});
+  assert.equal(child.status,0,'Read-only Native Host request failed');
+  const result=child.stdout;
+  assert.ok(result.length>=4&&result.readUInt32LE(0)===result.length-4,
+    'Malformed read-only Native Host frame');
+  return JSON.parse(result.subarray(4).toString('utf8'));
+}
+function persistedHistoryCount(root,filename){
+  const file=path.join(root,'config','history.db');
+  if(!fs.existsSync(file))return -1;
+  const query='import sqlite3,sys; db=sqlite3.connect(sys.argv[1],timeout=2);'+
+    "print(db.execute('SELECT COUNT(*) FROM downloads WHERE filename=?',"+
+    '(sys.argv[2],)).fetchone()[0])';
+  return Number(cmd('python',['-c',query,file,filename],{encoding:'utf8'}).trim());
+}
 function fixture(root){
   const media=path.join(root,'media'),high=path.join(media,'high');
   fs.mkdirSync(high,{recursive:true});
@@ -102,7 +122,7 @@ function frameHash(file){
   assert.ok(raw.length>0,'Decoded zero frames');
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
-async function scenario(label,executable,base,root,broken){
+async function scenario(label,executable,base,root,broken,ackDelay=false){
   const token=(broken?'bad':'ok')+crypto.randomBytes(5).toString('hex');
   const prefix=broken?'popup-broken-':'popup-hls-';
   const name=prefix+token+'.m3u8',finalName=name+'.mp4';
@@ -137,6 +157,53 @@ async function scenario(label,executable,base,root,broken){
     await row.waitFor({timeout:15000});
     await row.locator('input[type=checkbox]').check();
     await popup.locator('#downloadSelBtn').click();
+    if(ackDelay){
+      // The GUI has already inserted one task, but synchronous history writing
+      // exceeds Native Host's unchanged 3000ms reply deadline.
+      // Do NOT retry the non-idempotent add operation.
+      const failure=await until(()=>popup.evaluate(()=>{
+        const toast=document.getElementById('toast');
+        return toast?.classList.contains('err')?toast.textContent:'';
+      }),label+' unknown ACK error toast',13000);
+      assert.match(failure,/未响应|任务状态未知|发送失败/,
+        'The Popup must NOT claim the unacknowledged add succeeded');
+      assert.equal(await popup.locator('#resourceList .row.sent').count(),0,
+        'Unknown ACK incorrectly marked a resource as sent');
+      await popup.reload({waitUntil:'domcontentloaded'});
+      const journal=await popup.evaluate(async()=>(
+        (await chrome.storage.local.get('recentHandoffs')).recentHandoffs||[]));
+      assert.equal(journal.length,0,'Unknown ACK created a tracked/successful journal entry');
+      // Reconcile state only by read-only queries after the delayed GUI operation.
+      const state=await until(()=>{
+        const result=nativeRequest({action:'get_status'});
+        if(!result.success||!result.running)return null;
+        const message=result.message||'';
+        const rows=message.split(/\\r?\\n/).filter(x=>/^#\\d+\\t/.test(x));
+        return rows.length===1&&rows[0].includes(name)
+          ?{rows:rows.length,taskIds:rows.map(x=>Number(x.match(/^#(\\d+)/)[1]))}
+          :null;
+      },label+' single GUI task read-only reconciliation',16000);
+      assert.equal(state.rows,1);
+      assert.equal(new Set(state.taskIds).size,1);
+      const history=await until(()=>{
+        const count=persistedHistoryCount(root,name);
+        return count===1?count:null;
+      },label+' single persisted SQLite record',15000);
+      assert.equal(history,1,'History must contain exactly one creation');
+      const final=await until(()=>output(root,finalName),
+        label+' final file after unconfirmed ACK',75000);
+      cmd('ffmpeg',['-v','error','-xerror','-nostdin','-i',final,'-f','null','-']);
+      assert.equal(frameHash(final),frameHash(path.join(root,'media/high/index.m3u8')),
+        'HLS output changed under injected SQLite delay');
+      // Last independent snapshot: no hidden automatic resubmission on completion.
+      const last=nativeRequest({action:'get_status'});
+      const lines=(last.message||'').split(/\\r?\\n/).filter(x=>/^#\\d+\\t/.test(x));
+      assert.equal(lines.length,1,'GUI contains duplicate tasks after timeout');
+      assert.equal(persistedHistoryCount(root,name),1,'SQLite contains duplicated add');
+      console.log('[PASS] SQLite delay unknown-ACK: Popup failed closed; '+
+        'GUI tasks=1, history records=1, no resend, final decoded SHA256=match');
+      return;
+    }
     try {
       await popup.locator('#resourceList .row.sent').waitFor({timeout:18000});
     } catch(error) {
@@ -210,6 +277,7 @@ async function scenario(label,executable,base,root,broken){
 (async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'idm-popup-e2e-'));
   let server,guiProcess,unregister;
+  const ackDelay=process.argv.includes('--ack-delay');
   try{
     const media=fixture(root), config=path.join(root,'config'),downloads=path.join(root,'downloads');
     fs.mkdirSync(config);fs.mkdirSync(downloads);
@@ -249,16 +317,25 @@ async function scenario(label,executable,base,root,broken){
     guiProcess=cp.spawn(gui,[],{cwd:dist,windowsHide:true,stdio:['ignore',stdout,stderr],
       env:{...process.env,IDM_DATA_DIR:config,
         PATH:path.dirname(ffmpegExe)+path.delimiter+process.env.PATH,
-        QT_FORCE_STDERR_LOGGING:'1'}});
+        QT_FORCE_STDERR_LOGGING:'1',
+        ...(ackDelay?{
+          IDM_IPC_TIMING_TRACE:'1',
+          IDM_E2E_HISTORY_WRITE_DELAY_MS:'4200'
+        }:{})}});
     fs.closeSync(stdout);fs.closeSync(stderr);
     await until(()=>{
       if(guiProcess.exitCode!==null)throw Error('Packaged GUI exited');
       try{return hostPing().success===true;}catch{return false;}
     },'GUI Native Host ping',45000);
     const base='http://127.0.0.1:'+server.address().port;
-    for(const [name,exe] of await browsers()){
-      await scenario(name,exe,base,root,false);
-      if(name==='Edge')await scenario(name,exe,base,root,true);
+    const installed=await browsers();
+    if(ackDelay){
+      await scenario('Edge SQLite delayed write',installed[0][1],base,root,false,true);
+    }else{
+      for(const [name,exe] of installed){
+        await scenario(name,exe,base,root,false);
+        if(name==='Edge')await scenario(name,exe,base,root,true);
+      }
     }
   }catch(e){
     for(const f of ['gui.out','gui.err']){
