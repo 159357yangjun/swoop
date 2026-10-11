@@ -195,7 +195,7 @@ async function scenario(label,executable,base,root,broken){
         const resource='/' +(u.searchParams.get('broken')==='1'?'popup-broken-':'popup-hls-')+token+'.m3u8';
         res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});
         res.end('<!doctype html><html><video src="'+resource+'"></video><script>'+
-          'fetch('+JSON.stringify(resource)+'+"?seed=real").then(r=>r.text()).then(()=>window.mediaFetched=true)'+
+          'fetch('+JSON.stringify(resource)+').then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(()=>window.mediaFetched=true)'+
           '.catch(e=>window.mediaError=String(e));</script></html>');
         return;
       }
