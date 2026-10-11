@@ -332,8 +332,9 @@ async function scenarioMidflightWorkerStop(executable,base,root){
       'GUI inside actual 4200ms SQLite injection',12000);
     await cdp.send('ServiceWorker.stopWorker',{versionId:activeVersion});
     await until(()=>sawStopped,'real worker stopped-state event during add',10000);
-    assert.equal(sawRestarted,false,
-      'Expected worker to stay stopped until an explicit read-only wake');
+    assert.equal(fs.readFileSync(guiLog,'utf8')
+      .includes('HISTORY_WRITE_FAULT_INJECTION_END delay_ms=4200'),false,
+      'Worker was not stopped while the original GUI add remained in flight');
     const pendingAfterStop=await popup.evaluate(async()=>{
       const data=await chrome.storage.local.get('pendingAddRequests');
       return (data.pendingAddRequests||[]).length;
