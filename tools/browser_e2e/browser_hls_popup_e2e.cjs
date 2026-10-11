@@ -276,10 +276,117 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
       handoff.taskId+' SHA256(decoded)=match');
   }finally{if(browser)await browser.close();}
 }
+async function scenarioMidflightWorkerStop(executable,base,root){
+  // Full Edge MV3 + packaged Native Host/GUI: prove real CDP stopped-state
+  // DURING a known in-progress 4200ms SQLite history write. No fake callbacks.
+  const token='ok'+crypto.randomBytes(5).toString('hex');
+  const name='popup-hls-'+token+'.m3u8',finalName=name+'.mp4';
+  const profile=fs.mkdtempSync(path.join(root,'profile-midflight-'));
+  let browser;
+  try{
+    browser=await chromium.launchPersistentContext(profile,{executablePath:executable,
+      headless:true,acceptDownloads:true,args:['--headless=new',
+        '--disable-extensions-except='+ext,'--load-extension='+ext,
+        '--no-first-run','--no-default-browser-check','--disable-gpu']});
+    const page=await browser.newPage();
+    await page.goto(base+'/watch.html?token='+token,{waitUntil:'domcontentloaded'});
+    await page.waitForFunction(()=>window.mediaFetched===true,{timeout:15000});
+    const popup=await browser.newPage();
+    await popup.goto('chrome-extension://'+id+'/popup.html',{waitUntil:'domcontentloaded'});
+    assert.equal(await popup.evaluate(()=>chrome.runtime.id),id);
+    await popup.evaluate(()=>loadResources());
+    const row=popup.locator('#resourceList .row').filter({hasText:name});
+    await row.waitFor({timeout:15000});
+    await row.locator('input[type=checkbox]').check();
+
+    const cdp=await browser.newCDPSession(popup);
+    const workerUrl='chrome-extension://'+id+'/background.js';
+    let activeVersion=null,sawStopped=false,sawRestarted=false;
+    cdp.on('ServiceWorker.workerVersionUpdated',msg=>{
+      for(const v of msg.versions||[]){
+        if(v.scriptURL!==workerUrl)continue;
+        if(v.runningStatus==='running'){
+          activeVersion=v.versionId;
+          if(sawStopped)sawRestarted=true;
+        }
+        if(v.runningStatus==='stopped')sawStopped=true;
+      }
+    });
+    await cdp.send('ServiceWorker.enable');
+    await until(()=>activeVersion,'real original MV3 service worker',15000);
+    await popup.locator('#downloadSelBtn').click();
+
+    const pending=await until(()=>popup.evaluate(async()=>{
+      const stored=await chrome.storage.local.get('pendingAddRequests');
+      const list=stored.pendingAddRequests||[];
+      return list.length===1&&list[0].requestId?list[0]:null;
+    }),'persisted pending UUID before worker stop',14000);
+    assert.match(pending.requestId,/^[a-f0-9-]{36}$/i);
+    assert.equal(pending.filename,name);
+    assert.ok(!Object.hasOwn(pending,'url'),
+      'Pending request journal must not expose source URL or credentials');
+
+    const guiLog=path.join(root,'gui.err');
+    await until(()=>fs.existsSync(guiLog)&&
+      fs.readFileSync(guiLog,'utf8').includes('HISTORY_WRITE_FAULT_INJECTION_BEGIN delay_ms=4200'),
+      'GUI inside actual 4200ms SQLite injection',12000);
+    await cdp.send('ServiceWorker.stopWorker',{versionId:activeVersion});
+    await until(()=>sawStopped,'real worker stopped-state event during add',10000);
+    assert.equal(sawRestarted,false,
+      'Expected worker to stay stopped until an explicit read-only wake');
+    const pendingAfterStop=await popup.evaluate(async()=>{
+      const data=await chrome.storage.local.get('pendingAddRequests');
+      return (data.pendingAddRequests||[]).length;
+    });
+    assert.equal(pendingAfterStop,1,'Pending UUID disappeared when worker stopped');
+
+    // Wait for GUI's first add to finish WITHOUT sending anything to the worker.
+    await until(()=>fs.readFileSync(guiLog,'utf8')
+      .includes('HISTORY_WRITE_FAULT_INJECTION_END delay_ms=4200'),
+      'original GUI add finished after worker stop',15000);
+
+    // Reopening the extension Popup wakes a fresh MV3 worker; its only recovery
+    // action is get_request_status using the persisted token, never another add.
+    await popup.reload({waitUntil:'domcontentloaded'});
+    const journal=await until(()=>popup.evaluate(()=>new Promise(resolve=>
+      chrome.runtime.sendMessage({action:'getRecentHandoffs'},resolve)))
+      .then(x=>x?.items?.length===1?x.items[0]:null),
+      'session-bound original handoff recovered after real worker kill',22000);
+    await until(()=>sawRestarted,'real worker restarted-state event',10000);
+    assert.ok(Number.isSafeInteger(journal.taskId)&&journal.taskId>0);
+    assert.ok(typeof journal.sessionId==='string'&&journal.sessionId.length>=32);
+    const pendingRemaining=await popup.evaluate(async()=>{
+      const r=await chrome.storage.local.get('pendingAddRequests');
+      return (r.pendingAddRequests||[]).length;
+    });
+    assert.equal(pendingRemaining,0,'Verified UUID should be cleared after recovery');
+    const status=nativeRequest({action:'get_request_status',requestId:pending.requestId});
+    assert.equal(status.found,true,'GUI must retain same request ID until query');
+    assert.equal(status.taskId,journal.taskId);
+    assert.equal(status.sessionId,journal.sessionId);
+    const list=nativeRequest({action:'get_status'});
+    const tasks=(list.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
+    assert.equal(tasks.length,1,'MV3 restart caused a duplicate GUI task');
+    assert.equal(persistedHistoryCount(root,name),1,'MV3 restart caused duplicate SQLite row');
+    const final=await until(()=>output(root,finalName),
+      'MP4 after real MV3 worker restart',75000);
+    cmd('ffmpeg',['-v','error','-xerror','-nostdin','-i',final,'-f','null','-']);
+    assert.equal(frameHash(final),frameHash(path.join(root,'media/high/index.m3u8')),
+      'Final video frames differ after worker was killed mid-request');
+    const log=fs.readFileSync(guiLog,'utf8');
+    assert.equal((log.match(/HISTORY_WRITE_FAULT_INJECTION_BEGIN delay_ms=4200/g)||[]).length,1);
+    assert.equal((log.match(/HISTORY_WRITE_FAULT_INJECTION_END delay_ms=4200/g)||[]).length,1);
+    console.log('[PASS] Real MV3 stopped mid Native add and restarted: '+
+      'persisted UUID recovered read-only, GUI tasks=1, history=1, '+
+      'no replay, decoded video SHA256=match');
+  }finally{if(browser)await browser.close();}
+}
+
 (async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'idm-popup-e2e-'));
   let server,guiProcess,unregister;
-  const ackDelay=process.argv.includes('--ack-delay');
+  const midflight=process.argv.includes('--mv3-midflight');
+  const ackDelay=process.argv.includes('--ack-delay')||midflight;
   try{
     const media=fixture(root), config=path.join(root,'config'),downloads=path.join(root,'downloads');
     fs.mkdirSync(config);fs.mkdirSync(downloads);
@@ -330,6 +437,11 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
       try{return hostPing().success===true;}catch{return false;}
     },'GUI Native Host ping',45000);
     const base='http://127.0.0.1:'+server.address().port;
+    if(midflight){
+      const installed=await browsers();
+      await scenarioMidflightWorkerStop(installed[0][1],base,root);
+      return;
+    }
     if(process.argv.includes('--request-lifecycle')){
       // Real Native Host / GUI protocol lifecycle. A second add below is an
       // explicit same-token idempotence assertion, NOT a timeout retry.
