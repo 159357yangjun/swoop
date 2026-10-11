@@ -35,3 +35,7 @@ The first real Windows attempt [#38111104899](https://github.com/159357yangjun/s
 The original test also looked up journal entries by `url`, but persisted records intentionally hold `filename`, `taskId` and `sessionId` (not URL). It now matches the unique fixture filename. Finally the GUI log showed native TS fallback, not MP4. The test now explicitly sets `ffmpegCustomPath` to the runner's real FFmpeg executable in isolated settings, preserving the strict final MP4 and decoded SHA-256 verification. These changes do not alter any HLS download engine code or relax the user-visible status assertions.
 
 The first and second red runs remain permanently referenced here. **The new combined head still requires an independent Windows CI before passing.**
+
+## Follow-up diagnosis (2026-10-11)
+
+Initial Windows CI #38111104899 failed at `Edge media discovery timed out` before any Native Host handoff. The real network discovery `FILE_PATTERNS` did not contain `.m3u8`. This branch now adds that extension to the media request pattern and type inference; the fixture issues only one HTTP(S) playlist fetch rather than competing video and fetch URLs. These are genuine detection/fixture corrections, not relaxed assertions. Subsequent validation is required for the new head. Preserve the original failed run.
