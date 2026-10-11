@@ -110,6 +110,7 @@ private:
     QByteArray      m_key;             // 16 字节密钥（拉取后填充）
     QByteArray      m_iv;              // 16 字节 IV（若 KEY 标签显式给出）
     bool            m_ivPresent = false;
+    quint64         m_mediaSequence = 0; // EXT-X-MEDIA-SEQUENCE for implicit AES IV
     QNetworkReply*  m_keyReply = nullptr;
 
     static QString s_ffmpegPath;

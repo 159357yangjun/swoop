@@ -103,6 +103,7 @@ void HlsDownloader::start(const DownloadRequest& req)
     m_key.clear();
     m_iv.clear();
     m_ivPresent = false;
+    m_mediaSequence = 0;
     QDir().mkpath(m_saveDir);
     Log::info(QStringLiteral("HlsDownloader 启动: %1").arg(m_url));
     emit stateChanged(m_taskId, 1);
@@ -266,7 +267,29 @@ void HlsDownloader::parseMediaPlaylist(const QString& text, const QString& base)
     for (int i = 0; i < lines.size(); ++i) {
         QString line = lines[i].trimmed();
 
+        if (line.startsWith(QStringLiteral("#EXT-X-MEDIA-SEQUENCE:"))) {
+            bool valid = false;
+            const quint64 sequence = line.mid(22).trimmed().toULongLong(&valid);
+            if (!valid) {
+                finish(false, QStringLiteral("HLS 媒体序列号无效"));
+                return;
+            }
+            m_mediaSequence = sequence;
+            continue;
+        }
+
         if (line.startsWith(QStringLiteral("#EXT-X-KEY:"))) {
+            if (!line.contains(QStringLiteral("METHOD=NONE")) &&
+                !line.contains(QStringLiteral("METHOD=AES-128"))) {
+                finish(false, QStringLiteral("不支持的 HLS 加密方法（纯 C++ 仅支持 AES-128）"));
+                return;
+            }
+            // A changing encryption key/mode mid-playlist requires per-segment
+            // key metadata. Never produce a falsely successful, corrupt TS.
+            if (!m_segments.isEmpty()) {
+                finish(false, QStringLiteral("纯 C++ 暂不支持播放列表中途切换 HLS 密钥"));
+                return;
+            }
             if (line.contains(QStringLiteral("METHOD=NONE"))) {
                 m_encrypted = false;   // 显式关闭加密
             } else if (line.contains(QStringLiteral("METHOD=AES-128"))) {
@@ -276,12 +299,20 @@ void HlsDownloader::parseMediaPlaylist(const QString& text, const QString& base)
                 auto m = reUri.match(line);
                 if (m.hasMatch())
                     m_keyUrl = m.captured(1);
+                if (m_keyUrl.isEmpty()) {
+                    finish(false, QStringLiteral("AES-128 HLS 缺少有效密钥 URI"));
+                    return;
+                }
                 // 提取可选 IV=0x...（16 字节）。无 IV 时按分片序号作为 IV（spec 默认）
                 QRegularExpression reIv(QStringLiteral("IV=0x([0-9A-Fa-f]+)"));
                 auto mi = reIv.match(line);
                 if (mi.hasMatch()) {
                     m_iv = QByteArray::fromHex(mi.captured(1).toUtf8());
-                    m_ivPresent = (m_iv.size() == 16);
+                    m_ivPresent = (mi.captured(1).size() == 32 && m_iv.size() == 16);
+                    if (!m_ivPresent) {
+                        finish(false, QStringLiteral("HLS AES-128 IV 长度无效"));
+                        return;
+                    }
                 } else {
                     m_ivPresent = false;
                 }
@@ -337,7 +368,10 @@ void HlsDownloader::beginDownload()
 {
     m_started = true;
     emit stateChanged(m_taskId, 1);
-    const bool useFfmpeg = isFfmpegAvailable();
+    // Test-only opt-in: exercise the no-FFmpeg code with the same packaged
+    // Windows GUI even on runners that have FFmpeg for fixture verification.
+    const bool forceManual = qEnvironmentVariable("IDM_HLS_TEST_FORCE_MANUAL") == QLatin1String("1");
+    const bool useFfmpeg = !forceManual && isFfmpegAvailable();
     const QString ext = useFfmpeg ? QStringLiteral("mp4") : QStringLiteral("ts");
     m_finalOutputPath = outputPath(ext);
     const QFileInfo target(m_finalOutputPath);
@@ -485,23 +519,33 @@ void HlsDownloader::onKeyFinished()
     startManualDownload();
 }
 
-// 计算分片 IV：显式给出则用之；否则按分片序号（媒体序列号，默认从 0 起）大端写入
+// RFC 8216: implicit IV is the *absolute media sequence number* in
+// big-endian 128-bit form, not the segment's zero-based position.
 QByteArray HlsDownloader::segmentIv(int index) const
 {
     if (m_ivPresent && m_iv.size() == 16)
         return m_iv;
+    const quint64 sequence = m_mediaSequence + static_cast<quint64>(index);
     QByteArray iv(16, 0);
-    iv[12] = static_cast<char>((index >> 24) & 0xff);
-    iv[13] = static_cast<char>((index >> 16) & 0xff);
-    iv[14] = static_cast<char>((index >> 8)  & 0xff);
-    iv[15] = static_cast<char>( index        & 0xff);
+    for (int byte = 0; byte < 8; ++byte)
+        iv[15 - byte] = static_cast<char>((sequence >> (8 * byte)) & 0xff);
     return iv;
 }
 
 void HlsDownloader::startManualDownload()
 {
-    m_workDir = QDir::temp().filePath(QStringLiteral("idm_hls_") + QString::number(m_taskId));
-    QDir().mkpath(m_workDir);
+    // The output stage is a fresh QTemporaryDir per generation. Keeping TS
+    // fragments inside it prevents stale same-task-ID files across restarts,
+    // and guarantees automatic cleanup on error/pause/cancel.
+    if (!m_outputStage || !m_outputStage->isValid()) {
+        finish(false, QStringLiteral("HLS 临时目录不可用"));
+        return;
+    }
+    m_workDir = QDir(m_outputStage->path()).filePath(QStringLiteral("segments"));
+    if (!QDir().mkpath(m_workDir)) {
+        finish(false, QStringLiteral("无法建立 HLS 分片临时目录"));
+        return;
+    }
     for (int i = 0; i < m_segments.size(); ++i)
         m_segments[i].file = m_workDir + QStringLiteral("/seg_%1.ts").arg(i, 5, 10, QLatin1Char('0'));
     launchSegments();
@@ -559,18 +603,45 @@ void HlsDownloader::onSegFinished()
 
     QByteArray data = r->readAll();
 
-    // 无 ffmpeg 的加密流：纯 C++ AES-128-CBC 解密（HLS 分片长度为 16 的整数倍）
-    if (m_encrypted && m_key.size() == 16 && (data.size() % 16) == 0) {
+    // AES-128 HLS TS segments use CBC + PKCS#7 padding. Invalid ciphertext,
+    // invalid padding, or non-TS plaintext must be a FAILED task, never a
+    // successful encrypted/corrupt final .ts.
+    if (m_encrypted) {
+        if (m_key.size() != 16 || data.isEmpty() || data.size() % 16 != 0) {
+            finish(false, QStringLiteral("AES-128 分片密文长度或密钥无效"));
+            return;
+        }
         Aes128 aes(m_key);
-        QByteArray iv = segmentIv(idx);
-        QByteArray dec = aes.decryptCbc(data, iv);
-        if (!dec.isEmpty())
-            data = dec;
-        else
-            Log::warn(QStringLiteral("HlsDownloader 分片 %1 解密失败（长度=%2）").arg(idx).arg(data.size()));
-    } else if (m_encrypted && m_key.size() == 16) {
-        Log::warn(QStringLiteral("HlsDownloader 分片 %1 长度非 16 倍数（%2），跳过解密")
-                      .arg(idx).arg(data.size()));
+        QByteArray plaintext = aes.decryptCbc(data, segmentIv(idx));
+        if (plaintext.isEmpty()) {
+            finish(false, QStringLiteral("AES-128 分片解密失败"));
+            return;
+        }
+        const int pad = static_cast<unsigned char>(plaintext.at(plaintext.size() - 1));
+        if (pad < 1 || pad > 16 || pad > plaintext.size()) {
+            finish(false, QStringLiteral("AES-128 PKCS#7 填充无效"));
+            return;
+        }
+        for (int i = 0; i < pad; ++i) {
+            if (static_cast<unsigned char>(plaintext.at(plaintext.size() - 1 - i)) != pad) {
+                finish(false, QStringLiteral("AES-128 PKCS#7 填充校验失败"));
+                return;
+            }
+        }
+        plaintext.chop(pad);
+        data = plaintext;
+    }
+    // This fallback only concatenates MPEG-TS; reject decrypted bytes that
+    // look like the wrong key or a different format instead of false success.
+    if (data.isEmpty() || (data.size() % 188) != 0) {
+        finish(false, QStringLiteral("HLS 分片不是完整 MPEG-TS 数据"));
+        return;
+    }
+    for (qsizetype pos = 0; pos < data.size(); pos += 188) {
+        if (static_cast<unsigned char>(data.at(pos)) != 0x47) {
+            finish(false, QStringLiteral("HLS MPEG-TS 同步字节校验失败"));
+            return;
+        }
     }
 
     QFile f(s.file);

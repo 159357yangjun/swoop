@@ -30,6 +30,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'discovery_matrix.cjs syntax check failed' }
           python -m py_compile tools/browser_e2e/hls_ffmpeg_e2e.py
           if ($LASTEXITCODE -ne 0) { throw 'HLS/FFmpeg E2E Python syntax check failed' }
+          python -m py_compile tools/browser_e2e/hls_manual_e2e.py
+          if ($LASTEXITCODE -ne 0) { throw 'Pure C++ HLS/AES Python syntax check failed' }
           node --test tools/browser_e2e/handoff.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Browser handoff Node tests failed' }
           node --test tools/browser_e2e/resource_backfill.test.cjs
@@ -601,6 +603,16 @@ jobs:
           $env:PYTHONIOENCODING = 'utf-8'
           python tools/browser_e2e/hls_ffmpeg_e2e.py --dist installer/dist
           if ($LASTEXITCODE -ne 0) { throw 'Real packaged HLS/FFmpeg E2E failed' }
+
+      - name: Real pure C++ HLS AES-128 and no-FFmpeg E2E
+        shell: pwsh
+        run: |
+          # The Python test invokes external FFmpeg only to CREATE fixtures
+          # and independently decode/check output. The packaged GUI has
+          # IDM_HLS_TEST_FORCE_MANUAL=1 and must execute the native C++ path.
+          $env:PYTHONIOENCODING = 'utf-8'
+          python tools/browser_e2e/hls_manual_e2e.py --dist installer/dist
+          if ($LASTEXITCODE -ne 0) { throw 'Real pure C++ HLS/AES-128 E2E failed' }
 
       - name: Verify package outputs
         shell: pwsh
