@@ -137,7 +137,34 @@ async function scenario(label,executable,base,root,broken){
     await row.waitFor({timeout:15000});
     await row.locator('input[type=checkbox]').check();
     await popup.locator('#downloadSelBtn').click();
-    await popup.locator('#resourceList .row.sent').waitFor({timeout:18000});
+    try {
+      await popup.locator('#resourceList .row.sent').waitFor({timeout:18000});
+    } catch(error) {
+      // Observe state once, WITHOUT resubmitting the irreversible add.
+      // Keep the same 18-second strict failure boundary. Do not log URLs or paths.
+      let snapshot={unavailable:true};
+      try {
+        snapshot=await popup.evaluate(async()=>{
+          const rowNodes=[...document.querySelectorAll('#resourceList .row')];
+          const toasts=[...document.querySelectorAll('.toast')];
+          const raw=await chrome.storage.local.get('recentHandoffs');
+          const journal=Array.isArray(raw.recentHandoffs)?raw.recentHandoffs:[];
+          return {
+            rowCount:rowNodes.length,
+            sentRows:rowNodes.filter(x=>x.classList.contains('sent')).length,
+            selectedRows:rowNodes.filter(x=>x.classList.contains('sel')).length,
+            buttonDisabled:document.getElementById('downloadSelBtn')?.disabled,
+            toastText:toasts.map(x=>x.textContent?.slice(0,160)).slice(0,2),
+            journalCount:journal.length,
+            journalHeadHasIdentity:!!(journal[0]?.taskId&&journal[0]?.sessionId)
+          };
+        });
+      } catch(snapshotError) {
+        snapshot={error:String(snapshotError).slice(0,180)};
+      }
+      console.error('[POPUP_UNCONFIRMED] '+label+' '+JSON.stringify(snapshot));
+      throw error;
+    }
     // Reopening the actual Popup reloads the persistent task journal.
     await popup.reload({waitUntil:'domcontentloaded'});
     const handoff=await until(()=>popup.evaluate(()=>new Promise(resolve=>
@@ -240,6 +267,21 @@ async function scenario(label,executable,base,root,broken){
     }
     throw e;
   }finally{
+    // Emit only opt-in phase durations on EVERY outcome, including green.
+    // The GUI log itself contains request URLs/paths: NEVER print raw lines.
+    // This runs after the strict Popup success/failure gate and never retries.
+    try {
+      if(process.env.IDM_IPC_TIMING_TRACE==='1'){
+        const file=path.join(root,'gui.err');
+        const raw=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';
+        const markers=[...raw.matchAll(/HLS_ADD_TIMING phase=([a-z_]+) elapsed_ms=(\d+)/g)]
+          .map(m=>({phase:m[1],elapsedMs:Number(m[2])}));
+        console.log('[IPC_PHASE_SUMMARY] '+JSON.stringify(markers));
+        if(!markers.length)console.error('[IPC_PHASE_SUMMARY] no HLS timing markers captured');
+      }
+    }catch(traceError){
+      console.error('[IPC_PHASE_SUMMARY_ERROR] '+String(traceError).slice(0,160));
+    }
     try{
       if(guiProcess){
         guiProcess.kill();

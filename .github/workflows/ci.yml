@@ -629,6 +629,8 @@ jobs:
 
       - name: Real browser Popup to Native Host to final HLS file E2E
         shell: pwsh
+        env:
+          IDM_IPC_TIMING_TRACE: '1'
         run: |
           # Browser APIs, OS Native Messaging registration, packaged GUI IPC,
           # final FFmpeg output and decoded frame hashing are all real.
