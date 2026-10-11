@@ -291,9 +291,14 @@ async function scenarioMidflightWorkerStop(executable,base,root){
     const page=await browser.newPage();
     await page.goto(base+'/watch.html?token='+token,{waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>window.mediaFetched===true,{timeout:15000});
+    await page.locator('#idm-next-tokens').waitFor({state:'attached',timeout:15000});
     const popup=await browser.newPage();
     await popup.goto('chrome-extension://'+id+'/popup.html',{waitUntil:'domcontentloaded'});
     assert.equal(await popup.evaluate(()=>chrome.runtime.id),id);
+    // Like the established positive E2E, select the actual media page as the
+    // source tab. Otherwise Chrome treats the extension-owned Popup tab as
+    // active and returns an empty resource list.
+    await page.bringToFront();
     await popup.evaluate(()=>loadResources());
     const row=popup.locator('#resourceList .row').filter({hasText:name});
     await row.waitFor({timeout:15000});
