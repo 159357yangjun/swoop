@@ -32,3 +32,7 @@ This is a temporary Draft diagnostic stacked atop PR #24. Reproduce and
 classify the issue before proposing any functional fix. Archive both red
 and green CI logs. Do not merge to `master` / `main`, release, or touch
 unpublished Windows local commits.
+
+## Instrumentation follow-up
+
+Earlier diagnostic run [#38121196767 attempt 2](https://github.com/159357yangjun/swoop/actions/runs/38121196767/attempts/2) passed but did not print GUI phase markers because the harness logged GUI stderr only on failure. The current harness now emits **only matched, sanitized** `HLS_ADD_TIMING` phase markers on both green and red outcomes, after the original pass/fail assertions. Those markers reveal where callback latency accrues without printing GUI request URLs or modifying the 3000 ms Native Host deadline. This change itself has not yet been independently Windows-verified.
