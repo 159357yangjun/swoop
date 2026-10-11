@@ -60,6 +60,8 @@ def make_encrypted(ffmpeg: str, root: Path, name: str,
     text = playlist.read_text(encoding="utf-8")
     if f"#EXT-X-MEDIA-SEQUENCE:{number}" not in text:
         raise AssertionError("Fixture lacks the intended nonzero media sequence")
+    if iv is not None and len(list(p.glob("seg*.ts"))) < 2:
+        raise AssertionError("Explicit-IV fixture must contain multiple real TS segments")
     if iv is None:
         # FFmpeg writes an explicit IV even with only the sequence supplied.
         # For a SINGLE segment the chosen IV is exactly the media sequence.
