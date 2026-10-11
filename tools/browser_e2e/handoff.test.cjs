@@ -42,14 +42,16 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
     storage: {
       local: {
         async get(key) {
-          const selected = key === 'recentHandoffs'
+          const selected = key === null ? {...local}
+            : key === 'recentHandoffs'
             ? { recentHandoffs: local.recentHandoffs } : {};
           return { interceptEnabled: intercept, confirmEnabled: confirm, ...selected };
         },
         async set(data) {
           if (failJournal && data.recentHandoffs) throw new Error('storage unavailable');
           Object.assign(local, data);
-        }
+        },
+        async remove(key) { delete local[key]; }
       },
       session: { async get() { return {}; }, async set() {}, async remove() {} }
     },
@@ -76,7 +78,7 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
     }
   };
   vm.runInNewContext(source, { chrome, console, URL,
-    crypto:{randomUUID:()=> '33333333-3333-4333-8333-333333333333'},
+    crypto:{randomUUID:()=> '33333333-3333-4333-8333-333333333333'}, Date,
     setTimeout(fn) { queueMicrotask(fn); return 1; }, clearTimeout() {} },
                      { filename: 'background.js' });
   return {
@@ -405,4 +407,39 @@ test('unresolved ACK remains unknown after simulated MV3 worker restart',async()
   const journal=await restarted.message({action:'getRecentHandoffs'});
   assert.equal(journal.items.length,0);
   assert.equal(restarted.calls.nativeActions.filter(x=>x==='add_download').length,0);
+});
+
+test('pending UUID is persisted before native send and removed after confirmed handoff',async()=>{
+  const local={};
+  const h=make({confirm:true,sharedLocal:local});
+  await h.start();
+  const result=await h.submit();
+  assert.equal(result.success,true);
+  assert.equal(local.recentHandoffs.length,1);
+  assert.equal(Object.keys(local).filter(x=>x.startsWith('pendingAdd:')).length,0);
+});
+test('unconfirmed UUID survives worker restart and cold-start recovery is read-only',async()=>{
+  const local={};
+  const initial=make({confirm:true,addUnknown:true,lookupFound:false,sharedLocal:local});
+  await initial.start();
+  const reply=await initial.submit();
+  assert.equal(reply.outcomeUnknown,true);
+  assert.equal(Object.keys(local).filter(x=>x.startsWith('pendingAdd:')).length,1);
+  const restarted=make({confirm:true,lookupFound:true,sharedLocal:local});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(restarted.calls.nativeActions,['get_request_status']);
+  assert.equal(local.recentHandoffs.length,1);
+  assert.equal(Object.keys(local).filter(x=>x.startsWith('pendingAdd:')).length,0);
+  const history=await restarted.message({action:'getRecentHandoffs'});
+  assert.equal(history.items.length,1);
+});
+test('unresolved persisted UUID after worker restart never resends add',async()=>{
+  const local={};
+  const h=make({confirm:true,addUnknown:true,lookupFound:false,sharedLocal:local});
+  await h.start();await h.submit();
+  const newWorker=make({confirm:true,lookupFound:false,sharedLocal:local});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(newWorker.calls.nativeActions.filter(x=>x==='add_download').length,0);
+  assert.equal(local.recentHandoffs,undefined);
+  assert.equal(Object.keys(local).filter(x=>x.startsWith('pendingAdd:')).length,1);
 });
