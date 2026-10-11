@@ -23,3 +23,7 @@ The script intentionally submits each resource only once. An uncertain acknowled
 The Popup's visible Download button currently routes one selected resource through `batchDownload`, which reports aggregate counts; the separately implemented `downloadWithOptions` route persists `taskId + sessionId`. The new CI gate is expected to verify whether the user-facing single-selection flow really satisfies task identity tracking. Keep the first red log if it fails; fix the cause rather than weakening the gate.
 
 This remains a Draft stacked on PR #23. It is **not** release acceptance or proof of integration with unpublished Windows local changes.
+
+## Preserved initial red and fixture correction
+
+The first real Windows attempt [#38111104899](https://github.com/159357yangjun/swoop/actions/runs/38111104899) failed at `Edge media discovery timed out`. The initial fixture rendered `<video src="...m3u8">` and independently fetched the same pathname with `?seed=real`. Since the extension intentionally deduplicates by full URL, these were two distinct URLs, while the E2E erroneously required exactly one match **by pathname**. Commit `6ad4a766` makes the request URLs identical, retaining the strict one-resource check. This fixture diagnosis does not establish that the entire E2E has passed; the next Windows run must prove that. Preserve the original red run in the evidence record.
