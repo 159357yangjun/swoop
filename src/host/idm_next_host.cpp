@@ -418,7 +418,7 @@ static QJsonObject handlePing()
 
 static QJsonObject handleAddDownload(const QString& url, const QString& filename,
                                      const QString& saveDir, const QString& queue,
-                                     const QString& format)
+                                     const QString& format, const QString& requestId)
 {
     if (url.isEmpty())
         return {{QStringLiteral("success"), false},
@@ -428,6 +428,8 @@ static QJsonObject handleAddDownload(const QString& url, const QString& filename
     req["command"] = QStringLiteral("add");
     req["url"] = url;
     req["filename"] = filename;
+    if (!requestId.isEmpty())
+        req["requestId"] = requestId;
     if (!saveDir.isEmpty())
         req["dir"] = saveDir;          // 浏览器端“另存到…”选择的目录
     if (!queue.isEmpty())
@@ -457,7 +459,7 @@ static QJsonObject handleBatchAdd(const QJsonArray& items)
             ++failed;
             continue;
         }
-        QJsonObject r = handleAddDownload(url, fn, dir, q, fmt);
+        QJsonObject r = handleAddDownload(url, fn, dir, q, fmt, QString());
         if (r.value(QStringLiteral("success")).toBool())
             ++added;
         else {
@@ -474,6 +476,27 @@ static QJsonObject handleBatchAdd(const QJsonArray& items)
         msg += QStringLiteral("，%1 个失败").arg(failed);
     o["message"] = msg;
     return o;
+}
+
+// Read-only reconciliation, never a second add. If GUI has restarted or
+// a request token is unknown, the result remains uncertain and the browser
+// must preserve its original download.
+static QJsonObject handleRequestStatus(const QString& requestId)
+{
+    if (requestId.isEmpty())
+        return {{QStringLiteral("success"), false},
+                {QStringLiteral("found"), false},
+                {QStringLiteral("message"), QStringLiteral("请求 ID 为空")}};
+    QJsonObject request;
+    request["command"] = QStringLiteral("request_status");
+    request["requestId"] = requestId;
+    bool connected = false;
+    QJsonObject result = forwardToGui(request, &connected);
+    if (!connected || result.isEmpty())
+        return {{QStringLiteral("success"), false},
+                {QStringLiteral("found"), false},
+                {QStringLiteral("message"), QStringLiteral("无法核对原请求，请勿重复提交")}};
+    return result;
 }
 
 static QJsonObject handleGetStatus()
@@ -559,7 +582,10 @@ int main(int argc, char* argv[])
                 msg.value(QStringLiteral("filename")).toString(),
                 msg.value(QStringLiteral("saveDir")).toString(),
                 msg.value(QStringLiteral("queue")).toString(),
-                msg.value(QStringLiteral("format")).toString());
+                msg.value(QStringLiteral("format")).toString(),
+                msg.value(QStringLiteral("requestId")).toString());
+        } else if (action == QStringLiteral("get_request_status")) {
+            response = handleRequestStatus(msg.value(QStringLiteral("requestId")).toString());
         } else if (action == QStringLiteral("list_formats")) {
             response = handleListFormats(msg.value(QStringLiteral("url")).toString());
         } else if (action == QStringLiteral("batch_add")) {
