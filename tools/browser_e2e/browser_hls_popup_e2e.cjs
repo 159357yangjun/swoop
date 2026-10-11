@@ -157,6 +157,54 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
     await row.waitFor({timeout:15000});
     await row.locator('input[type=checkbox]').check();
     await popup.locator('#downloadSelBtn').click();
+    if(process.argv.includes('--worker-stop')){
+      // CDP actually stops the active MV3 Service Worker while GUI is holding
+      // a 4200ms opt-in SQLite write. An in-memory callback is not sufficient.
+      const cdp=await browser.newCDPSession(popup);
+      const scriptURL='chrome-extension://'+id+'/background.js';
+      let active=null,stopped=false,restarted=false;
+      cdp.on('ServiceWorker.workerVersionUpdated',event=>{
+        for(const v of event.versions||[]){
+          if(v.scriptURL!==scriptURL)continue;
+          if(v.runningStatus==='running'){
+            if(stopped)restarted=true;
+            active=v.versionId;
+          }
+          if(v.runningStatus==='stopped')stopped=true;
+        }
+      });
+      await cdp.send('ServiceWorker.enable');
+      await until(()=>active,'worker initial running version');
+      await until(()=>popup.evaluate(async()=>{
+        const keys=Object.keys(await chrome.storage.local.get(null));
+        return keys.some(k=>k.startsWith('pendingAdd:'));
+      }),label+' durable pending token before forced worker stop');
+      await cdp.send('ServiceWorker.stopWorker',{versionId:active});
+      await until(()=>stopped,label+' actual CDP worker stopped');
+      await sleep(4700);
+      // A new popup load causes browser-owned worker reactivation. The only
+      // safe behavior is to query the old UUID, never replay add_download.
+      await popup.reload({waitUntil:'domcontentloaded'});
+      await until(()=>restarted,label+' actual CDP worker restarted');
+      const recovered=await until(()=>popup.evaluate(async()=>{
+        const all=await chrome.storage.local.get(null);
+        const pending=Object.keys(all).filter(k=>k.startsWith('pendingAdd:'));
+        const records=all.recentHandoffs||[];
+        return records.length===1&&pending.length===0?records[0]:null;
+      }),label+' durable read-only recovery after real worker stop',25000);
+      assert.ok(recovered.taskId>0&&recovered.sessionId,'Missing recovered task identity');
+      const listing=nativeRequest({action:'get_status'});
+      const rows=(listing.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
+      assert.equal(rows.length,1,'Worker restart must not replay add');
+      assert.equal(persistedHistoryCount(root,name),1,'Only one SQLite history row');
+      const file=await until(()=>output(root,finalName),label+' final MP4',75000);
+      cmd('ffmpeg',['-v','error','-xerror','-nostdin','-i',file,'-f','null','-']);
+      assert.equal(frameHash(file),frameHash(path.join(root,'media/high/index.m3u8')));
+      console.log('[PASS] Real MV3 stop/restart during slow add: recovered by UUID; '+
+        'GUI tasks=1, SQLite records=1, no add replay, MP4 SHA256=match');
+      await cdp.detach();
+      return;
+    }
     if(ackDelay){
       // Production behavior under the same genuine 4200ms DB stall:
       // no retry of add_download, only a read-only UUID lookup of its outcome.
@@ -392,7 +440,8 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
     }
     const installed=await browsers();
     if(ackDelay){
-      await scenario('Edge SQLite delayed write',installed[0][1],base,root,false,true);
+      await scenario(process.argv.includes('--worker-stop')?'Edge worker stop during add':'Edge SQLite delayed write',
+        installed[0][1],base,root,false,true);
     }else{
       for(const [name,exe] of installed){
         await scenario(name,exe,base,root,false);
