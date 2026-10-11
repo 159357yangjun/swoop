@@ -193,9 +193,18 @@ async function scenario(label,executable,base,root,broken,ackDelay=false){
       assert.equal(frameHash(final),frameHash(path.join(root,'media/high/index.m3u8')),
         'HLS output changed under injected SQLite delay');
       // Last independent snapshot: no hidden automatic resubmission on completion.
-      const last=nativeRequest({action:'get_status'});
-      const lines=(last.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
-      assert.equal(lines.length,1,'GUI contains duplicate tasks after timeout');
+      // A single status IPC roundtrip can fail independently of the task
+      // lifecycle; require an authoritative single-row response, not a
+      // transient empty/failed host reply. Never resubmit the add request.
+      const lines=await until(()=>{
+        const last=nativeRequest({action:'get_status'});
+        if(!last.success||!last.running)return null;
+        const rows=(last.message||'').split(/\r?\n/).filter(x=>/^#\d+\t/.test(x));
+        return rows.length===1 ? rows : null;
+      },label+' post-completion single GUI task read-only query',10000);
+      assert.equal(lines.length,1,'GUI must retain exactly one task');
+      assert.equal(Number(lines[0].match(/^#(\d+)/)[1]),state.taskIds[0],
+        'Post-completion query must retain the ORIGINAL task identity');
       assert.equal(persistedHistoryCount(root,name),1,'SQLite contains duplicated add');
       const guiLog=fs.readFileSync(path.join(root,'gui.err'),'utf8');
       assert.equal((guiLog.match(/HISTORY_WRITE_FAULT_INJECTION_BEGIN delay_ms=4200/g)||[]).length,1,
