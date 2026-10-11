@@ -573,30 +573,74 @@ function checkHostConnection() {
  *        format:  视频画质选择串（yt-dlp -f 选择串，空=最佳画质）
  * @returns {Promise<{success: boolean, message: string}>}
  */
-function sendToIdmNext(url, filename = '', opts = {}) {
-    return new Promise((resolve) => {
+// Read-only recovery of a possibly accepted add. Never issue a second add
+// for an uncertain response: the original request can already have committed.
+function lookupOriginalRequest(requestId) {
+    return new Promise(resolve => {
         try {
             chrome.runtime.sendNativeMessage(NATIVE_HOST, {
+                action: 'get_request_status', requestId
+            }, response => {
+                const error = chrome.runtime.lastError;
+                resolve(error ? null : (response || null));
+            });
+        } catch (_) {
+            resolve(null);
+        }
+    });
+}
+async function reconcileUncertainRequest(requestId, url, filename) {
+    // Bound this to three READ-ONLY queries. "not found" never proves no task.
+    // The GUI may still be doing synchronous history writes or may have restarted.
+    for (let i = 0; i < 3; i++) {
+        const response = await lookupOriginalRequest(requestId);
+        const taskId = response?.taskId;
+        const sessionId = response?.sessionId;
+        if (response?.success && response?.found &&
+            Number.isSafeInteger(taskId) && taskId > 0 &&
+            typeof sessionId === 'string' && /^[a-f0-9-]{32,36}$/i.test(sessionId)) {
+            const tracked = await rememberHandoff({ id: null, filename, url }, taskId, sessionId);
+            return { success: true, taskId, sessionId, tracked,
+                reconciled: true, message: tracked
+                    ? '已核对原请求，桌面端已创建任务'
+                    : '已核对原任务，但扩展无法保存查询记录；请在桌面端检查' };
+        }
+        if (i < 2) await new Promise(resolve => setTimeout(resolve, 350));
+    }
+    return { success: false, outcomeUnknown: true,
+        message: '下载请求结果尚无法确认；请在桌面端检查，勿重复提交' };
+}
+
+function sendToIdmNext(url, filename = '', opts = {}) {
+    return new Promise(resolve => {
+        try {
+            // UUIDv4 is an unguessable capability for read-only reconciliation.
+            // Generate ONCE per explicit user/automatic add; never reuse for
+            // a second attempt or submit the add again on timeout.
+            const requestId = crypto.randomUUID();
+            chrome.runtime.sendNativeMessage(NATIVE_HOST, {
                 action: 'add_download',
+                requestId,
                 url: url,
                 filename: filename,
                 saveDir: opts.saveDir || '',
                 queue: opts.queued ? BROWSER_QUEUE : '',
                 format: opts.format || ''
-            }, (response) => {
-                if (chrome.runtime.lastError) {
-                    resolve({ success: false, message: chrome.runtime.lastError.message });
+            }, async response => {
+                const nativeError = chrome.runtime.lastError;
+                if (nativeError || !response ||
+                    (!response.success && (response.outcomeUnknown ||
+                    /未响应|不明|状态未知/.test(response.message || '')))) {
+                    resolve(await reconcileUncertainRequest(requestId, url, filename));
                 } else if (response && response.success) {
                     const taskId = Number.isSafeInteger(response.taskId) && response.taskId > 0
                         ? response.taskId : null;
                     const sessionId = typeof response.sessionId === 'string' &&
                         /^[a-f0-9-]{32,36}$/i.test(response.sessionId) ? response.sessionId : null;
                     if (!taskId || !sessionId) {
-                        // Some CLI fallback paths cannot return a persistent ID.
                         resolve({ success: true, taskId: null, tracked: false,
                             message: '桌面端报告已接收，但没有有效任务身份；浏览器原下载会保留' });
                     } else {
-                        // Also cover manual resource sends, not just takeovers.
                         rememberHandoff({ id: null, filename, url }, taskId, sessionId).then(tracked =>
                             resolve({ success: true, taskId, sessionId, tracked,
                                 message: tracked ? (response.message || '已添加到 IDM Next')
