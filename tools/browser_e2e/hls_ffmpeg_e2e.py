@@ -120,7 +120,16 @@ def submit_once(host: Path, dist: Path, url: str, name: str,
     task_id = response.get("taskId")
     session = response.get("sessionId")
     if response.get("success") is not True or type(task_id) is not int or task_id <= 0:
-        raise AssertionError(f"No confirmed HLS task ID for {name}: {response!r}")
+        # The add command is NOT retried: it may already have created a task.
+        # A separate read-only ping tells us whether the GUI is still serving
+        # IPC after the missing/invalid creation acknowledgment.
+        try:
+            read_only_health = host_call(host, dist, {"action": "ping"}, timeout=5)
+        except Exception as exc:
+            read_only_health = {"ping_error": repr(exc)}
+        raise AssertionError(
+            f"No confirmed HLS task ID for {name}: {response!r}; "
+            f"read_only_gui_ping={read_only_health!r}; add_not_retried=true")
     if not isinstance(session, str) or len(session) < 32:
         raise AssertionError(f"No HLS GUI session ID for {name}: {response!r}")
     return task_id, session
