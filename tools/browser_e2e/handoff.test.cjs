@@ -8,9 +8,9 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '..', '..', 'browser-extension', 'background.js'), 'utf8');
 
 function listener() { return { fn: null, addListener(fn) { this.fn = fn; } }; }
-function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress', addUnknown = false, lookupFound = false, sharedLocal = null } = {}) {
+function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confirm = false, intercept = true, dialogOK = true, tabId = 19, omitTabId = false, state = 'in_progress', addUnknown = false, lookupFound = false, sharedLocal = null, failPending = false, holdAddCallback = false } = {}) {
   const events = { created: listener(), message: listener() };
-  const calls = { native: 0, cancel: [], erase: [], dialogs: 0, nativeActions: [] };
+  const calls = { native: 0, cancel: [], erase: [], dialogs: 0, nativeActions: [], requestIds: [] };
   const local = sharedLocal || {};
   const SESSION_A = '11111111-1111-4111-8111-111111111111';
   let guiSession = SESSION_A;
@@ -24,6 +24,8 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
       sendNativeMessage(_host, _payload, callback) {
         calls.native++;
         calls.nativeActions.push(_payload.action);
+        if (_payload.action === 'add_download') calls.requestIds.push(_payload.requestId);
+        if (holdAddCallback && _payload.action === 'add_download') return;
         queueMicrotask(() => callback(_payload.action === 'get_request_status'
           ? (lookupFound ? { success: true, found: true, taskId: acceptedTaskId,
               sessionId: guiSession } : {success:false,found:false})
@@ -42,12 +44,17 @@ function make({ accepted = true, acceptedTaskId = 47, failJournal = false, confi
     storage: {
       local: {
         async get(key) {
-          const selected = key === 'recentHandoffs'
-            ? { recentHandoffs: local.recentHandoffs } : {};
+          const keys = Array.isArray(key) ? key : [key];
+          const selected = {};
+          for (const name of keys) {
+            if (Object.hasOwn(local, name)) selected[name] = local[name];
+          }
           return { interceptEnabled: intercept, confirmEnabled: confirm, ...selected };
         },
         async set(data) {
           if (failJournal && data.recentHandoffs) throw new Error('storage unavailable');
+          if (failPending && data.pendingAddRequests)
+            throw new Error('pending UUID storage unavailable');
           Object.assign(local, data);
         }
       },
@@ -405,4 +412,51 @@ test('unresolved ACK remains unknown after simulated MV3 worker restart',async()
   const journal=await restarted.message({action:'getRecentHandoffs'});
   assert.equal(journal.items.length,0);
   assert.equal(restarted.calls.nativeActions.filter(x=>x==='add_download').length,0);
+});
+
+test('pending UUID is persisted BEFORE Native Host and recovered after lost callback on worker restart',async()=>{
+  const sharedLocal={};
+  const first=make({confirm:true,holdAddCallback:true,sharedLocal});
+  // Native callback never fires, modelling MV3 worker stop mid-request.
+  void first.submit();
+  for(let i=0;i<30 && !first.calls.nativeActions.includes('add_download');i++)
+    await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(first.calls.nativeActions,['add_download']);
+  assert.equal(sharedLocal.pendingAddRequests.length,1);
+  assert.equal(sharedLocal.pendingAddRequests[0].requestId,first.calls.requestIds[0]);
+  assert.equal(sharedLocal.pendingAddRequests[0].filename,'file.zip');
+  assert.equal(JSON.stringify(sharedLocal.pendingAddRequests).includes('example.test'),false,
+    'Unconfirmed request journal must not persist source URL');
+  const restarted=make({confirm:true,lookupFound:true,sharedLocal});
+  const recovered=await restarted.message({action:'getRecentHandoffs'});
+  assert.equal(recovered.items.length,1,'On-wake read-only query must recover task identity');
+  assert.equal(recovered.items[0].taskId,47);
+  assert.equal(sharedLocal.pendingAddRequests.length,0,'Recovered UUID must leave pending journal');
+  assert.equal(restarted.calls.nativeActions.filter(x=>x==='add_download').length,0);
+  assert.ok(restarted.calls.nativeActions.includes('get_request_status'));
+  assert.deepEqual(restarted.calls.cancel,[],
+    'A restarted worker must NOT cancel an existing browser download');
+});
+test('unresolved pending UUID survives worker restart, with no replay or false success',async()=>{
+  const sharedLocal={};
+  const first=make({confirm:true,holdAddCallback:true,sharedLocal});
+  void first.submit();
+  for(let i=0;i<30 && !first.calls.nativeActions.includes('add_download');i++)
+    await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sharedLocal.pendingAddRequests.length,1);
+  const restarted=make({confirm:true,lookupFound:false,sharedLocal});
+  const status=await restarted.message({action:'getRecentHandoffs'});
+  assert.equal(status.items.length,0);
+  assert.equal(status.unresolved,1);
+  assert.equal(sharedLocal.pendingAddRequests.length,1);
+  assert.ok(restarted.calls.nativeActions.every(x=>x==='get_request_status'));
+  assert.deepEqual(restarted.calls.cancel,[]);
+});
+test('failure to persist UUID blocks irreversible native add',async()=>{
+  const h=make({confirm:true,failPending:true});
+  const result=await h.submit();
+  assert.equal(result.success,false);
+  assert.match(result.message,/未发送到桌面端/);
+  assert.equal(h.calls.nativeActions.includes('add_download'),false);
+  assert.deepEqual(h.calls.cancel,[]);
 });
