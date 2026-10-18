@@ -573,8 +573,59 @@ function checkHostConnection() {
  *        format:  视频画质选择串（yt-dlp -f 选择串，空=最佳画质）
  * @returns {Promise<{success: boolean, message: string}>}
  */
-// Read-only recovery of a possibly accepted add. Never issue a second add
-// for an uncertain response: the original request can already have committed.
+// Persist the request identity BEFORE sending a non-idempotent add. A forced
+// MV3 worker stop can discard all JS callbacks, but chrome.storage.local
+// survives and permits a future READ-ONLY request-status query.
+// No URL, credentials, cookies or full IPC payload are stored here.
+const PENDING_ADD_KEY = 'pendingAddRequests';
+const MAX_PENDING_ADDS = 16;
+let pendingAddWrite = Promise.resolve();
+let pendingRecovery = null;
+
+function changePendingAdds(transform) {
+    const operation = pendingAddWrite.catch(() => {}).then(async () => {
+        const stored = await chrome.storage.local.get(PENDING_ADD_KEY);
+        const existing = Array.isArray(stored[PENDING_ADD_KEY]) ? stored[PENDING_ADD_KEY] : [];
+        const next = transform(existing);
+        // Never evict an unknown request: the desktop task may already exist.
+        // When capacity is exhausted, reject the NEW add before Native Messaging.
+        if (!Array.isArray(next) || next.length > MAX_PENDING_ADDS) {
+            throw new Error('pending request journal full');
+        }
+        await chrome.storage.local.set({ [PENDING_ADD_KEY]: next });
+    });
+    pendingAddWrite = operation.catch(() => {});
+    return operation;
+}
+
+function stagePendingAdd(requestId, url, filename) {
+    const safeName = ((filename || inferFilename(url) || '下载任务').split(/[\\/]/).pop()).slice(0, 180);
+    return changePendingAdds(prior => [
+        ...prior.filter(item => item.requestId !== requestId),
+        { requestId, filename: safeName, at: Date.now() }
+    ]);
+}
+
+function clearPendingAdd(requestId) {
+    return changePendingAdds(prior => prior.filter(item => item.requestId !== requestId));
+}
+
+async function readPendingAdds() {
+    await pendingAddWrite;
+    const stored = await chrome.storage.local.get(PENDING_ADD_KEY);
+    return Array.isArray(stored[PENDING_ADD_KEY]) ? stored[PENDING_ADD_KEY].slice() : [];
+}
+
+function validRecoveredIdentity(response) {
+    return !!(response?.success && response?.found &&
+        Number.isSafeInteger(response.taskId) && response.taskId > 0 &&
+        typeof response.sessionId === 'string' &&
+        /^[a-f0-9-]{32,36}$/i.test(response.sessionId));
+}
+
+// Lookup only. A missing token is NEVER evidence that an add did not commit.
+// A restarted GUI may have lost its in-RAM mapping; leave an unresolved record
+// for user inspection (bounded to 16 records), do not issue another add.
 function lookupOriginalRequest(requestId) {
     return new Promise(resolve => {
         try {
@@ -589,20 +640,30 @@ function lookupOriginalRequest(requestId) {
         }
     });
 }
+
+async function acceptRecoveredIdentity(requestId, response, filename) {
+    if (!validRecoveredIdentity(response)) return false;
+    const tracked = await rememberHandoff({
+        id: null, filename, url: ''
+    }, response.taskId, response.sessionId);
+    if (tracked) {
+        // If cleanup fails, the committed journal is still safe: the next
+        // recovery pass deduplicates by real taskId.
+        await clearPendingAdd(requestId).catch(() => {});
+    }
+    return tracked;
+}
+
 async function reconcileUncertainRequest(requestId, url, filename) {
-    // Bound this to three READ-ONLY queries. "not found" never proves no task.
-    // The GUI may still be doing synchronous history writes or may have restarted.
+    // At most three READ-ONLY queries in the live worker, no add retry.
     for (let i = 0; i < 3; i++) {
         const response = await lookupOriginalRequest(requestId);
-        const taskId = response?.taskId;
-        const sessionId = response?.sessionId;
-        if (response?.success && response?.found &&
-            Number.isSafeInteger(taskId) && taskId > 0 &&
-            typeof sessionId === 'string' && /^[a-f0-9-]{32,36}$/i.test(sessionId)) {
-            const tracked = await rememberHandoff({ id: null, filename, url }, taskId, sessionId);
-            return { success: true, taskId, sessionId, tracked,
-                reconciled: true, message: tracked
-                    ? '已核对原请求，桌面端已创建任务'
+        if (validRecoveredIdentity(response)) {
+            const tracked = await acceptRecoveredIdentity(requestId, response,
+                filename || inferFilename(url));
+            return { success: true, taskId: response.taskId,
+                sessionId: response.sessionId, tracked, reconciled: true,
+                message: tracked ? '已核对原请求，桌面端已创建任务'
                     : '已核对原任务，但扩展无法保存查询记录；请在桌面端检查' };
         }
         if (i < 2) await new Promise(resolve => setTimeout(resolve, 350));
@@ -611,18 +672,46 @@ async function reconcileUncertainRequest(requestId, url, filename) {
         message: '下载请求结果尚无法确认；请在桌面端检查，勿重复提交' };
 }
 
-function sendToIdmNext(url, filename = '', opts = {}) {
+// Called on worker activation and on trusted Popup history reads. Only
+// confirmed request identities may be upgraded to tracked journal entries.
+// Leave unresolved records in local storage for later, manual inspection.
+function recoverPendingHandoffs() {
+    if (pendingRecovery) return pendingRecovery;
+    pendingRecovery = (async () => {
+        const pending = await readPendingAdds();
+        let recovered = 0;
+        for (const item of pending.slice(-MAX_PENDING_ADDS)) {
+            if (typeof item.requestId !== 'string' ||
+                !/^[a-f0-9-]{36}$/i.test(item.requestId)) continue;
+            const result = await lookupOriginalRequest(item.requestId);
+            if (await acceptRecoveredIdentity(item.requestId, result, item.filename || '下载任务'))
+                recovered++;
+        }
+        return recovered;
+    })().catch(err => {
+        console.warn('[IDM Next] 待确认请求只读核对不可用:', String(err));
+        return 0;
+    }).finally(() => { pendingRecovery = null; });
+    return pendingRecovery;
+}
+
+async function sendToIdmNext(url, filename = '', opts = {}) {
+    // Persist BEFORE any irreversible Native Host operation. If the storage
+    // commit fails, do NOT submit the download at all.
+    const requestId = crypto.randomUUID();
+    try {
+        await stagePendingAdd(requestId, url, filename);
+    } catch (error) {
+        const full = error && error.message === 'pending request journal full';
+        return { success: false,
+            message: full
+                ? '有 16 个请求结果尚未确认，请先检查桌面端并在扩展中刷新转交历史；为避免重复，本次未发送'
+                : '无法保存下载请求标识，已保留浏览器原下载，未发送到桌面端' };
+    }
     return new Promise(resolve => {
         try {
-            // UUIDv4 is an unguessable capability for read-only reconciliation.
-            // Generate ONCE per explicit user/automatic add; never reuse for
-            // a second attempt or submit the add again on timeout.
-            const requestId = crypto.randomUUID();
             chrome.runtime.sendNativeMessage(NATIVE_HOST, {
-                action: 'add_download',
-                requestId,
-                url: url,
-                filename: filename,
+                action: 'add_download', requestId, url, filename,
                 saveDir: opts.saveDir || '',
                 queue: opts.queued ? BROWSER_QUEUE : '',
                 format: opts.format || ''
@@ -638,23 +727,36 @@ function sendToIdmNext(url, filename = '', opts = {}) {
                     const sessionId = typeof response.sessionId === 'string' &&
                         /^[a-f0-9-]{32,36}$/i.test(response.sessionId) ? response.sessionId : null;
                     if (!taskId || !sessionId) {
+                        // May be a legacy CLI fallback. Preserve the browser
+                        // original and the pending UUID; no automatic retry.
                         resolve({ success: true, taskId: null, tracked: false,
                             message: '桌面端报告已接收，但没有有效任务身份；浏览器原下载会保留' });
                     } else {
-                        rememberHandoff({ id: null, filename, url }, taskId, sessionId).then(tracked =>
-                            resolve({ success: true, taskId, sessionId, tracked,
-                                message: tracked ? (response.message || '已添加到 IDM Next')
-                                    : '任务已接收，但扩展无法保存查询记录；请在桌面端查看' }));
+                        const tracked = await acceptRecoveredIdentity(requestId,
+                            { success: true, found: true, taskId, sessionId },
+                            filename || inferFilename(url));
+                        resolve({ success: true, taskId, sessionId, tracked,
+                            message: tracked ? (response.message || '已添加到 IDM Next')
+                                : '任务已接收，但扩展无法保存查询记录；请在桌面端查看' });
                     }
                 } else {
-                    resolve({ success: false, message: (response && response.message) || 'IDM Next 未响应' });
+                    // A definitive native rejection is not an unknown ACK.
+                    await clearPendingAdd(requestId).catch(() => {});
+                    resolve({ success: false,
+                        message: (response && response.message) || 'IDM Next 未响应' });
                 }
             });
         } catch (e) {
-            resolve({ success: false, message: String(e) });
+            // Local messaging failure may follow a native side effect.
+            // Query the same original token; NEVER send add_download again.
+            reconcileUncertainRequest(requestId, url, filename).then(resolve);
         }
     });
 }
+
+// Wake with a READ-ONLY check; a killed worker might have missed the entire
+// native callback. This is intentionally not a dispatch/replay queue.
+void recoverPendingHandoffs();
 
 /**
  * 批量发送下载请求
@@ -785,10 +887,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!trustedPopupSender(sender)) {
             sendResponse({ success: false, items: [] }); return false;
         }
-        chrome.storage.local.get('recentHandoffs').then(data =>
-            sendResponse({ success: true,
-                items: Array.isArray(data.recentHandoffs) ? data.recentHandoffs.slice(0, 5) : [] })
-        ).catch(e => sendResponse({ success: false, items: [], message: String(e) }));
+        recoverPendingHandoffs().then(() =>
+            chrome.storage.local.get(['recentHandoffs', PENDING_ADD_KEY])
+        ).then(data => sendResponse({
+            success: true,
+            items: Array.isArray(data.recentHandoffs) ? data.recentHandoffs.slice(0, 5) : [],
+            unresolved: Array.isArray(data[PENDING_ADD_KEY]) ? data[PENDING_ADD_KEY].length : 0
+        })).catch(e => sendResponse({
+            success: false, items: [], message: String(e)
+        }));
         return true;
     }
     if (msg.action === 'getHandoffStatus') {

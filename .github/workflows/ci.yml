@@ -4,7 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    # Test extension changes as a stacked Draft PR on the current MV3 base.
+    branches: [master, feat/idm-next-pending-uuid-mv3-recovery-20261011]
   workflow_dispatch:
 
 jobs:
@@ -36,6 +37,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Browser handoff Node tests failed' }
           node --test tools/browser_e2e/popup_single_handoff.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Single Popup handoff Node tests failed' }
+          node --test tools/browser_e2e/popup_pending_notice.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Pending handoff Popup UX Node tests failed' }
           node --test tools/browser_e2e/resource_backfill.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Resource discovery Node tests failed' }
 
@@ -662,6 +665,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Request lifecycle fixture syntax failed' }
           node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --request-lifecycle
           if ($LASTEXITCODE -ne 0) { throw 'Request UUID lifecycle or session invalidation failed' }
+
+      - name: Real MV3 worker stopped mid Native add - persisted UUID recovery
+        shell: pwsh
+        env:
+          IDM_IPC_TIMING_TRACE: '1'
+        run: |
+          # Real Edge CDP ServiceWorker.stopWorker while packaged GUI is still
+          # blocked in 4200ms test-only SQLite history insert delay.
+          # The only recovery calls are read-only UUID lookups; never replay add.
+          node --check tools/browser_e2e/browser_hls_popup_e2e.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'MV3 midflight test syntax failed' }
+          node tools/browser_e2e/browser_hls_popup_e2e.cjs --dist installer/dist --mv3-midflight
+          if ($LASTEXITCODE -ne 0) { throw 'Real midflight MV3 shutdown/recovery failed' }
 
       - name: Verify package outputs
         shell: pwsh
