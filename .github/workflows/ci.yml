@@ -36,6 +36,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Browser handoff Node tests failed' }
           node --test tools/browser_e2e/popup_single_handoff.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Single Popup handoff Node tests failed' }
+          node --test tools/browser_e2e/popup_pending_notice.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Pending handoff Popup UX Node tests failed' }
           node --test tools/browser_e2e/resource_backfill.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Resource discovery Node tests failed' }
 
