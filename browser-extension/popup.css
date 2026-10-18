@@ -454,6 +454,17 @@ svg.i {
 .browser-captures-head { display: flex; align-items: center; justify-content: space-between; }
 .browser-captures-head strong { font-size: 12px; }
 .browser-captures p { color: var(--text-2); font-size: 10px; margin-bottom: 5px; }
+/* Uncertain Native ACK is not failure or success: keep a visible, calm warning. */
+.browser-captures .pending-handoffs-notice {
+    padding: 7px 8px;
+    margin: 6px 0;
+    color: var(--text);
+    border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--warn) 9%, var(--bg));
+    line-height: 1.5;
+}
+.browser-captures .pending-handoffs-notice[hidden] { display: none; }
 .browser-capture-row {
     display: flex; align-items: center; gap: 6px;
     border-top: 1px solid var(--border); padding: 5px 0;
