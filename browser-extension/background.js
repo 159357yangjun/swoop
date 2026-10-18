@@ -701,9 +701,12 @@ async function sendToIdmNext(url, filename = '', opts = {}) {
     const requestId = crypto.randomUUID();
     try {
         await stagePendingAdd(requestId, url, filename);
-    } catch (_) {
+    } catch (error) {
+        const full = error && error.message === 'pending request journal full';
         return { success: false,
-            message: '无法保存下载请求标识，已保留浏览器原下载，未发送到桌面端' };
+            message: full
+                ? '有 16 个请求结果尚未确认，请先检查桌面端并在扩展中刷新转交历史；为避免重复，本次未发送'
+                : '无法保存下载请求标识，已保留浏览器原下载，未发送到桌面端' };
     }
     return new Promise(resolve => {
         try {
