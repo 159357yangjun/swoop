@@ -586,7 +586,12 @@ function changePendingAdds(transform) {
     const operation = pendingAddWrite.catch(() => {}).then(async () => {
         const stored = await chrome.storage.local.get(PENDING_ADD_KEY);
         const existing = Array.isArray(stored[PENDING_ADD_KEY]) ? stored[PENDING_ADD_KEY] : [];
-        const next = transform(existing).slice(-MAX_PENDING_ADDS);
+        const next = transform(existing);
+        // Never evict an unknown request: the desktop task may already exist.
+        // When capacity is exhausted, reject the NEW add before Native Messaging.
+        if (!Array.isArray(next) || next.length > MAX_PENDING_ADDS) {
+            throw new Error('pending request journal full');
+        }
         await chrome.storage.local.set({ [PENDING_ADD_KEY]: next });
     });
     pendingAddWrite = operation.catch(() => {});
