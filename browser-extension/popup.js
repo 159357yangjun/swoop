@@ -645,7 +645,14 @@ function loadRecentHandoffs() {
         const list = $('recentHandoffsList');
         list.textContent = '';
         const records = resp && resp.success && Array.isArray(resp.items) ? resp.items : [];
-        section.hidden = records.length === 0;
+        const unresolved = resp && resp.success && Number.isSafeInteger(resp.unresolved)
+            ? Math.max(0, resp.unresolved) : 0;
+        const pendingNotice = $('pendingHandoffsNotice');
+        pendingNotice.hidden = unresolved === 0;
+        pendingNotice.textContent = unresolved > 0
+            ? `有 ${unresolved} 个下载请求结果待确认。可能已在桌面端创建，请勿重复提交。点击“刷新转交历史”仅查询原请求，不会重新下载。`
+            : '';
+        section.hidden = records.length === 0 && unresolved === 0;
         records.forEach(record => {
             if (!Number.isSafeInteger(record.taskId) || record.taskId <= 0) return;
             const row = document.createElement('div');

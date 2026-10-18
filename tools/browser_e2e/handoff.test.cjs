@@ -460,3 +460,26 @@ test('failure to persist UUID blocks irreversible native add',async()=>{
   assert.equal(h.calls.nativeActions.includes('add_download'),false);
   assert.deepEqual(h.calls.cancel,[]);
 });
+
+// Capacity guard must prefer a visible failure over losing an UNKNOWN request
+// whose side effect could have committed in the desktop GUI.
+test('full pending UUID journal rejects a new add without evicting unknown IDs',async()=>{
+  const before=Array.from({length:16},(_,i)=>({
+    requestId:'44444444-4444-4444-8444-'+i.toString(16).padStart(12,'0'),
+    filename:'pending-'+i+'.zip',at:12345
+  }));
+  const sharedLocal={pendingAddRequests:before.map(x=>({...x}))};
+  const h=make({confirm:true,lookupFound:false,sharedLocal});
+  const response=await h.submit();
+  assert.equal(response.success,false);
+  assert.match(response.message,/16 个请求结果尚未确认/);
+  assert.equal(h.calls.nativeActions.includes('add_download'),false);
+  assert.deepEqual(sharedLocal.pendingAddRequests,before,
+    'Unknown request UUIDs must NEVER be silently evicted to make space');
+  assert.deepEqual(h.calls.cancel,[]);
+  const after=await h.message({action:'getRecentHandoffs'});
+  assert.equal(after.unresolved,16);
+  assert.equal(after.items.length,0);
+  assert.equal(h.calls.nativeActions.includes('add_download'),false,
+    'Refreshing status is strictly read-only');
+});

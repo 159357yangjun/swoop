@@ -586,7 +586,12 @@ function changePendingAdds(transform) {
     const operation = pendingAddWrite.catch(() => {}).then(async () => {
         const stored = await chrome.storage.local.get(PENDING_ADD_KEY);
         const existing = Array.isArray(stored[PENDING_ADD_KEY]) ? stored[PENDING_ADD_KEY] : [];
-        const next = transform(existing).slice(-MAX_PENDING_ADDS);
+        const next = transform(existing);
+        // Never evict an unknown request: the desktop task may already exist.
+        // When capacity is exhausted, reject the NEW add before Native Messaging.
+        if (!Array.isArray(next) || next.length > MAX_PENDING_ADDS) {
+            throw new Error('pending request journal full');
+        }
         await chrome.storage.local.set({ [PENDING_ADD_KEY]: next });
     });
     pendingAddWrite = operation.catch(() => {});
@@ -696,9 +701,12 @@ async function sendToIdmNext(url, filename = '', opts = {}) {
     const requestId = crypto.randomUUID();
     try {
         await stagePendingAdd(requestId, url, filename);
-    } catch (_) {
+    } catch (error) {
+        const full = error && error.message === 'pending request journal full';
         return { success: false,
-            message: '无法保存下载请求标识，已保留浏览器原下载，未发送到桌面端' };
+            message: full
+                ? '有 16 个请求结果尚未确认，请先检查桌面端并在扩展中刷新转交历史；为避免重复，本次未发送'
+                : '无法保存下载请求标识，已保留浏览器原下载，未发送到桌面端' };
     }
     return new Promise(resolve => {
         try {
