@@ -1,0 +1,42 @@
+name: IDM Next TaskUI design contract
+on:
+  push:
+    branches: [feat/idm-next-taskui-g0g1-20261019]
+  pull_request:
+    branches: [master, feat/idm-next-pending-uuid-mv3-recovery-20261011]
+    paths:
+      - 'TaskUI/**'
+      - 'docs/taskui/**'
+      - 'AGENTS.md'
+      - '.github/workflows/taskui-design.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Original TaskUI v1.0.0 source integrity
+        run: |
+          test "$(find TaskUI -type f | wc -l | tr -d ' ')" -eq 29
+          sha256sum -c docs/taskui/SHA256SUMS
+      - name: Upstream checker unit tests
+        run: python -m unittest discover -s TaskUI/tests -v
+      - name: Upstream positive control
+        run: python TaskUI/tools/taskui_check.py TaskUI/examples/good.project.taskui.json --strict
+      - name: Upstream negative control rejects bad manifest
+        shell: bash
+        run: |
+          set +e
+          python TaskUI/tools/taskui_check.py TaskUI/examples/bad.project.taskui.json --strict
+          rc=$?
+          set -e
+          test "$rc" -eq 1
+      - name: IDM Next real project G1 manifest
+        run: python TaskUI/tools/taskui_check.py docs/taskui/project.taskui.json --strict
