@@ -1,0 +1,634 @@
+{
+  "$schema": "../../TaskUI/schemas/project.schema.json",
+  "version": "1.0",
+  "project": {
+    "name": "IDM Next · Qt6 Windows + Chrome/Edge MV3",
+    "primary_user": "通过浏览器发现资源、通过 Windows 客户端管理下载的普通与专业用户",
+    "platform": "desktop",
+    "patterns": [
+      "object-management",
+      "guided-wizard"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T-D1",
+      "name": "在桌面端创建下载任务",
+      "frequency": "high",
+      "success_criterion": "桌面任务列表出现可查询的新任务，失败显示明确原因",
+      "step_budget": 1,
+      "steps": [
+        "A-create-task"
+      ]
+    },
+    {
+      "id": "T-D2",
+      "name": "定位并暂停或继续指定任务",
+      "frequency": "high",
+      "success_criterion": "选中任务状态准确变化，不改变其他任务",
+      "step_budget": 3,
+      "steps": [
+        "A-filter-category",
+        "A-select-task",
+        "A-control-task"
+      ]
+    },
+    {
+      "id": "T-D3",
+      "name": "查明桌面下载失败原因",
+      "frequency": "medium",
+      "success_criterion": "用户能在同一任务上下文找到错误及下一步动作",
+      "step_budget": 3,
+      "steps": [
+        "A-select-task",
+        "A-open-detail",
+        "A-read-error"
+      ]
+    },
+    {
+      "id": "T-P1",
+      "name": "在网页中发现并提交单个资源",
+      "frequency": "high",
+      "success_criterion": "用户能区分资源发现、桌面已接收、任务已完成三种不同状态",
+      "step_budget": 3,
+      "steps": [
+        "A-filter-resources",
+        "A-select-resource",
+        "A-submit-resource"
+      ]
+    },
+    {
+      "id": "T-P2",
+      "name": "批量提交同页多个文件",
+      "frequency": "medium",
+      "success_criterion": "明确选择数量和处理结果，失败时不会静默重投",
+      "step_budget": 3,
+      "steps": [
+        "A-filter-resources",
+        "A-select-many",
+        "A-submit-batch"
+      ]
+    },
+    {
+      "id": "T-P3",
+      "name": "诊断扩展无法连接桌面端",
+      "frequency": "medium",
+      "success_criterion": "根据可核查结果定位到启动状态、Native Host 或未知问题，用户获得可执行步骤",
+      "step_budget": 2,
+      "steps": [
+        "A-check-connection",
+        "A-open-diagnostics"
+      ]
+    },
+    {
+      "id": "T-P4",
+      "name": "核对结果未知的转交请求",
+      "frequency": "low",
+      "success_criterion": "看到真实待确认数量；只读刷新后不重发下载任务",
+      "step_budget": 1,
+      "steps": [
+        "A-refresh-handoff"
+      ]
+    },
+    {
+      "id": "T-P5",
+      "name": "批量下载部分接收时识别结果与安全后续操作",
+      "frequency": "medium",
+      "success_criterion": "用户看出“部分已接收/部分失败/具体对象未知”并且不会误将前N个资源标记为成功、不会盲目重发",
+      "step_budget": 2,
+      "steps": [
+        "A-submit-batch",
+        "A-review-batch-result"
+      ]
+    }
+  ],
+  "screens": [
+    {
+      "id": "S-desktop",
+      "name": "Windows 下载管理工作台（目标结构）",
+      "primary_region": "R-desktop-list",
+      "main_region_min_ratio": 0.63,
+      "regions": [
+        {
+          "id": "R-desktop-nav",
+          "role": "navigation",
+          "persistent": true
+        },
+        {
+          "id": "R-desktop-list",
+          "role": "primary",
+          "persistent": true
+        },
+        {
+          "id": "R-desktop-tools",
+          "role": "toolbar",
+          "persistent": true
+        },
+        {
+          "id": "R-desktop-status",
+          "role": "status",
+          "persistent": true
+        },
+        {
+          "id": "R-desktop-detail",
+          "role": "inspector",
+          "persistent": false
+        }
+      ]
+    },
+    {
+      "id": "S-popup",
+      "name": "Chrome/Edge 资源发现 Popup（目标结构）",
+      "primary_region": "R-popup-resources",
+      "main_region_min_ratio": 0.58,
+      "regions": [
+        {
+          "id": "R-popup-status",
+          "role": "status",
+          "persistent": true
+        },
+        {
+          "id": "R-popup-filters",
+          "role": "filter",
+          "persistent": true
+        },
+        {
+          "id": "R-popup-resources",
+          "role": "primary",
+          "persistent": true
+        },
+        {
+          "id": "R-popup-batch",
+          "role": "toolbar",
+          "persistent": true
+        },
+        {
+          "id": "R-popup-handoff",
+          "role": "secondary",
+          "persistent": false
+        }
+      ]
+    },
+    {
+      "id": "S-diagnostics",
+      "name": "嵌入式连接诊断向导（G2 待实现）",
+      "primary_region": "R-diag-steps",
+      "main_region_min_ratio": 0.7,
+      "regions": [
+        {
+          "id": "R-diag-steps",
+          "role": "primary",
+          "persistent": true
+        },
+        {
+          "id": "R-diag-status",
+          "role": "status",
+          "persistent": true
+        },
+        {
+          "id": "R-diag-actions",
+          "role": "toolbar",
+          "persistent": true
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "id": "A-create-task",
+      "name": "新建下载任务",
+      "scope": "global",
+      "frequency": "high",
+      "risk": "medium",
+      "effect": "mutate",
+      "recovery": "cancel",
+      "task_ids": [
+        "T-D1"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-tools",
+          "surface": "toolbar",
+          "menu_depth": 0,
+          "context": "工作台新建任务"
+        },
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-tools",
+          "surface": "shortcut",
+          "menu_depth": 0,
+          "context": "Ctrl+N（既有行为）"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "unknown"
+      ]
+    },
+    {
+      "id": "A-filter-category",
+      "name": "切换任务状态或分类",
+      "scope": "workspace",
+      "frequency": "high",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-D2"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-nav",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "选中分类树节点"
+        }
+      ],
+      "feedback": [
+        "selection",
+        "empty-results"
+      ]
+    },
+    {
+      "id": "A-select-task",
+      "name": "选择下载任务",
+      "scope": "object",
+      "frequency": "high",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-D2",
+        "T-D3"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-list",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "任务列表中当前可见行"
+        }
+      ],
+      "feedback": [
+        "selection"
+      ]
+    },
+    {
+      "id": "A-control-task",
+      "name": "暂停或继续当前任务",
+      "scope": "object",
+      "frequency": "medium",
+      "risk": "medium",
+      "effect": "mutate",
+      "recovery": "retry",
+      "task_ids": [
+        "T-D2"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-list",
+          "surface": "context-menu",
+          "menu_depth": 0,
+          "context": "已选中可执行该操作的任务"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "disabled"
+      ]
+    },
+    {
+      "id": "A-open-detail",
+      "name": "查看任务详情",
+      "scope": "object",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-D3"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-list",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "双击具体任务行"
+        }
+      ],
+      "feedback": [
+        "success",
+        "failure"
+      ]
+    },
+    {
+      "id": "A-read-error",
+      "name": "读取任务失败信息",
+      "scope": "object",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-D3"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-desktop",
+          "region_id": "R-desktop-detail",
+          "surface": "inspector",
+          "menu_depth": 0,
+          "context": "在当前任务详情中查看错误及解决方向"
+        }
+      ],
+      "feedback": [
+        "success",
+        "empty-results"
+      ]
+    },
+    {
+      "id": "A-filter-resources",
+      "name": "按类型或关键字筛选资源",
+      "scope": "workspace",
+      "frequency": "high",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P1",
+        "T-P2"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-filters",
+          "surface": "toolbar",
+          "menu_depth": 0,
+          "context": "当前网页资源列表"
+        },
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-filters",
+          "surface": "shortcut",
+          "menu_depth": 0,
+          "context": "既有 / 搜索快捷键"
+        }
+      ],
+      "feedback": [
+        "filtered-results",
+        "empty-results"
+      ]
+    },
+    {
+      "id": "A-select-resource",
+      "name": "选择一个资源",
+      "scope": "object",
+      "frequency": "high",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P1"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-resources",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "目标资源行复选框"
+        }
+      ],
+      "feedback": [
+        "selection"
+      ]
+    },
+    {
+      "id": "A-submit-resource",
+      "name": "提交单个资源下载",
+      "scope": "object",
+      "frequency": "high",
+      "risk": "medium",
+      "effect": "mutate",
+      "recovery": "cancel",
+      "task_ids": [
+        "T-P1"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-resources",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "当前资源行操作区"
+        },
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-resources",
+          "surface": "shortcut",
+          "menu_depth": 0,
+          "context": "G2 目标：焦点位于资源行时 Enter；尚未实现"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "unknown"
+      ]
+    },
+    {
+      "id": "A-select-many",
+      "name": "选中多个资源",
+      "scope": "object",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P2"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-resources",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "当前筛选集合内选择资源"
+        }
+      ],
+      "feedback": [
+        "selection",
+        "empty-results"
+      ]
+    },
+    {
+      "id": "A-submit-batch",
+      "name": "提交已选资源",
+      "scope": "workspace",
+      "frequency": "medium",
+      "risk": "medium",
+      "effect": "mutate",
+      "recovery": "cancel",
+      "task_ids": [
+        "T-P2",
+        "T-P5"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-batch",
+          "surface": "toolbar",
+          "menu_depth": 0,
+          "context": "已经选中至少一个资源"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "unknown"
+      ]
+    },
+    {
+      "id": "A-check-connection",
+      "name": "检查桌面端连接",
+      "scope": "workspace",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "retry",
+      "task_ids": [
+        "T-P3"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-status",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "连接状态处发现断连；既有设置中可重新检测"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "unknown"
+      ]
+    },
+    {
+      "id": "A-open-diagnostics",
+      "name": "逐步排查 Native Host 连接",
+      "scope": "workspace",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P3"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-diagnostics",
+          "region_id": "R-diag-steps",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "G2 待实现：从断连提示进入同一 Popup 内诊断面板"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "unknown"
+      ]
+    },
+    {
+      "id": "A-refresh-handoff",
+      "name": "只读核对原下载请求状态",
+      "scope": "workspace",
+      "frequency": "low",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P4"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-handoff",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "出现最近转交记录或未确认提示后手动刷新"
+        }
+      ],
+      "feedback": [
+        "loading",
+        "success",
+        "failure",
+        "unknown"
+      ]
+    },
+    {
+      "id": "A-review-batch-result",
+      "name": "核对批量提交结果摘要（新设计，G2待实现）",
+      "scope": "workspace",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P5"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-batch",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "批量提交返回成功/失败汇总或身份未知后可查看；新设计未实现"
+        }
+      ],
+      "feedback": [
+        "success",
+        "failure",
+        "unknown",
+        "partial"
+      ]
+    }
+  ],
+  "design_evidence": {
+    "wireframe": "UI-01-WIREFRAME.md",
+    "task_walkthrough": "UI-01-TASK-WALKTHROUGH.md",
+    "decision_log": "UI-01-DECISIONS.md"
+  },
+  "test_plan": {
+    "viewport_sizes": [
+      "Windows 1366×768（100% DPI）",
+      "Windows 1920×1080（125% / 150% DPI）",
+      "Chrome/Edge Popup 400×560（含窄窗口缩放）"
+    ],
+    "covered_tasks": [
+      "T-D1",
+      "T-D2",
+      "T-D3",
+      "T-P1",
+      "T-P2",
+      "T-P3",
+      "T-P4",
+      "T-P5"
+    ],
+    "status": "planned"
+  }
+}
