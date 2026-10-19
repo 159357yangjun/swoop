@@ -9,6 +9,7 @@
 | T-P1 单文件 | 当前页有可下载的公开文件 | A-filter-resources→A-select-resource→A-submit-resource | UI 分辨“资源发现/被桌面接收/最终完成” | Native Host 拒绝或 ACK 未知不误报成功 | **未测试** |
 | T-P2 多文件 | 当前页≥3个不同资源 | A-filter-resources→A-select-many→A-submit-batch | 数量与桌面接收结果对应 | 部分失败不静默重试 | **未测试** |
 | T-P3 断连 | Windows GUI 停止/Native Host 未注册 | A-check-connection→A-open-diagnostics | 清楚指出可验证原因和手动修复方式 | 只读检查；可返回资源 | **未测试；诊断页 G2 待实现** |
+| T-P5 部分成功 | 批量3个文件，桌面仅接收其中2个，返回仅含 success/failed 聚合结果 | A-submit-batch→A-review-batch-result | 显示“部分接收/具体对象未知”，不把前2项标为成功 | 保留用户选择上下文；不盲目重试 | **未测试；结果 UI G2 待实现** |
 | T-P4 未确认 | MV3 请求已发送但 ACK 丢失 | A-refresh-handoff | 展示未知数与原请求结果 | 没有额外 add_download；旧 UUID 不丢失 | **未测试（实机 UI）** |
 
 ## G3 数据收集标准

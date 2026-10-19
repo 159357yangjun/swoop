@@ -89,6 +89,17 @@
       "steps": [
         "A-refresh-handoff"
       ]
+    },
+    {
+      "id": "T-P5",
+      "name": "批量下载部分接收时识别结果与安全后续操作",
+      "frequency": "medium",
+      "success_criterion": "用户看出“部分已接收/部分失败/具体对象未知”并且不会误将前N个资源标记为成功、不会盲目重发",
+      "step_budget": 2,
+      "steps": [
+        "A-submit-batch",
+        "A-review-batch-result"
+      ]
     }
   ],
   "screens": [
@@ -469,7 +480,8 @@
       "effect": "mutate",
       "recovery": "cancel",
       "task_ids": [
-        "T-P2"
+        "T-P2",
+        "T-P5"
       ],
       "entrypoints": [
         {
@@ -567,6 +579,33 @@
         "failure",
         "unknown"
       ]
+    },
+    {
+      "id": "A-review-batch-result",
+      "name": "核对批量提交结果摘要（新设计，G2待实现）",
+      "scope": "workspace",
+      "frequency": "medium",
+      "risk": "low",
+      "effect": "read",
+      "recovery": "not-needed",
+      "task_ids": [
+        "T-P5"
+      ],
+      "entrypoints": [
+        {
+          "screen_id": "S-popup",
+          "region_id": "R-popup-batch",
+          "surface": "inline",
+          "menu_depth": 0,
+          "context": "批量提交返回成功/失败汇总或身份未知后可查看；新设计未实现"
+        }
+      ],
+      "feedback": [
+        "success",
+        "failure",
+        "unknown",
+        "partial"
+      ]
     }
   ],
   "design_evidence": {
@@ -587,7 +626,8 @@
       "T-P1",
       "T-P2",
       "T-P3",
-      "T-P4"
+      "T-P4",
+      "T-P5"
     ],
     "status": "planned"
   }
